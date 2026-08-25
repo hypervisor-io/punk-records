@@ -1,0 +1,29 @@
+[
+  {
+    "alertname": "HighErrorRate",
+    "severity": "critical",
+    "service": "web-frontend",
+    "namespace": "shop",
+    "value": "17% 5xx",
+    "startsAt": "2026-07-07T14:05:00Z",
+    "summary": "web-frontend 5xx rate above 15% for 3m"
+  },
+  {
+    "alertname": "RequestLatencyHigh",
+    "severity": "warning",
+    "service": "cart-service",
+    "namespace": "shop",
+    "value": "p99 4.1s",
+    "startsAt": "2026-07-07T14:04:30Z",
+    "summary": "cart-service p99 latency above 2s"
+  },
+  {
+    "alertname": "DBConnectionsSaturated",
+    "severity": "critical",
+    "service": "checkout-service",
+    "namespace": "shop",
+    "value": "pool 50/50",
+    "startsAt": "2026-07-07T14:03:00Z",
+    "summary": "checkout-service database connection pool at 100% utilization"
+  }
+]

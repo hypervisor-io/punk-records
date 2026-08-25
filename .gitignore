@@ -1,0 +1,19 @@
+bin/
+*.db
+
+# Internal working material: planning, research, gap analysis, evaluation
+# notes, and the agent tooling used to build this. Not part of the product
+# and not published.
+docs/superpowers/
+docs/PLAN.md
+docs/DESIGN.md
+docs/RESEARCH.md
+docs/GAPS2.md
+docs/GOAL.md
+docs/EVALS.md
+docs/ITBENCH.md
+docs/DEMO.md
+docs/BRAIN_MODEL.md
+.claude/
+CLAUDE.md
+specs/examples/

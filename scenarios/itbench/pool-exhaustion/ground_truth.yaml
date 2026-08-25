@@ -1,0 +1,9 @@
+# Ground truth for the pool-exhaustion SRE scenario. The scored answer is
+# the faulty entity the agent must identify from the observability data.
+faulty_entities:
+  - checkout-service
+fault_type: connection_pool_exhaustion
+description: >-
+  checkout-service exhausted its database connection pool after the 14:02
+  deploy raised max concurrency without raising pool size; downstream
+  cart-service and web-frontend error as victims.

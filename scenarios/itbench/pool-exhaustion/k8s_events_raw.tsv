@@ -1,0 +1,5 @@
+time	namespace	object	reason	message
+2026-07-07T14:02:10Z	shop	deployment/checkout-service	ScalingReplicaSet	Scaled up rollout for image checkout:1.9.0
+2026-07-07T14:02:40Z	shop	pod/checkout-service-7c9f-abcde	Started	Started container checkout
+2026-07-07T14:04:12Z	shop	pod/checkout-service-7c9f-abcde	Unhealthy	Readiness probe failed: HTTP 503 db pool timeout
+2026-07-07T14:05:02Z	shop	pod/cart-service-55d8-ppppp	Unhealthy	Readiness probe failed: upstream checkout-service 503

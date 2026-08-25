@@ -1,0 +1,17 @@
+# HELP db_pool_in_use Database connections currently checked out
+# TYPE db_pool_in_use gauge
+db_pool_in_use{service="checkout-service",pool="orders-db"} 50
+db_pool_in_use{service="cart-service",pool="cart-db"} 8
+db_pool_max{service="checkout-service",pool="orders-db"} 50
+db_pool_wait_seconds{service="checkout-service",pool="orders-db"} 3.9
+# HELP http_requests_5xx_total 5xx responses
+# TYPE http_requests_5xx_total counter
+http_requests_5xx_total{service="web-frontend"} 1420
+http_requests_5xx_total{service="cart-service"} 810
+http_requests_5xx_total{service="checkout-service"} 2650
+# HELP request_duration_p99_seconds p99 latency
+# TYPE request_duration_p99_seconds gauge
+request_duration_p99_seconds{service="checkout-service"} 5.8
+request_duration_p99_seconds{service="cart-service"} 4.1
+request_duration_p99_seconds{service="web-frontend"} 4.4
+app_max_concurrency{service="checkout-service"} 200

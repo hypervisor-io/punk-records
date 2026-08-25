@@ -1,0 +1,6 @@
+trace_id	span	service	duration_ms	status	detail
+t-9001	POST /checkout	web-frontend	5210	ERROR	child cart-service span errored
+t-9001	POST /cart/add	cart-service	5010	ERROR	child checkout-service span errored
+t-9001	POST /reserve	checkout-service	5000	ERROR	span event: pool_wait 3900ms then timeout orders-db
+t-9002	GET /health	checkout-service	3001	ERROR	db pool acquire timeout
+t-9003	SELECT orders	orders-db	12	OK	query fast; server not saturated

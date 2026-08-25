@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS service_edges;
+DROP TABLE IF EXISTS services;

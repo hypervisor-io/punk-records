@@ -1,0 +1,1155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Punk Records - the shared brain for AI agents</title>
+<meta name="description" content="Punk Records is a self-hosted, single-binary shared brain for AI agents: append-only memory partitioned into regions that agents register to and coordinate through over MCP. Conflict-free concurrent writes, bi-temporal recall, work-claim leases, git branch/merge, and persistent memory for coding agents and assistants.">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   PUNK RECORDS - modern dark. One accent. Motion with intent.
+   Easing: strong ease-out for everything entering or reacting.
+   Radius system: 10px surfaces, 8px controls. Dark-only.
+   ============================================================ */
+:root{
+  --bg:#0a0a0b;
+  --surface:#101013;
+  --surface2:#141418;
+  --line:#1f1f24;
+  --line2:#2c2c33;
+  --ink:#ededf0;
+  --dim:#9b9ba4;
+  --faint:#6e6e78;
+  --pink:#fb3d78;
+  --pink-soft:#ff7ab0;
+  --glow:rgba(251,61,120,.14);
+  --r:10px;
+  --rs:8px;
+  --ease:cubic-bezier(.23,1,.32,1);
+  --sans:'Geist',system-ui,sans-serif;
+  --mono:'Geist Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+::selection{background:var(--pink);color:#0a0a0b}
+a{color:var(--ink);text-decoration:none}
+p a,li a,.lede a{color:var(--pink-soft);text-decoration:underline;text-underline-offset:3px;
+  text-decoration-color:rgba(255,122,176,.35);transition:text-decoration-color .18s var(--ease)}
+p a:hover,li a:hover{text-decoration-color:var(--pink-soft)}
+code{font-family:var(--mono);font-size:.86em;background:var(--surface2);
+  border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--ink)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+.skip{position:absolute;left:-9999px;top:0;background:var(--pink);color:#0a0a0b;
+  padding:10px 16px;z-index:99;border-radius:var(--rs);font-weight:600}
+.skip:focus{left:12px;top:12px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--pink);outline-offset:3px;border-radius:6px}
+
+/* ---- scroll reveal (JS adds .in; gated behind .js so no-JS never hides content) ---- */
+.js .rv{opacity:0;transform:translateY(16px);
+  transition:opacity .65s var(--ease),transform .65s var(--ease)}
+.js .rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion: reduce){
+  .js .rv{transform:none;transition:opacity .3s ease}
+}
+
+/* ---- nav ---- */
+.navbar{position:sticky;top:0;z-index:50;background:rgba(10,10,11,.72);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line)}
+.navbar .row{display:flex;align-items:center;gap:12px 28px;height:64px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;
+  letter-spacing:.01em}
+.logo .dot{width:10px;height:10px;border-radius:50%;background:var(--pink);
+  box-shadow:0 0 12px var(--pink)}
+.navbar .links{margin-left:auto;display:flex;gap:4px;flex-wrap:wrap}
+.navbar .links a{color:var(--dim);font-size:14px;font-weight:500;padding:7px 12px;
+  border-radius:var(--rs);transition:color .18s var(--ease),background .18s var(--ease)}
+.navbar .links a:hover{color:var(--ink);background:var(--surface2)}
+.navbar .links a.nav-cta{margin-left:6px;font-size:14px;font-weight:600;
+  color:#0a0a0b;background:var(--ink);padding:8px 15px;border-radius:var(--rs);
+  transition:transform .16s var(--ease),background .18s var(--ease)}
+.navbar .links a.nav-cta:hover{background:#fff;color:#0a0a0b}
+.navbar .links a.nav-cta:active{transform:scale(.97)}
+@media (max-width:760px){.navbar .links a:not(.nav-cta){display:none}}
+
+/* ---- hero: the banner is the background; copy sits on its dark left half ---- */
+.hero{position:relative;overflow:hidden;display:flex;align-items:center;
+  min-height:min(640px,80vh)}
+.hero-bg{position:absolute;inset:0;z-index:0}
+.hero-bg img{width:100%;height:100%;object-fit:contain;object-position:right 50%;display:block}
+.hero-bg::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,var(--bg) 0%,rgba(10,10,11,.9) 38%,rgba(10,10,11,.25) 60%,rgba(10,10,11,0) 74%),
+             linear-gradient(0deg,var(--bg) 0%,rgba(10,10,11,0) 18%)}
+@media (max-width:860px){
+  .hero-bg img{object-fit:cover;object-position:62% 50%}
+}
+.hero .wrap{position:relative;z-index:1;width:100%;padding-top:56px;padding-bottom:56px}
+h1{font-size:clamp(38px,5vw,64px);font-weight:600;line-height:1.05;
+  letter-spacing:-0.03em;text-wrap:balance;max-width:11em}
+h1 em{font-style:normal;color:var(--pink)}
+.hero .sub{color:var(--dim);font-size:18px;max-width:31em;margin:22px 0 0;text-wrap:pretty}
+.hero .sub b{color:var(--ink);font-weight:500}
+.cta{margin-top:34px;display:flex;gap:14px;flex-wrap:wrap}
+.btn{display:inline-block;font-size:15px;font-weight:600;padding:12px 22px;
+  border-radius:var(--rs);border:1px solid transparent;
+  transition:transform .16s var(--ease),background .18s var(--ease),
+             border-color .18s var(--ease),box-shadow .25s var(--ease)}
+.btn:active{transform:scale(.97)}
+.btn-pink{background:var(--pink);color:#0a0a0b;box-shadow:0 0 0 0 rgba(251,61,120,0)}
+.btn-pink:hover{box-shadow:0 8px 32px -8px rgba(251,61,120,.55)}
+.btn-ghost{color:var(--ink);border-color:var(--line2);background:transparent}
+.btn-ghost:hover{border-color:#3d3d46;background:var(--surface2)}
+/* one-line install: the shortest path from reading to running */
+.installer{margin-top:26px;max-width:min(760px,100%)}
+.installer-row{display:flex;align-items:stretch;border:1px solid var(--line2);
+  border-radius:var(--rs);background:rgba(16,16,19,.74);overflow:hidden}
+@supports (backdrop-filter:blur(6px)){.installer-row{backdrop-filter:blur(6px)}}
+.installer code{flex:1;min-width:0;font-family:var(--mono);font-size:12px;
+  line-height:1;color:var(--ink);padding:13px 14px;white-space:nowrap;
+  overflow-x:auto;scrollbar-width:none}
+.installer code::-webkit-scrollbar{display:none}
+.installer .cp{flex:none;display:inline-flex;align-items:center;justify-content:center;
+  min-width:86px;padding:0 14px;font:600 12.5px/1 var(--sans);color:var(--dim);
+  background:transparent;border:0;border-left:1px solid var(--line2);cursor:pointer;
+  transition:color .16s var(--ease),background .16s var(--ease),transform .16s var(--ease)}
+.installer .cp:hover{color:var(--ink);background:var(--surface2)}
+.installer .cp:active{transform:scale(.97)}
+.installer .cp[data-copied="1"]{color:var(--pink)}
+.installer .hint{margin-top:10px;font-size:12.5px;color:var(--dim)}
+.installer .hint a{color:var(--pink-soft);text-decoration:underline;
+  text-underline-offset:2px}
+/* orchestrated load: background settles, then headline, sub, ctas rise */
+@media (prefers-reduced-motion: no-preference){
+  .h-seq{opacity:0;transform:translateY(14px);
+    animation:rise .8s var(--ease) forwards}
+  .h-seq.s2{animation-delay:.1s}
+  .h-seq.s3{animation-delay:.2s}
+  .h-seq.s4{animation-delay:.3s}
+  .hero-bg{opacity:0;animation:bgin 1.1s ease forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+  @keyframes bgin{to{opacity:1}}
+}
+
+/* ---- toolbelt marquee ---- */
+.belt{border-block:1px solid var(--line);overflow:hidden;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 12%,#000 88%,transparent);
+          mask-image:linear-gradient(90deg,transparent,#000 12%,#000 88%,transparent)}
+.belt-track{display:flex;width:max-content;padding:14px 0}
+@media (prefers-reduced-motion: no-preference){
+  .belt-track{animation:belt 46s linear infinite}
+  @keyframes belt{to{transform:translateX(-50%)}}
+}
+.belt-set{display:flex;flex:none}
+.belt span{font-family:var(--mono);font-size:13px;color:var(--faint);
+  padding:0 20px;display:flex;align-items:center;gap:20px;white-space:nowrap}
+.belt span::after{content:"";width:4px;height:4px;border-radius:50%;background:var(--pink);
+  opacity:.5;flex:none}
+
+/* ---- sections ---- */
+section{padding:104px 0 0}
+h2{font-size:clamp(26px,3.2vw,38px);font-weight:600;letter-spacing:-0.02em;line-height:1.15}
+.lede{color:var(--dim);font-size:17px;max-width:44em;margin-top:14px;text-wrap:pretty}
+.lede b{color:var(--ink);font-weight:500}
+.sec-head{margin-bottom:44px}
+
+/* ---- trio (one brain, many agents) ---- */
+.trio{display:grid;grid-template-columns:repeat(3,1fr)}
+.trio > div{padding:8px 32px 8px 0}
+.trio > div + div{border-left:1px solid var(--line);padding-left:32px}
+.trio h3{font-size:17px;font-weight:600;margin-bottom:10px}
+.trio h3 .key{display:block;font-family:var(--mono);font-size:12px;font-weight:500;
+  color:var(--pink-soft);margin-bottom:10px}
+.trio p{color:var(--dim);font-size:15px}
+.trio p b{color:var(--ink);font-weight:500}
+@media (max-width:820px){
+  .trio{grid-template-columns:1fr;gap:28px}
+  .trio > div + div{border-left:none;border-top:1px solid var(--line);padding:28px 0 0}
+  .trio > div{padding-right:0}
+}
+
+/* ---- mental model diagram ---- */
+.model-wrap{overflow-x:auto;padding:4px 2px}
+.model-flow{min-width:620px;max-width:780px;margin:0 auto;display:flex;flex-direction:column;align-items:center}
+.model-node{border:1px solid var(--line2);border-radius:var(--r);background:var(--surface);
+  padding:12px 20px;font-family:var(--mono);font-size:12.5px;color:var(--ink);text-align:center}
+.model-node b{font-weight:500;color:var(--pink-soft)}
+.model-link{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 0}
+.model-link .seg{width:1px;height:16px;background:var(--line2)}
+.model-link .lbl{font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
+.model-link .tip{width:0;height:0;border:4px solid transparent;border-top:6px solid var(--pink)}
+.model-link .tip.up{border:4px solid transparent;border-bottom:6px solid var(--pink)}
+.model-cluster{width:100%;border:1px solid var(--line2);border-radius:14px;
+  padding:22px;background:var(--surface)}
+.model-cluster.brain{box-shadow:0 0 60px -20px var(--glow),inset 0 1px 0 rgba(255,255,255,.03)}
+.model-cluster-h{font-size:13px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+  margin-bottom:14px}
+.model-cluster.brain .model-cluster-h{color:var(--pink)}
+.model-cluster.sats .model-cluster-h{color:var(--dim)}
+.model-cluster-sub{font-size:12.5px;color:var(--faint);margin:-8px 0 14px}
+.model-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.model-item{border:1px solid var(--line);border-radius:var(--rs);background:var(--surface2);
+  padding:10px 13px;font-size:12.5px;color:var(--dim)}
+.model-item b{display:block;color:var(--ink);font-weight:600;font-size:13.5px;margin-bottom:3px}
+.model-branches{display:flex;justify-content:center;gap:56px;flex-wrap:wrap}
+.model-branch{display:flex;flex-direction:column;align-items:center}
+.loopline{margin:30px auto 0;max-width:780px;font-family:var(--mono);font-size:13px;
+  color:var(--dim);border:1px solid var(--line);border-radius:var(--r);
+  background:var(--surface);padding:13px 18px;text-align:center}
+.loopline b{color:var(--pink-soft);font-weight:500}
+
+/* ---- memory engine feature rows ---- */
+.eng{display:grid;grid-template-columns:1fr 1fr;gap:0 56px;margin-top:8px}
+.eng-col h3{font-size:14px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--dim);padding-bottom:14px;border-bottom:1px solid var(--line)}
+.feat{padding:18px 12px;margin:0 -12px;border-radius:var(--r);
+  transition:background .2s var(--ease)}
+@media (hover:hover) and (pointer:fine){
+  .feat:hover{background:var(--surface)}
+  .feat:hover .feat-key{color:var(--pink)}
+}
+.feat + .feat{border-top:1px solid var(--line)}
+.feat-top{display:flex;align-items:baseline;justify-content:space-between;gap:14px}
+.feat-top b{font-size:15.5px;font-weight:600}
+.feat-key{font-family:var(--mono);font-size:11.5px;color:var(--faint);flex:none;
+  transition:color .2s var(--ease)}
+.feat p{margin-top:5px;font-size:14px;color:var(--dim)}
+@media (max-width:820px){.eng{grid-template-columns:1fr;gap:36px}}
+
+/* ---- creed ---- */
+.creed{display:grid;gap:0}
+.creed-item{padding:36px 0;border-top:1px solid var(--line);
+  display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:12px 48px}
+.creed-item h3{font-size:clamp(20px,2.6vw,28px);font-weight:600;letter-spacing:-0.02em;line-height:1.2}
+.creed-item h3 em{font-style:normal;color:var(--pink)}
+.creed-item p{color:var(--dim);font-size:15.5px}
+@media (max-width:720px){.creed-item{grid-template-columns:1fr}}
+
+/* ---- code ---- */
+pre{background:var(--surface);border:1px solid var(--line2);border-radius:var(--r);
+  padding:20px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;
+  color:#c9c9d2}
+pre .c{color:#8b8b96}
+pre .str{color:var(--pink-soft)}
+pre .key{color:var(--ink);font-weight:500}
+.codebar{display:flex;align-items:center;gap:8px;background:var(--surface2);
+  border:1px solid var(--line2);border-bottom:none;border-radius:var(--r) var(--r) 0 0;
+  padding:10px 16px;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.codebar + pre{border-radius:0 0 var(--r) var(--r)}
+.codebar .dots{display:flex;gap:6px}
+.codebar .dots i{width:9px;height:9px;border-radius:50%;background:var(--line2)}
+
+/* ---- split ---- */
+.split{display:grid;gap:40px;grid-template-columns:1fr 1fr;align-items:start}
+/* Grid items default to min-width:auto, so a code block with a long
+   unbreakable line pushes its track wider than the viewport and the whole
+   PAGE scrolls sideways - the block's own overflow-x:auto never gets a
+   chance to scroll. min-width:0 lets the track shrink and hands the
+   overflow back where it belongs. */
+.split > *,.eng > *{min-width:0}
+@media (max-width:860px){.split{grid-template-columns:1fr}}
+.steps .step{padding:18px 0}
+.steps .step + .step{border-top:1px solid var(--line)}
+.steps h3{font-size:15.5px;font-weight:600;margin-bottom:5px;display:flex;align-items:center;gap:10px}
+.steps h3::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--pink);flex:none}
+.steps p{color:var(--dim);font-size:14px}
+.steps p b{color:var(--ink);font-weight:500}
+/* ---- connect targets grid ---- */
+/* ---- memory taxonomy: the tier ladder and the edge vocabulary ---- */
+.tiers{margin-top:8px;border-top:1px solid var(--line)}
+.tier{display:grid;grid-template-columns:minmax(0,190px) minmax(0,1fr);gap:6px 28px;
+  padding:16px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.tier .tk{font-family:var(--mono);font-size:12.5px;color:var(--pink-soft);word-break:break-all}
+.tier .tk b{display:block;font-family:var(--sans);font-size:11px;font-weight:600;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:3px}
+.tier p{color:var(--dim);font-size:14.5px}
+.tier p em{font-style:normal;color:var(--ink)}
+.tier.muted .tk{color:var(--faint)}
+@media (max-width:720px){.tier{grid-template-columns:1fr;gap:8px}}
+.edge-group{margin-top:26px}
+.edge-group h4{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:12px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--surface2);
+  border:1px solid var(--line2);border-radius:var(--rs);padding:6px 11px;
+  transition:border-color .18s var(--ease),color .18s var(--ease)}
+.chip:hover{border-color:#3d3d46}
+.chip.hot{color:var(--pink-soft);border-color:rgba(251,61,120,.35)}
+.chip.auto{color:var(--dim);background:transparent;border-style:dashed}
+.agents-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0 40px;
+  margin-top:48px;border-top:1px solid var(--line)}
+.agent-cell{padding:20px 0;border-bottom:1px solid var(--line)}
+.agent-cell h3{font-size:15.5px;font-weight:600;margin-bottom:2px}
+.agent-cell .am{font-family:var(--mono);font-size:11.5px;color:var(--pink-soft);margin-bottom:8px}
+.agent-cell p{color:var(--dim);font-size:13.5px}
+@media (max-width:820px){.agents-grid{grid-template-columns:1fr}}
+
+ul.feats{list-style:none}
+ul.feats li{padding:11px 0 11px 24px;position:relative;color:var(--dim);font-size:14.5px}
+ul.feats li::before{content:"";position:absolute;left:2px;top:19px;width:8px;height:8px;
+  border-radius:2px;background:var(--pink);opacity:.8}
+ul.feats li b{color:var(--ink);font-weight:600}
+
+/* ---- connect tabs ---- */
+.panel{border:1px solid var(--line2);border-radius:14px;background:var(--surface);
+  padding:22px;margin-top:8px}
+.tabs{position:relative;display:flex;flex-wrap:wrap;gap:4px;margin-bottom:18px;
+  border:1px solid var(--line);border-radius:var(--r);padding:4px;background:var(--bg);
+  width:max-content;max-width:100%}
+.tab-ind{position:absolute;top:0;left:0;border-radius:var(--rs);
+  background:var(--surface2);border:1px solid var(--line2);z-index:0;
+  transition:transform .28s var(--ease),width .28s var(--ease),height .28s var(--ease);
+  will-change:transform}
+.tabs button{position:relative;z-index:1;background:none;border:none;color:var(--dim);
+  padding:8px 14px;cursor:pointer;font:500 13.5px var(--sans);border-radius:var(--rs);
+  transition:color .18s var(--ease),transform .16s var(--ease)}
+.tabs button:active{transform:scale(.97)}
+.tabs button:hover{color:var(--ink)}
+.tabs button.on{color:var(--ink)}
+.tabpane{display:none}
+.tabpane.on{display:block}
+@media (prefers-reduced-motion: no-preference){
+  .tabpane.on{animation:pane .3s var(--ease)}
+  @keyframes pane{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+}
+.tabpane .path{font-family:var(--mono);font-size:12px;color:var(--faint);margin-bottom:10px}
+.tabpane .path b{color:var(--dim);font-weight:500}
+.note{border:1px solid var(--line);border-radius:var(--r);background:var(--surface2);
+  padding:16px 18px;font-size:13.5px;color:var(--dim);margin-top:18px}
+.note b{color:var(--ink);font-family:var(--mono);font-weight:500;font-size:.94em}
+
+/* ---- depth ---- */
+.depth-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:8px}
+.depth-grid > div{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);
+  padding:20px;transition:border-color .2s var(--ease),transform .2s var(--ease)}
+@media (hover:hover) and (pointer:fine){
+  .depth-grid > div:hover{border-color:var(--line2);transform:translateY(-2px)}
+}
+.depth-grid h3{font-size:15px;font-weight:600;margin-bottom:8px}
+.depth-grid p{color:var(--dim);font-size:13.5px}
+.depth-grid p b{color:var(--ink);font-family:var(--mono);font-weight:500;font-size:.92em}
+
+footer{margin-top:112px;border-top:1px solid var(--line);padding:38px 0 56px;
+  font-size:14px;color:var(--dim)}
+footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+footer .fm{display:flex;align-items:center;gap:9px;color:var(--ink);font-weight:700;font-size:15px}
+footer .fm .dot{width:9px;height:9px;border-radius:50%;background:var(--pink)}
+footer a{color:var(--dim);text-decoration:underline;text-underline-offset:3px;
+  text-decoration-color:var(--line2)}
+footer a:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+<script>document.body.classList.add('js')</script>
+<a class="skip" href="#brain">Skip to content</a>
+
+<div class="navbar">
+  <div class="wrap row">
+    <a class="logo" href="#top"><span class="dot"></span>Punk Records</a>
+    <div class="links">
+      <a href="#brain">Model</a>
+      <a href="#engine">Memory</a>
+      <a href="#taxonomy">Taxonomy</a>
+      <a href="#agent">Agent memory</a>
+      <a href="#rinnegan">Rinnegan</a>
+      <a href="#connect">Connect</a>
+      <a class="nav-cta" href="#deploy">Deploy</a>
+    </div>
+  </div>
+</div>
+
+<header class="hero" id="top">
+  <div class="hero-bg" aria-hidden="true">
+    <img src="assets/banner-bg.webp" alt="" width="1031" height="592" fetchpriority="high">
+  </div>
+  <div class="wrap">
+    <h1 class="h-seq">A <em>shared brain</em> your agents plug into</h1>
+    <p class="sub h-seq s2">Self-hosted, one static binary. Agents register to memory
+      <b>regions</b> over MCP: append without conflict, claim work so they never
+      overlap, recall any past instant.</p>
+    <div class="installer h-seq s3">
+      <div class="installer-row">
+        <code id="install-cmd">curl -fsSL https://hypervisor-io.github.io/punk-records/install | bash -s -- --init</code>
+        <button class="cp" type="button" data-copy="#install-cmd"
+          aria-label="Copy the install command">copy</button>
+      </div>
+      <p class="hint">Linux and macOS, needs only curl. Windows: grab the zip from
+        <a href="https://github.com/hypervisor-io/punk-records/releases">Releases</a>.</p>
+    </div>
+    <div class="cta h-seq s4">
+      <a class="btn btn-pink" href="#connect">Connect an agent</a>
+      <a class="btn btn-ghost" href="#deploy">Deploy options</a>
+    </div>
+  </div>
+</header>
+
+<div class="belt" aria-hidden="true">
+    <div class="belt-track">
+      <div class="belt-set">
+        <span>register</span><span>claim_work</span><span>remember</span><span>remember_document</span>
+        <span>recall</span><span>recall_as_of</span><span>search</span><span>unified_search</span>
+        <span>triplet_search</span><span>reflect</span><span>feedback</span><span>link</span>
+        <span>neighbors</span><span>profile</span><span>diagnose</span><span>submit_task</span>
+      </div>
+      <div class="belt-set">
+        <span>register</span><span>claim_work</span><span>remember</span><span>remember_document</span>
+        <span>recall</span><span>recall_as_of</span><span>search</span><span>unified_search</span>
+        <span>triplet_search</span><span>reflect</span><span>feedback</span><span>link</span>
+        <span>neighbors</span><span>profile</span><span>diagnose</span><span>submit_task</span>
+      </div>
+    </div>
+</div>
+
+<div class="wrap">
+  <section id="brain">
+    <div class="sec-head rv">
+      <h2>One brain, many agents</h2>
+      <p class="lede">Like a brain maps memory to areas, Punk Records partitions memory
+        into regions. A group of agents registers to a region and coordinates through
+        its shared, append-only record.</p>
+    </div>
+    <div class="trio" data-stagger>
+      <div class="rv">
+        <h3><span class="key">regions</span>Memory maps to regions</h3>
+        <p>A region is a namespace of append-only, bi-temporal facts with typed links,
+        observations, mental models and an entity graph. Agents <b>register</b> to one
+        and see each other's writes. The antenna is MCP.</p>
+      </div>
+      <div class="rv">
+        <h3><span class="key">claim_work</span>Many writers, no conflicts</h3>
+        <p>Concurrent writers never overwrite, identical writes collapse by content
+        hash, and <b>work-claim leases</b> stop two agents chasing the same sub-key.
+        Same repo, no clash. A guarantee, not a convention.</p>
+      </div>
+      <div class="rv">
+        <h3><span class="key">branch / merge</span>Fork, experiment, merge back</h3>
+        <p>Fork a region to a git branch, work offline, merge conclusions back.
+        Merge is replay plus dedup, so it cannot conflict. Read the region
+        <b>as of any past instant</b>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="model">
+    <div class="sec-head rv">
+      <h2>The mental model</h2>
+      <p class="lede">Intent flows into the brain, out to satellite agents, then to
+        tools or the consumer. The brain never executes: it proposes, a human approves.</p>
+    </div>
+    <div class="model-wrap" data-stagger>
+      <div class="model-flow" role="group" aria-label="Punk Records mental model: intent flows into the brain, out to satellite agents, then to tools or the consumer">
+        <div class="model-node rv">INTENT arrives: webhook, REST, MCP <b>submit_task</b></div>
+        <div class="model-link rv"><span class="seg"></span><span class="tip"></span></div>
+
+        <div class="model-cluster brain rv">
+          <div class="model-cluster-h">Punk Records, the severed brain</div>
+          <div class="model-grid">
+            <div class="model-item"><b>Router</b>deterministic triggers, every decision recorded</div>
+            <div class="model-item"><b>Task ledger</b>event-sourced, append-only: the audit log is the system</div>
+            <div class="model-item" style="grid-column:1/-1"><b>Regions = brain areas</b>append-only memory, bi-temporal, typed weighted links, observations, mental models, entity graph</div>
+            <div class="model-item"><b>Policy</b>observe, advise, propose, auto</div>
+            <div class="model-item"><b>Budgets</b>tokens, tool calls, wall-time</div>
+          </div>
+        </div>
+
+        <div class="model-link rv"><span class="tip up"></span><span class="lbl">remember / recall / reflect, over MCP</span><span class="tip"></span></div>
+
+        <div class="model-cluster sats rv">
+          <div class="model-cluster-h">Satellites, the domain agents</div>
+          <div class="model-cluster-sub">markdown on disk, hot-reloaded</div>
+          <div class="model-grid">
+            <div class="model-item"><b>database.md</b></div>
+            <div class="model-item"><b>network.md</b></div>
+            <div class="model-item"><b>application.md</b></div>
+          </div>
+        </div>
+
+        <div class="model-branches rv">
+          <div class="model-branch">
+            <div class="model-link"><span class="seg"></span><span class="lbl">read tools: allow</span><span class="tip"></span></div>
+            <div class="model-node">MCP tool servers</div>
+          </div>
+          <div class="model-branch">
+            <div class="model-link"><span class="seg"></span><span class="lbl">writes: propose</span><span class="tip"></span></div>
+            <div class="model-node">Consumer <b>(the only executor)</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="loopline rv">intake &rarr; route &rarr; investigate &rarr; <b>findings with evidence</b> &rarr; propose &rarr; learn</p>
+  </section>
+
+  <section id="engine">
+    <div class="sec-head rv">
+      <h2>The memory engine</h2>
+      <p class="lede">Not a vector store with a REST hat. An append-only, bi-temporal
+        fact store whose scoring pipeline explains itself: every hit carries
+        <code>score_components</code>, the evidence for why it surfaced.</p>
+    </div>
+    <div class="eng">
+      <div class="eng-col" data-stagger>
+        <h3 class="rv">Retrieval</h3>
+        <div class="feat rv">
+          <div class="feat-top"><b>Scored recall</b><span class="feat-key">score_components</span></div>
+          <p>Hybrid FTS + vector fusion with bounded salience boosts. Every hit shows its evidence.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Bridge discovery</b><span class="feat-key">link</span></div>
+          <p>A fact linked to two search hits surfaces even when it never matches the query text.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Token-budget recall</b><span class="feat-key">max_tokens</span></div>
+          <p>Fill a context budget with ranked facts instead of an arbitrary top-k.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Time travel</b><span class="feat-key">recall_as_of</span></div>
+          <p>Read the region as of any instant. "Errors last month" parses to a real time window.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Query expansion</b><span class="feat-key">expand</span></div>
+          <p>One flag rewrites the query into variants and fuses their results, rerank preserved.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Triplet retrieval</b><span class="feat-key">triplet_search</span></div>
+          <p>Ranks source, edge and target together: the relation itself must match the query.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Reflect</b><span class="feat-key">reflect</span></div>
+          <p>Evidence gathered in tiers, answers cite what was actually retrieved. Fabricated provenance cannot survive.</p>
+        </div>
+      </div>
+      <div class="eng-col" data-stagger>
+        <h3 class="rv">Trust &amp; scale</h3>
+        <div class="feat rv">
+          <div class="feat-top"><b>Observations</b><span class="feat-key">proof_count</span></div>
+          <p>Consolidation folds raw facts into beliefs carrying their sources. Stale beliefs get flagged.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Secret scrubbing</b><span class="feat-key">defense: block</span></div>
+          <p>Keys, DSNs and JWTs redacted or blocked at every write path. The raw secret never lands.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Contradiction watch</b><span class="feat-key">contradicts</span></div>
+          <p>An LLM judge sweeps for fact pairs that disagree and links them, on a hard invocation budget.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Feedback loop</b><span class="feat-key">feedback</span></div>
+          <p>Rated recalls reweight what they surfaced; re-remembering a fact reinforces it.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Entity graph</b><span class="feat-key">memory.entities</span></div>
+          <p>Named entities extracted per fact, fuzzy aliases merged: a knowledge graph over the region. Opt-in.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Vectors that scale</b><span class="feat-key">ivf_nprobe</span></div>
+          <p>int8 quantization, 4x smaller, plus an in-memory IVF index for sublinear search. Both opt-in, pure Go.</p>
+        </div>
+        <div class="feat rv">
+          <div class="feat-top"><b>Benchmark in the binary</b><span class="feat-key">punk membench</span></div>
+          <p>recall@k and MRR against a JSONL dataset, deterministic, in CI. Regressions fail a command, not a vibe check.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="taxonomy">
+    <div class="sec-head rv">
+      <h2>The taxonomy</h2>
+      <p class="lede">Memory is not one undifferentiated pile. Facts sit in tiers that
+        outrank each other on recall, and the edges between them are a closed
+        vocabulary the store validates on write.</p>
+    </div>
+
+    <div class="split">
+      <div class="rv">
+        <h3 style="font-size:15.5px;font-weight:600;margin-bottom:4px">Tiers, by key prefix</h3>
+        <p style="color:var(--dim);font-size:14px">Recall prefers the higher tier and drops
+          the evidence it already cites, so a belief answers instead of the twelve raw
+          facts behind it.</p>
+        <div class="tiers" data-stagger>
+          <div class="tier rv">
+            <div class="tk"><b>Tier 1</b>/mental-models/</div>
+            <p>Curated syntheses you write. <em>Outrank everything and are never
+              superseded</em> by a machine pass. The layer <code>reflect</code> reads first.</p>
+          </div>
+          <div class="tier rv">
+            <div class="tk"><b>Tier 2</b>/observations/</div>
+            <p>Beliefs consolidation folded out of raw facts, carrying
+              <em>source_ids and proof_count</em>. Flagged stale when newer evidence lands.</p>
+          </div>
+          <div class="tier rv">
+            <div class="tk"><b>Tier 3</b>your own keys</div>
+            <p>Raw facts, the evidence layer. <em>/code-map/</em> lives here too: an
+              architecture map seeded from an existing repo, delta-updated so a deleted
+              package stops being injected.</p>
+          </div>
+          <div class="tier muted rv">
+            <div class="tk"><b>Aside</b>/entities/</div>
+            <p>Extracted entities and their co-occurrence graph. Never injected inline;
+              surfaced separately as a known-entities line.</p>
+          </div>
+          <div class="tier muted rv">
+            <div class="tk"><b>Ephemeral</b>/agent-sessions/</div>
+            <p>Raw hook capture: prompts, tool calls, answers. <em>30-day TTL, and
+              deliberately excluded from injected context</em>. It is feedstock for
+              consolidation, not the thing your next session reads.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="rv">
+        <h3 style="font-size:15.5px;font-weight:600;margin-bottom:4px">Edges, all 14 of them</h3>
+        <p style="color:var(--dim);font-size:14px">A link outside this set is rejected at
+          write time, so the semantics stay queryable. Every edge carries a weight and an
+          optional sentence, and that sentence is embedded too: the relation itself is
+          retrievable, not just its endpoints.</p>
+
+        <div class="edge-group">
+          <h4>11 you author</h4>
+          <div class="chips">
+            <span class="chip">relates_to</span><span class="chip">leads_to</span>
+            <span class="chip">occurred_before</span><span class="chip">prefers_over</span>
+            <span class="chip">exemplifies</span><span class="chip hot">contradicts</span>
+            <span class="chip">reinforces</span><span class="chip hot">invalidated_by</span>
+            <span class="chip">evolved_into</span><span class="chip">derived_from</span>
+            <span class="chip">part_of</span>
+          </div>
+        </div>
+
+        <div class="edge-group">
+          <h4>3 the machine adds</h4>
+          <div class="chips">
+            <span class="chip auto">similar_to</span><span class="chip auto">mentions</span>
+            <span class="chip auto">co_occurs</span>
+          </div>
+        </div>
+
+        <div class="edge-group">
+          <h4>Why the graph earns its keep</h4>
+          <p style="color:var(--dim);font-size:14px"><code>invalidated_by</code> demotes the
+            superseded fact on every read. Edge count drives <b>bridge discovery</b>: a fact
+            linked to two or more search hits surfaces even when it matches your query
+            textually not at all, which is how the reasoning behind two decisions gets
+            found without anyone tagging it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="why">
+    <div class="sec-head rv">
+      <h2>Why it holds together</h2>
+    </div>
+    <div class="creed" data-stagger>
+      <div class="creed-item rv">
+        <h3>Works with <em>no model</em></h3>
+        <p>Registration, claims, dedup, retrieval, budgets and the audit ledger all run
+        with AI disabled. A model is invited for judgment only, and never sits on the
+        critical path.</p>
+      </div>
+      <div class="creed-item rv">
+        <h3>The log <em>is the truth</em></h3>
+        <p>Every write, claim, route, refusal and finding is an append-only event with
+        provenance: who, when, which task. Replay any run. Attribute every token.</p>
+      </div>
+      <div class="creed-item rv">
+        <h3>Bring your <em>own everything</em></h3>
+        <p>Any OpenAI-compatible endpoint, cloud or local Ollama. Any MCP tool server.
+        Secrets named only by environment variable. Nothing leaves your network unless
+        a tool does.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="agent">
+    <div class="sec-head rv">
+      <h2>Your agents, with a memory</h2>
+      <p class="lede">Punk Records doubles as persistent memory for the agents you
+        already run. Hooks capture what they do - six coding agents (Claude Code,
+        Cursor, OpenCode, pi, Antigravity, Copilot CLI) plus the general assistants
+        Hermes and OpenClaw; the next session starts already knowing the
+        project.</p>
+    </div>
+    <div class="split">
+      <div class="rv">
+        <div class="codebar"><span class="dots"><i></i><i></i><i></i></span>terminal</div>
+<pre><span class="c"># run the memory server</span>
+punk serve                    <span class="c"># :9090</span>
+
+<span class="c"># wire Claude Code to it, once per machine</span>
+punk connect claude-code      <span class="c"># SessionStart / UserPromptSubmit</span>
+                              <span class="c"># PostToolUse / Stop hooks</span>
+
+<span class="c"># or wire up any other supported agent</span>
+punk connect cursor | opencode | pi | antigravity | copilot | hermes | openclaw
+
+<span class="c"># mine recurring investigations into skill drafts</span>
+punk skills propose --min-count 3
+                              <span class="c"># writes proposed-skills/&lt;slug&gt;/SKILL.md</span></pre>
+      </div>
+      <div class="steps" data-stagger>
+        <div class="step rv">
+          <h3>Capture</h3>
+          <p>Prompts, tool calls and answers land as facts under
+          <b>/agent-sessions/</b> in a per-project namespace: replay-deduped,
+          secret-scrubbed, embedded and entity-extracted by the async enricher.</p>
+        </div>
+        <div class="step rv">
+          <h3>Inject</h3>
+          <p>The next SessionStart receives a token-budgeted context block:
+          known entities first, then important and recent facts.</p>
+        </div>
+        <div class="step rv">
+          <h3>Consolidate</h3>
+          <p>Sessions fold into durable observations over time. Raw capture expires
+          after 30 days; knowledge stays.</p>
+        </div>
+        <div class="step rv">
+          <h3>Share</h3>
+          <p>Point every host's <b>PUNK_URL</b> at one server and machines share a
+          project's memory. Capture is fail-open: a dead server never breaks a session.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="agents-grid" data-stagger>
+      <div class="agent-cell rv">
+        <h3>Claude Code</h3>
+        <p class="am">punk connect claude-code</p>
+        <p>Native hooks; context injected as additionalContext on SessionStart.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>Cursor</h3>
+        <p class="am">punk connect cursor</p>
+        <p>Six hooks.json events; blocking prompt hook always answered. Rules file
+        plus MCP recall for injection.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>OpenCode</h3>
+        <p class="am">punk connect opencode</p>
+        <p>JS plugin captures sessions, prompts and tool calls; system-prompt
+        injection once per session.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>pi</h3>
+        <p class="am">punk connect pi</p>
+        <p>TypeScript extension; system-prompt injection on the first prompt of
+        each session, never a punk-only prompt.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>Antigravity</h3>
+        <p class="am">punk connect antigravity</p>
+        <p>Event-blind hook protocol handled per event; context injected via
+        injectSteps on the first model call.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>Copilot CLI</h3>
+        <p class="am">punk connect copilot</p>
+        <p>Own punk.json in the hooks dir; additionalContext on SessionStart.
+        Codex CLI: MCP toolbelt only, today.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>Hermes</h3>
+        <p class="am">punk connect hermes</p>
+        <p>Shell hooks merged into config.yaml; recalled memory returned as
+        context on the session's first model call.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>OpenClaw</h3>
+        <p class="am">punk connect openclaw</p>
+        <p>In-process plugin plus the config entry that grants it prompt access;
+        memory prepended once per session.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="rinnegan">
+    <div class="sec-head rv">
+      <h2>Rinnegan: the other half</h2>
+      <p class="lede">Hook capture is forward-looking. It learns what happens after you
+        wire it up, so a repository with ten years of history starts empty.
+        <a href="https://github.com/hypervisor-io/rinnegan">Rinnegan</a> reads the code
+        that is already there, deterministically, and punk turns it into memory.</p>
+    </div>
+
+    <div class="split">
+      <div class="rv">
+        <div class="codebar"><span class="dots"><i></i><i></i><i></i></span>day one on an existing repo</div>
+<pre><span class="c"># index the tree, then seed punk from the architecture map</span>
+rinnegan index
+rinnegan map --json | punk seed rinnegan
+
+<span class="c"># one fact per domain, in the namespace your agent reads</span>
+seeded agent-myrepo: 14 written, 0 unchanged, 0 removed
+
+<span class="c"># re-run on every commit: unchanged domains cost nothing</span>
+rinnegan map --json | punk seed rinnegan
+seeded agent-myrepo: 1 written, 13 unchanged, 0 removed</pre>
+        <p style="color:var(--dim);font-size:14px;margin-top:16px">A domain that no longer
+          exists is tombstoned, so a deleted package stops being injected as though it
+          were still there. Facts you wrote by hand under the same prefix are never
+          touched.</p>
+      </div>
+
+      <div data-stagger>
+        <ul class="feats">
+          <li class="rv"><b>Two halves, one seam.</b> Rinnegan answers what the code
+          <i>is</i>, right now, from the AST. Punk answers what happened and <i>why</i>:
+          the decision, the dead end, the incident. Neither is recoverable from the
+          other.</li>
+          <li class="rv"><b>Deterministic, no model.</b> Same corpus gives a
+          byte-identical index. Semantic discovery is classical LSA (TF-IDF plus
+          truncated SVD), not embeddings, so nothing leaves the machine and nothing
+          drifts between runs.</li>
+          <li class="rv"><b>Provenance on every edge.</b> Each fact is tagged
+          <code>ast_exact</code> through <code>unresolved</code>, and only
+          <code>ast_exact</code> is ground truth. Same contract punk holds itself to
+          with <code>score_components</code>: no confident claim without its evidence.</li>
+          <li class="rv"><b>Both speak MCP.</b> Run them side by side and the agent gets
+          <code>understand</code> and <code>lookup</code> for the code alongside
+          <code>recall</code> and <code>remember</code> for the history.
+          <code>rinnegan install &lt;agent&gt;</code> prints its own config; punk has
+          <code>punk connect</code>.</li>
+          <li class="rv"><b>One rule.</b> Do not copy the symbol graph into punk. Punk is
+          append-only, so an indexed copy of your code rots silently. Rinnegan
+          re-derives it in a moment. Store only what it can never recover.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="rv" style="margin-top:40px">
+      <div class="codebar"><span class="dots"><i></i><i></i><i></i></span>the loop, with both wired</div>
+<pre>punk recall            <span class="c"># why is it this way, what did we already try</span>
+rinnegan understand    <span class="c"># what the code actually is, provenance-tagged</span>
+      <span class="c">... write the patch ...</span>
+rinnegan verify        <span class="c"># does the patch hold against the graph</span>
+punk remember          <span class="c"># what we learned, for the next session</span></pre>
+    </div>
+  </section>
+
+  <section id="connect">
+    <div class="sec-head rv">
+      <h2>Connect your agent</h2>
+      <p class="lede">Punk Records speaks MCP over streamable HTTP (<code>/mcp</code>,
+        bearer-authed) and stdio (<code>punk mcp</code>). Any MCP client connects with a
+        few lines. Mint a token with <code>punk apikey create --name my-agent</code>.</p>
+    </div>
+    <div class="panel rv">
+      <div class="tabs" id="connect-tabs" aria-label="MCP client">
+        <span class="tab-ind" aria-hidden="true"></span>
+        <button class="on" data-t="cc">Claude Code</button>
+        <button data-t="cursor">Cursor</button>
+        <button data-t="windsurf">Windsurf</button>
+        <button data-t="vscode">VS Code</button>
+        <button data-t="desktop">Claude Desktop</button>
+        <button data-t="stdio">Local / stdio</button>
+      </div>
+
+      <div class="tabpane on" data-p="cc">
+        <div class="path">terminal, streamable HTTP</div>
+<pre><span class="c"># register the brain once; it is then available in every session</span>
+claude mcp add <span class="key">punk-records</span> \
+  --transport http https://brain.internal/mcp \
+  --header <span class="str">"Authorization: Bearer $PUNK_TOKEN"</span></pre>
+      </div>
+
+      <div class="tabpane" data-p="cursor">
+        <div class="path">edit <b>~/.cursor/mcp.json</b>, native HTTP</div>
+<pre>{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"punk-records"</span>: {
+      <span class="key">"url"</span>: <span class="str">"https://brain.internal/mcp"</span>,
+      <span class="key">"headers"</span>: { <span class="key">"Authorization"</span>: <span class="str">"Bearer $PUNK_TOKEN"</span> }
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="tabpane" data-p="windsurf">
+        <div class="path">edit <b>~/.codeium/windsurf/mcp_config.json</b>, via mcp-remote</div>
+<pre>{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"punk-records"</span>: {
+      <span class="key">"command"</span>: <span class="str">"npx"</span>,
+      <span class="key">"args"</span>: [<span class="str">"-y"</span>, <span class="str">"mcp-remote"</span>,
+               <span class="str">"https://brain.internal/mcp"</span>,
+               <span class="str">"--header"</span>, <span class="str">"Authorization: Bearer ${PUNK_TOKEN}"</span>]
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="tabpane" data-p="vscode">
+        <div class="path">edit <b>.vscode/mcp.json</b>, Copilot agent mode</div>
+<pre>{
+  <span class="key">"servers"</span>: {
+    <span class="key">"punk-records"</span>: {
+      <span class="key">"type"</span>: <span class="str">"http"</span>,
+      <span class="key">"url"</span>: <span class="str">"https://brain.internal/mcp"</span>,
+      <span class="key">"headers"</span>: { <span class="key">"Authorization"</span>: <span class="str">"Bearer ${input:amk}"</span> }
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="tabpane" data-p="desktop">
+        <div class="path">edit <b>claude_desktop_config.json</b>, via mcp-remote</div>
+<pre>{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"punk-records"</span>: {
+      <span class="key">"command"</span>: <span class="str">"npx"</span>,
+      <span class="key">"args"</span>: [<span class="str">"-y"</span>, <span class="str">"mcp-remote"</span>,
+               <span class="str">"https://brain.internal/mcp"</span>,
+               <span class="str">"--header"</span>, <span class="str">"Authorization: Bearer TOKEN"</span>]
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="tabpane" data-p="stdio">
+        <div class="path">any MCP client, co-located: stdio, no network</div>
+<pre><span class="c"># the agent launches Punk Records as a subprocess; stdout is the protocol</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"punk-records"</span>: {
+      <span class="key">"command"</span>: <span class="str">"punk-records"</span>,
+      <span class="key">"args"</span>: [<span class="str">"mcp"</span>, <span class="str">"--config"</span>, <span class="str">"/etc/punk/config.yaml"</span>]
+    }
+  }
+}</pre>
+      </div>
+      <div class="note">Once connected, the agent gets one toolbelt for the whole brain:
+        <b>register</b>, <b>claim_work</b> / <b>release_work</b>, <b>remember</b> /
+        <b>remember_document</b> / <b>remember_model</b>, <b>recall</b> / <b>search</b>
+        (hybrid, scored, temporal, token-budgeted, expanded) / <b>unified_search</b> /
+        <b>triplet_search</b> / <b>recall_as_of</b>, <b>reflect</b>, <b>feedback</b>,
+        <b>profile</b> / <b>diagnose</b>, <b>link</b> / <b>unlink</b> / <b>neighbors</b>,
+        and <b>submit_task</b> / <b>get_task</b>. Task and region changes stream back
+        over MCP subscriptions.</div>
+    </div>
+  </section>
+
+  <section id="flow">
+    <div class="sec-head rv">
+      <h2>What a session looks like</h2>
+    </div>
+    <div class="split">
+      <div class="rv">
+        <div class="codebar"><span class="dots"><i></i><i></i><i></i></span>two agents, one region</div>
+<pre><span class="c">// two agents on the same repo region, no conflict</span>
+register      { region: <span class="str">"repo-main"</span>, agent: <span class="str">"refactorer"</span> }
+claim_work    { region: <span class="str">"repo-main"</span>, key: <span class="str">"/file/api.go"</span> }   <span class="c">// mine</span>
+<span class="c">// a second agent claiming /file/api.go is refused; it takes /file/db.go</span>
+
+remember      { key: <span class="str">"/finding/pool-leak"</span>,
+                body: <span class="str">"leak after 14:02 deploy"</span> }
+link          { from: <span class="str">"/finding/pool-leak"</span>,
+                to: <span class="str">"/file/api.go"</span>, type: <span class="str">"caused_by"</span> }
+
+search        { query: <span class="str">"connection pool"</span>, hybrid: true }
+recall_as_of  { prefix: <span class="str">"/finding"</span>,
+                as_of: <span class="str">"2026-07-06T12:00:00Z"</span> }
+
+release_work  { region: <span class="str">"repo-main"</span>, key: <span class="str">"/file/api.go"</span> }</pre>
+      </div>
+      <div data-stagger>
+        <ul class="feats">
+          <li class="rv"><b>Register</b> a group of agents to one region; they share its memory and see each other's writes.</li>
+          <li class="rv"><b>Claim</b> a sub-key before touching it; a live claim by anyone else is refused, so work never overlaps.</li>
+          <li class="rv"><b>Append</b> facts with full provenance; identical concurrent writes collapse to one.</li>
+          <li class="rv"><b>Link</b> facts into a graph: a change touches a file, a finding is caused by a change.</li>
+          <li class="rv"><b>Search</b> full-text or hybrid with explained scores and token budgets; recall as of any past instant.</li>
+          <li class="rv"><b>Branch</b> the region to git, experiment, and merge back conflict-free.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="deploy">
+    <div class="sec-head rv">
+      <h2>Deploy in a minute</h2>
+    </div>
+    <div class="split">
+      <div class="rv">
+        <div class="codebar"><span class="dots"><i></i><i></i><i></i></span>from zero to serving</div>
+<pre><span class="c"># one line: downloads the latest release, verifies its checksum,</span>
+<span class="c"># installs the binary, and runs first-time migrations</span>
+curl -fsSL https://hypervisor-io.github.io/punk-records/install | bash -s -- --init
+punk serve                   <span class="c"># API + /mcp on :9090, dispatcher, hot-reload</span>
+
+<span class="c"># or do it by hand: binary, source, or container</span>
+tar xzf punk_*_linux_amd64.tar.gz &amp;&amp; ./punk --version
+go install github.com/hypervisor-io/punk-records/cmd/punk@latest
+docker compose up            <span class="c"># or: docker build -t punk .</span>
+punk migrate up              <span class="c"># SQLite by default, zero external services</span>
+punk validate specs          <span class="c"># the shipped database pack must pass</span>
+
+<span class="c"># mint an agent token, prove the brain with no model at all</span>
+punk apikey create --name my-agent
+make demo                    <span class="c"># signed webhook, routed, audited (no model)</span>
+
+<span class="c"># enable a model when ready (any OpenAI-compatible endpoint)</span>
+cp punk.example.yaml config.yaml   <span class="c"># set ai.enabled: true + one profile</span>
+
+<span class="c"># run on Postgres instead of SQLite: same schema, pure-Go driver</span>
+docker run -d -p 5432:5432 -e POSTGRES_USER=punk \
+  -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=punk postgres:16
+<span class="c"># config.yaml:  db: { driver: postgres,</span>
+<span class="c">#   dsn: postgres://punk:secret@localhost:5432/punk?sslmode=disable }</span>
+punk migrate up  --config config.yaml
+punk serve       --config config.yaml    <span class="c"># memory, regions, MCP: identical</span></pre>
+      </div>
+      <div data-stagger>
+        <ul class="feats">
+          <li class="rv"><b>Single binary.</b> No database server to run; SQLite by default. Point it at Postgres for scale: same schema, same tests.</li>
+          <li class="rv"><b>Backup is trivial.</b> <code>punk backup</code> snapshots SQLite; regions export to JSONL; specs live in git.</li>
+          <li class="rv"><b>Bearer-keyed.</b> Open until the first key exists, then every request needs one. Keys carry an optional identity claim for Okta/Entra agent registries.</li>
+          <li class="rv"><b>Observable.</b> OpenTelemetry spans for every agent, tool call and route, exported OTLP. An operator console ships at <code>/ui</code>.</li>
+          <li class="rv"><b>Sovereign.</b> Self-hosted, BYO model (Ollama included), secrets by env var. Nothing leaves your network unless a tool server does.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="depth">
+    <div class="sec-head rv">
+      <h2>Also in the record</h2>
+    </div>
+    <div class="depth-grid" data-stagger>
+      <div class="rv">
+        <h3>Bi-temporal memory</h3>
+        <p>Append-only with tombstones, provenance and validity windows. Per-prefix
+        write ACLs, per-fact expiry, recency boosts.</p>
+      </div>
+      <div class="rv">
+        <h3>Evals</h3>
+        <p>Every task freezes its tool-call world. Re-run under new specs with
+        <b>punk replay</b>, score the trajectory: a private eval suite no public
+        benchmark can contaminate.</p>
+      </div>
+      <div class="rv">
+        <h3>Cost</h3>
+        <p>Every model call rated locally into a burn table. Per-agent daily budgets,
+        a hot-reloadable kill switch, burn-rate alerts.</p>
+      </div>
+      <div class="rv">
+        <h3>Governance</h3>
+        <p>An autonomy ladder gates every tool call. Agents propose actions into an
+        approval gate; telemetry is fenced as untrusted input.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <div class="fm"><span class="dot"></span>Punk Records</div>
+      <div>Where intent becomes coordination.</div>
+    </div>
+    <div>
+      <div>Free software, LGPL-2.1 or LGPL-3.0. Copyright 2026 ServerGurus.</div>
+      <div>Licensing: <a href="mailto:legal@servergurus.com">legal@servergurus.com</a></div>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Copy-to-clipboard for the install one-liner. navigator.clipboard is only
+// available on secure origins, so a hidden-textarea + execCommand fallback
+// keeps the button working when the page is opened over plain http or from
+// the filesystem. The label swaps in place inside a fixed min-width button,
+// so confirming a copy never shifts the layout around it.
+(function(){
+  function fallbackCopy(text){
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly','');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch(e){ ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+  document.querySelectorAll('[data-copy]').forEach(function(btn){
+    var src = document.querySelector(btn.getAttribute('data-copy'));
+    if(!src) return;
+    var idle = btn.textContent, timer;
+    function done(ok){
+      btn.textContent = ok ? 'copied' : 'select it';
+      btn.setAttribute('data-copied', ok ? '1' : '0');
+      clearTimeout(timer);
+      timer = setTimeout(function(){
+        btn.textContent = idle;
+        btn.removeAttribute('data-copied');
+      }, 1400);
+    }
+    btn.addEventListener('click', function(){
+      var text = src.textContent.trim();
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(function(){ done(true); },
+                                                 function(){ done(fallbackCopy(text)); });
+      } else {
+        done(fallbackCopy(text));
+      }
+    });
+  });
+})();
+
+// Scroll reveal: stagger children inside [data-stagger], reveal once in view.
+(function(){
+  var groups = document.querySelectorAll('[data-stagger]');
+  groups.forEach(function(g){
+    var kids = g.querySelectorAll('.rv');
+    kids.forEach(function(el,i){ el.style.transitionDelay = Math.min(i*70,420)+'ms'; });
+  });
+  if(!('IntersectionObserver' in window)){
+    document.querySelectorAll('.rv').forEach(function(el){el.classList.add('in')});
+    return;
+  }
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); }
+    });
+  },{threshold:.12,rootMargin:'0px 0px -40px 0px'});
+  document.querySelectorAll('.rv').forEach(function(el){ io.observe(el); });
+})();
+
+// Connect tabs: sliding indicator (interruptible transition, retargets mid-flight).
+(function(){
+  var tabs = document.getElementById('connect-tabs');
+  if(!tabs) return;
+  var ind = tabs.querySelector('.tab-ind');
+  function place(btn){
+    ind.style.width = btn.offsetWidth+'px';
+    ind.style.height = btn.offsetHeight+'px';
+    ind.style.transform = 'translate('+btn.offsetLeft+'px,'+btn.offsetTop+'px)';
+  }
+  var active = tabs.querySelector('button.on');
+  requestAnimationFrame(function(){ place(active); });
+  window.addEventListener('resize',function(){ place(tabs.querySelector('button.on')); });
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(function(){ place(tabs.querySelector('button.on')); });
+  }
+  tabs.querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click',function(){
+      tabs.querySelectorAll('button').forEach(function(x){x.classList.remove('on')});
+      document.querySelectorAll('.tabpane').forEach(function(x){x.classList.remove('on')});
+      b.classList.add('on');
+      document.querySelector('.tabpane[data-p="'+b.dataset.t+'"]').classList.add('on');
+      place(b);
+    });
+  });
+})();
+</script>
+</body>
+</html>

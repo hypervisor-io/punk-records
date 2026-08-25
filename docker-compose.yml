@@ -1,0 +1,22 @@
+services:
+  punk:
+    build: .
+    ports:
+      - "9090:9090"
+    environment:
+      PUNK_DB_DSN: /data/punk.db
+      # PUNK_AI_ENABLED: "true"
+      # PUNK_LLM_KEY: ...
+      # PUNK_INCIDENT_MCP_TOKEN: ...   # token for an external MCP tool server
+    volumes:
+      - punk-data:/data
+      - ./specs:/app/specs:ro
+    command: ["serve", "--config", "/app/config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  punk-data:

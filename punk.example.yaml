@@ -1,0 +1,81 @@
+# Punk Records configuration reference (binary: punk). Copy to config.yaml and edit.
+# Every key can be overridden with PUNK_* environment variables
+# (see internal/config/config.go for the exact names).
+
+http:
+  addr: ":9090"
+
+log:
+  format: text # text | json
+  level: info  # debug | info | warn | error
+
+db:
+  driver: sqlite # sqlite | postgres
+  dsn: punk.db
+  # driver: postgres
+  # dsn: postgres://punk:secret@localhost:5432/punk
+
+specs:
+  dir: ./specs # agents/*.md, skills/*/SKILL.md, policies/*.yaml; hot-reloaded
+
+ai:
+  enabled: false # everything works without a model; enable deliberately
+  profiles:
+    default:
+      base_url: http://localhost:11434/v1 # any OpenAI-compatible endpoint
+      api_key_env: PUNK_LLM_KEY      # env var HOLDING the key
+      model: llama3.1
+  embeddings:              # write-time vectors for hybrid memory search; empty model = FTS only
+    base_url: http://localhost:11434/v1
+    model: ""              # e.g. embeddinggemma or nomic-embed-text
+    dims: 768
+
+budgets: # per-task defaults; agent specs may lower, never raise
+  tokens: 200000
+  tool_calls: 50
+  wall_ms: 600000
+  subagents: 3
+  global_daily_usd: 0   # burn-rate projection alerts at 60/80/100%; 0 disables
+  price_table_path: ""  # override the shipped model price table
+
+route:
+  epsilon: 0.05   # exploration among routing ties (keeps off-policy eval possible); 0 disables
+  fallback: ""    # agent for unmatched tasks; empty parks them for a human
+
+proposals:
+  expire_after_hours: 72   # stale proposal sweep; 0 disables
+
+memory:
+  retention_days: 0 # 0 disables the sweep
+  # consolidate_days: 0  # horizon for region compaction during consolidation; 0 disables (also gates contradictions + observation/reconcile passes)
+  creative_links: false  # weekly-REM analogue: auto similar_to links (needs embeddings)
+  defense: off  # redact|block: scrub secrets (API keys, DSNs, JWTs) at write time
+  defense_policies: {} # per-namespace override of defense, e.g.:
+    # secure-region: block
+  reconcile_threshold: 0  # e.g. 0.95: cosine >= this merges near-duplicate observations (needs embeddings + AI)
+  entities: false  # extract + link named entities (needs AI)
+  reranker_url: ""  # optional cross-encoder endpoint (TEI /rerank); empty = no reranking
+  quantize_vectors: false  # store int8 vectors (4x smaller, ~2% recall cost)
+  ivf_nprobe: 0  # >0 enables approximate vector index (clusters probed per query)
+  ivf_min_facts: 0  # namespace size above which the index is used over brute force (0 = default 2000)
+  contradictions: false  # detect + link contradicting facts during consolidation (needs embeddings + AI; runs only when memory.consolidate_days > 0)
+  turn_context_tokens: 600  # per-turn injection budget: each user prompt gets a prompt-scoped memory block, deduped against what the session was already shown; 0 disables
+  session_summary_tokens: 0  # e.g. 2000: roll captured sessions into a recursive /agent-sessions/<sid>/summary once that many new tokens accumulate (needs ai.enabled)
+  # inject: [profile, summary, entities, facts]  # session-start block components; add "directives" for a fixed memory-usage note
+
+otel:
+  endpoint: "" # OTLP/HTTP endpoint; empty disables tracing
+
+mcp_client:
+  servers:                       # external MCP tool servers the brain may route to
+    - name: incident-tool
+      url: https://incident-tool.internal/mcp
+      token_env: PUNK_INCIDENT_MCP_TOKEN
+    # - name: metrics
+    #   command: /usr/local/bin/metrics-mcp
+
+a2a:                             # outbound Agent2Agent delegation targets
+  remotes:                       # exposed to agents as the `delegate` MCP tool
+    - name: research-agent
+      url: https://research.example.com/v1/a2a   # remote's JSON-RPC endpoint (its card "url")
+      token_env: PUNK_A2A_RESEARCH_TOKEN

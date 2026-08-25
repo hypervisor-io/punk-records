@@ -1,0 +1,6 @@
+time	service	level	message
+2026-07-07T14:03:05Z	checkout-service	ERROR	timeout acquiring connection from pool orders-db after 3000ms (in_use=50 max=50)
+2026-07-07T14:03:41Z	checkout-service	ERROR	HikariPool orders-db: connection is not available, request timed out
+2026-07-07T14:04:10Z	checkout-service	WARN	readiness failing: db pool exhausted
+2026-07-07T14:04:55Z	cart-service	ERROR	call to checkout-service failed: 503 Service Unavailable
+2026-07-07T14:05:20Z	web-frontend	ERROR	upstream cart-service returned 502

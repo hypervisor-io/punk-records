@@ -1,0 +1,16 @@
+name: default
+action_classes:
+  - name: read
+    min_autonomy: observe
+    tool_patterns:
+      - "incidents__list_*"
+      - "incidents__get_*"
+  - name: notify
+    min_autonomy: propose
+    tool_patterns:
+      - "incidents__add_incident_comment"
+  - name: mutate
+    min_autonomy: auto
+    tool_patterns:
+      - "incidents__create_incident"
+      - "*__execute_*"

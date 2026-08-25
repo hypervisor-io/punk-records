@@ -1,0 +1,36 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "scripts/install.sh", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # Publish the installer at /install so the one-liner on the page stays
+      # short enough to read. Copied from scripts/install.sh at build time
+      # rather than committed twice, so the served script can never drift
+      # from the one in the repo.
+      - run: cp scripts/install.sh site/install
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

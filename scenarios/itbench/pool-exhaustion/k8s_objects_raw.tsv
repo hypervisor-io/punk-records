@@ -1,0 +1,6 @@
+kind	namespace	name	ready	detail
+Deployment	shop	web-frontend	3/3	image web-frontend:2.3.1 unchanged 6d
+Deployment	shop	cart-service	2/2	image cart-service:1.4.0 unchanged 6d
+Deployment	shop	checkout-service	1/2	image checkout:1.9.0 rolled out 2026-07-07T14:02:10Z; env APP_MAX_CONCURRENCY=200 DB_POOL_MAX=50
+Service	shop	checkout-service	-	selector app=checkout; depends orders-db
+Service	shop	orders-db	1/1	postgres 16; max_connections=120

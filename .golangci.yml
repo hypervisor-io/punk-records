@@ -1,0 +1,24 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Idiomatic intentional discards. golangci-lint v2's "standard" set
+      # dropped the legacy default exclusions that covered these:
+      # - fmt.Fprint*: stderr diagnostics in fail-open CLI paths; the
+      #   write's error is unactionable by design.
+      # - sql.Rows.Close: the deferred-cleanup idiom; row iteration errors
+      #   are surfaced by rows.Err(), which callers do check.
+      # - http.ResponseWriter.Write: handler/test-stub responses; the
+      #   transport owns delivery failures.
+      # - io.ReadCloser.Close: deferred resp.Body.Close in HTTP clients.
+      # - store.DB.Close: CLI teardown defers on read paths.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*database/sql.Rows).Close
+        - (net/http.ResponseWriter).Write
+        - (io.ReadCloser).Close
+        - (*github.com/hypervisor-io/punk-records/internal/store.DB).Close

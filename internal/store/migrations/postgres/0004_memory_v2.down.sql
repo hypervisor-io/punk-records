@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_outbox_undelivered;
+DROP TABLE IF EXISTS memory_outbox;
+ALTER TABLE memories DROP COLUMN embedding;
+ALTER TABLE memories DROP COLUMN expiration_date;
+ALTER TABLE memories DROP COLUMN invalid_at;
+ALTER TABLE memories DROP COLUMN valid_at;
+ALTER TABLE memories DROP COLUMN confidence;
+ALTER TABLE memories DROP COLUMN source_ref;
+ALTER TABLE memories DROP COLUMN task_id;
+ALTER TABLE memories DROP COLUMN writer;

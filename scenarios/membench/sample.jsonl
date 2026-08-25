@@ -1,0 +1,15 @@
+{"type":"fact","key":"/svc/db/primary","body":"postgres 16 primary runs on ceph-node-07, replica on ceph-node-09"}
+{"type":"fact","key":"/svc/db/failover","body":"failover: promote replica with pg_ctl promote, update haproxy backend"}
+{"type":"fact","key":"/svc/cache","body":"redis 7 cluster, three shards, on nodes 11-13"}
+{"type":"fact","key":"/svc/mq","body":"rabbitmq quorum queues for intake events"}
+{"type":"fact","key":"/ceph/osd/policy","body":"osd drain requires backfillfull below 0.85 and nearfull below 0.80"}
+{"type":"fact","key":"/ceph/mon","body":"five monitors, quorum needs three, mon-a is on the admin host"}
+{"type":"fact","key":"/incidents/2026-06-30","body":"nvme wear alert on node 12 traced to smart attribute 202 misread"}
+{"type":"fact","key":"/principles/boring","body":"prefer boring proven technology over novel systems"}
+{"type":"fact","key":"/oncall/rotation","body":"oncall rotates monday 9am IST, handoff notes in /oncall/handoff"}
+{"type":"fact","key":"/net/vlan","body":"storage traffic isolated on vlan 40, public api on vlan 10"}
+{"type":"query","q":"postgres primary","expect":["/svc/db/primary"]}
+{"type":"query","q":"failover promote replica","expect":["/svc/db/failover"]}
+{"type":"query","q":"osd drain backfillfull","expect":["/ceph/osd/policy"]}
+{"type":"query","q":"oncall rotates","expect":["/oncall/rotation"]}
+{"type":"query","q":"vlan storage traffic","expect":["/net/vlan"]}

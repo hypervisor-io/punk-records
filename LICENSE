@@ -1,0 +1,39 @@
+Punk Records
+
+Copyright (c) 2026 ServerGurus and contributors.
+
+SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only
+
+Punk Records is free software. You may use, study, share and modify it under
+the terms of EITHER:
+
+  - the GNU Lesser General Public License, version 2.1
+    (full text in COPYING-LGPL2.1), OR
+
+  - the GNU Lesser General Public License, version 3
+    (full text in COPYING-LGPL3),
+
+at your option. This is the same dual arrangement the Ceph project uses, and
+it exists for the same reason: version 3 is offered alongside version 2.1 so
+the code can be combined with Apache-2.0 licensed software, which some read
+as incompatible with LGPL-2.1 alone. Punk Records itself depends on
+Apache-2.0 licensed libraries (OpenTelemetry, gRPC and others), so the option
+is not hypothetical here.
+
+The GNU Lesser General Public License version 3 is written as a set of
+additional permissions layered on top of the GNU General Public License
+version 3, so the text of GPL-3.0 is included as COPYING-GPL3. It applies
+only as incorporated by COPYING-LGPL3; it is not an independent license
+option for this software.
+
+Third-party dependencies are distributed under their own licenses, which this
+file does not alter. The authoritative list is go.mod and go.sum; each
+module's license ships with that module.
+
+Trademarks are not licensed here. "Punk Records" and "ServerGurus" are
+reserved; this license grants rights in the software, not in the names.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. See the
+warranty disclaimer sections of whichever license you choose.
+
+Licensing inquiries: legal@servergurus.com

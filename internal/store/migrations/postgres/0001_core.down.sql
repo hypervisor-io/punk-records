@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS llm_calls;
+DROP TABLE IF EXISTS proposals;
+DROP TABLE IF EXISTS routing_decisions;
+DROP TABLE IF EXISTS task_events;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS agent_versions;
+DROP TABLE IF EXISTS memories_quarantine;
+DROP TABLE IF EXISTS memories;
+DROP TABLE IF EXISTS namespaces;
