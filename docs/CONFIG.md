@@ -57,4 +57,9 @@ kill -HUP <pid>                       # force spec reload (watcher also does thi
 - **Postgres**: set `db.driver`/`db.dsn`; use `pg_dump` for backups; CI
   runs the full suite against Postgres 16.
 - **Docker**: `docker compose up` - specs bind-mounted read-only so
-  editing them on the host hot-reloads inside the container.
+  editing them on the host hot-reloads inside the container. Keep the
+  in-container bind at `:9090`: setting `http.addr: 127.0.0.1:9090` for
+  hardening makes the published port unreachable (loopback inside the
+  container is not the host's loopback). Restrict reachability at the
+  host-side mapping instead - `"127.0.0.1:9090:9090"` in compose - or
+  override the bind with `PUNK_HTTP_ADDR`.
