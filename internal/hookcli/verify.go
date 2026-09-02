@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -75,4 +77,39 @@ func VerifyMCP(ctx context.Context, endpoint, apiKey string) (VerifyReport, erro
 	}
 	rep.Namespace = out.Namespace
 	return rep, nil
+}
+
+// VerifyHTTP is VerifyMCP for agents whose punk tools call the HTTP API
+// directly (the pi extension): it authenticates against
+// /v1/agent/namespace and returns the namespace cwd maps to, so a wrong
+// URL or key fails here rather than on the agent's first tool call.
+func VerifyHTTP(ctx context.Context, serverURL, apiKey, cwd string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(serverURL, "/")+"/v1/agent/namespace?cwd="+url.QueryEscape(cwd), nil)
+	if err != nil {
+		return "", err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("connect %s: %w", serverURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s/v1/agent/namespace: status %d", serverURL, resp.StatusCode)
+	}
+	var out struct {
+		Namespace string `json:"namespace"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Namespace == "" {
+		return "", fmt.Errorf("%s returned no namespace", serverURL)
+	}
+	return out.Namespace, nil
 }

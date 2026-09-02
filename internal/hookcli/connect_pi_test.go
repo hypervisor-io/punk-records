@@ -452,7 +452,6 @@ export default function (pi) {
 }
 `
 
-
 // TestConnectPiGoldenContent pins the exact bytes ConnectPi writes for a
 // fresh extension file.
 func TestConnectPiGoldenContent(t *testing.T) {

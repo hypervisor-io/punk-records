@@ -57,7 +57,7 @@ type Server struct {
 	defaultBudget task.Budget
 	turnTokens    int      // per-turn context budget; 0 disables mode=turn
 	inject        []string // session-start context components; empty = default
-	version       string // stamped via MountAgentCard; used in A2A cards
+	version       string   // stamped via MountAgentCard; used in A2A cards
 
 	// Ready reports readiness (DB reachable, registry loaded). Nil means
 	// "ready" so the skeleton stays honest before P1 wires the store.

@@ -20,8 +20,8 @@ type Diagnosis struct {
 	// window is configured. Recall caps the scan at 1000 facts.
 	OversizeEmbeddings int `json:"oversize_embeddings"`
 	OrphanLinks        int `json:"orphan_links"`
-	StaleObservations int    `json:"stale_observations"`
-	ExpiredClaims     int    `json:"expired_claims"`
+	StaleObservations  int `json:"stale_observations"`
+	ExpiredClaims      int `json:"expired_claims"`
 
 	// Consolidation observability. LastConsolidatedAt is when this process last finished a
 	// consolidation pass for the namespace (RFC3339; empty when it hasn't

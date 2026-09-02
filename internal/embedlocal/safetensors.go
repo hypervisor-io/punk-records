@@ -47,6 +47,9 @@ func ReadMatrix(path, tensor string) (rows, dims int, data []float32, err error)
 		return 0, 0, nil, fmt.Errorf("safetensors: tensor %q has rank %d, want 2", tensor, len(h.Shape))
 	}
 	rows, dims = h.Shape[0], h.Shape[1]
+	if rows <= 0 || dims <= 0 || rows > math.MaxInt/dims {
+		return 0, 0, nil, fmt.Errorf("safetensors: tensor %q shape %dx%d is not a usable matrix", tensor, rows, dims)
+	}
 	body := raw[8+n:]
 	start, end := h.DataOffsets[0], h.DataOffsets[1]
 	if start < 0 || end > len(body) || start > end {

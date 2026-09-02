@@ -33,3 +33,27 @@ func TestVerifyMCPAgainstInMemoryServer(t *testing.T) {
 		t.Fatal("unreachable endpoint must error")
 	}
 }
+
+func TestVerifyHTTPCallsNamespaceEndpoint(t *testing.T) {
+	var gotAuth, gotCwd string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agent/namespace" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotCwd = r.URL.Query().Get("cwd")
+		_, _ = w.Write([]byte(`{"namespace":"agent-demo"}`))
+	}))
+	defer ts.Close()
+	ns, err := VerifyHTTP(context.Background(), ts.URL, "prk_v", "/srv/demo")
+	if err != nil || ns != "agent-demo" {
+		t.Fatalf("ns=%q err=%v", ns, err)
+	}
+	if gotAuth != "Bearer prk_v" || gotCwd != "/srv/demo" {
+		t.Fatalf("auth=%q cwd=%q", gotAuth, gotCwd)
+	}
+	if _, err := VerifyHTTP(context.Background(), "http://127.0.0.1:1", "", "/x"); err == nil {
+		t.Fatal("unreachable server must error")
+	}
+}

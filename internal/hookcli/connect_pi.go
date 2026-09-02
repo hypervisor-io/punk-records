@@ -35,6 +35,7 @@ import (
 //     rename) - shared with ConnectClaudeCode/ConnectCursor/
 //     ConnectOpenCode/WriteCursorRules, see connect.go's doc comment for
 //     the exact guarantees.
+//
 // PiOpts carries the optional extension inputs. Namespace, when set
 // (punk connect pi --project), is baked in as a string literal and pins
 // every tool call to that namespace.

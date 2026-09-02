@@ -9,7 +9,7 @@ import (
 
 // Observation is one consolidated belief with provenance.
 type Observation struct {
-	Slug      string   `json:"slug"`       // key segment: /observations/<slug>
+	Slug      string   `json:"slug"` // key segment: /observations/<slug>
 	Body      string   `json:"body"`
 	SourceIDs []string `json:"source_ids"` // fact IDs this belief is grounded in
 

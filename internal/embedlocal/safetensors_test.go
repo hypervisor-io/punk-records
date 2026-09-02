@@ -71,3 +71,15 @@ func TestReadMatrixF16AndF32(t *testing.T) {
 		t.Fatalf("missing tensor must error")
 	}
 }
+
+func TestReadMatrixRejectsOverflowingShape(t *testing.T) {
+	dir := t.TempDir()
+	p := writeSafetensors(t, dir, "embeddings", "F16", []int{1 << 40, 1 << 40}, []byte{0, 0})
+	if _, _, _, err := ReadMatrix(p, "embeddings"); err == nil {
+		t.Fatal("shape whose product overflows int must be rejected")
+	}
+	p = writeSafetensors(t, t.TempDir(), "embeddings", "F16", []int{0, 4}, nil)
+	if _, _, _, err := ReadMatrix(p, "embeddings"); err == nil {
+		t.Fatal("zero rows must be rejected")
+	}
+}

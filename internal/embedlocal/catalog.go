@@ -106,7 +106,7 @@ func download(ctx context.Context, client *http.Client, url, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
-	tmp := dst + fmt.Sprintf(".part-%d", os.Getpid())
+	tmp := dst + fmt.Sprintf(".part-%d-%d", os.Getpid(), time.Now().UnixNano())
 	out, err := os.Create(tmp)
 	if err != nil {
 		return err

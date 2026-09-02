@@ -16,8 +16,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
-	"regexp"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -688,15 +688,15 @@ func cmdServe(args []string) error {
 	agentSrv := mcpserver.New(agentDeps)
 
 	srv := api.New(log, api.Deps{
-		Memory:    mem,
-		Ledger:    ledger,
-		Router:    router,
-		Proposals: props,
-		Keys:      api.NewKeys(db, nil),
-		Bus:       eventBus,
-		DB:        db,
-		Reg:       reg,
-		Expander:  expander,
+		Memory:            mem,
+		Ledger:            ledger,
+		Router:            router,
+		Proposals:         props,
+		Keys:              api.NewKeys(db, nil),
+		Bus:               eventBus,
+		DB:                db,
+		Reg:               reg,
+		Expander:          expander,
 		TurnContextTokens: cfg.Memory.TurnContextTokens,
 		Inject:            cfg.Memory.Inject,
 		DefaultBudget: task.Budget{
@@ -810,7 +810,7 @@ func cmdServe(args []string) error {
 	if cfg.Memory.ConsolidateDays > 0 || cfg.Memory.IVFNprobe > 0 {
 		horizon := time.Duration(cfg.Memory.ConsolidateDays) * 24 * time.Hour
 		go func() {
-			lastRun := map[string]time.Time{}   // per-ns last pass (this process)
+			lastRun := map[string]time.Time{}    // per-ns last pass (this process)
 			ivfBootstrapped := map[string]bool{} // per-ns first BuildIVF done
 			tick := time.NewTicker(consolidateCheckInterval)
 			defer tick.Stop()
@@ -2701,7 +2701,7 @@ func cmdConnectPi(args []string) error {
 	fs := flag.NewFlagSet("connect pi", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts; bakes the remote-derived namespace into the extension")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
-	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	verify := fs.Bool("verify", false, "after writing the extension, call the server's /v1/agent/namespace with this machine's credentials (pi tools use the HTTP API, not MCP)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2739,9 +2739,12 @@ func cmdConnectPi(args []string) error {
 		fmt.Println("punk: note - pi only auto-discovers project-local .pi/extensions/ once the project itself is trusted (pi's own project_trust prompt/flow); an untrusted project will not load this file")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		cwd, _ := os.Getwd()
+		ns, err := hookcli.VerifyHTTP(context.Background(), serverURL, apiKey, cwd)
+		if err != nil {
 			return err
 		}
+		fmt.Printf("punk: verified: HTTP API reachable, namespace %s\n", ns)
 	}
 	fmt.Printf("punk: note - the extension reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart pi or run /reload to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)

@@ -22,6 +22,9 @@ type nsResolver struct {
 	bySession    map[*mcp.ServerSession]rootInfo
 }
 
+// maxCachedSessions bounds the roots cache; see rootPath.
+const maxCachedSessions = 1024
+
 type rootInfo struct {
 	path string // "" when the client advertised no usable root
 }
@@ -54,6 +57,12 @@ func (r *nsResolver) rootPath(ctx context.Context, ss *mcp.ServerSession) string
 		}
 	}
 	r.mu.Lock()
+	// Sessions are not observable at close time from here, so the cache is
+	// bounded instead of pruned: past the cap it is reset wholesale, which
+	// costs one extra roots round trip per live session and nothing else.
+	if len(r.bySession) >= maxCachedSessions {
+		r.bySession = map[*mcp.ServerSession]rootInfo{}
+	}
 	r.bySession[ss] = rootInfo{path: path}
 	r.mu.Unlock()
 	return path
