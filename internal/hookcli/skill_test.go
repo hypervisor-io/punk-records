@@ -18,9 +18,9 @@ func TestRenderSkillPerAgent(t *testing.T) {
 			[]string{"`punk_search`", "`punk_remember_many`"}, nil},
 		{SkillOpts{Agent: "pi", ToolPrefix: "punk_", Pi: true},
 			[]string{"`punk_whoami`", "`punk_recall`", "`punk_search`", "`punk_remember`", "HTTP API"},
-			[]string{"`punk_unified_search`", "`punk_claim_work`"}},
+			[]string{"`punk_unified_search`", "`punk_claim_work`", "unified_search", "remember_many", "remember_document", "feedback", "list_keys", "triplet_search", "prefixed ``"}},
 		{SkillOpts{Agent: "hermes", Hermes: true},
-			[]string{"version: 1.0.0", "metadata:", "hermes:", "category: memory", "`recall`"}, nil},
+			[]string{"version: 1.0.0", "metadata:", "hermes:", "category: memory", "`recall`", "plain names"}, []string{"prefixed ``"}},
 		{SkillOpts{Agent: "codex", Namespace: "agent-billing-1a2b3c"},
 			[]string{"agent-billing-1a2b3c"}, nil},
 	}

@@ -290,7 +290,7 @@ Inside a session the agent can omit `namespace` on every tool: it resolves from 
 | codex | hooks.json (`[features] hooks = true`) | MCP | `$CODEX_HOME/config.toml` `[mcp_servers.punk]` inside a punk-managed block |
 | pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
 
-Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--project`, which also derives the namespace from the git remote.
+Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--no-skill`. All but `openclaw` and `hermes` also accept `--project`, which writes project-local files and derives the namespace from the git remote.
 
 Every `punk connect <agent>` also installs a `punk-memory` skill where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). It teaches namespaces, read routing, key conventions, claims and the `/tasks` coordination convention, feedback and compact output. A file you edited yourself is never overwritten. `punk skill print --agent <name>` shows the text; `--no-skill` skips it.
 

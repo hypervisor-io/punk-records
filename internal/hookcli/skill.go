@@ -26,6 +26,9 @@ type SkillOpts struct {
 // ToolName renders a tool reference for the target agent.
 func ToolName(prefix, tool string) string { return prefix + tool }
 
+// skillDescriptionPi omits the tools pi's extension does not expose.
+const skillDescriptionPi = "Use punk-records shared memory: resolve the namespace with punk_whoami, recall known keys, search when wording is unknown, and remember durable decisions and gotchas. Use whenever prior context, decisions, incidents, conventions or another agent's work may already be recorded."
+
 const skillDescription = "Use punk-records shared memory: resolve the namespace, recall known keys, search or unified_search when wording is unknown, remember durable decisions and gotchas, coordinate with other agents through claims and /tasks facts, and rate hits with feedback. Use whenever prior context, decisions, incidents, conventions or another agent's work may already be recorded."
 
 var skillTmpl = template.Must(template.New("skill").Funcs(template.FuncMap{
@@ -47,20 +50,20 @@ metadata:
 
 Punk Records is the shared memory plane for this workspace and for every agent connected to it: prior sessions, decisions, conventions, incidents, entities, relations, and the work other agents are doing right now. It is evidence about the past and about other agents, not a substitute for reading the current code.
 {{if .Opts.ServerURL}}
-Server: {{.Opts.ServerURL}}. {{end}}Tools are prefixed ` + "`{{.Opts.ToolPrefix}}`" + ` in this agent{{if .Opts.Pi}}; pi exposes four tools backed by the HTTP API: {{tool .Opts "whoami"}}, {{tool .Opts "recall"}}, {{tool .Opts "search"}}, {{tool .Opts "remember"}}{{end}}.
+Server: {{.Opts.ServerURL}}. {{end}}{{if .Opts.Pi}}This agent exposes four punk tools backed by the HTTP API: {{tool .Opts "whoami"}}, {{tool .Opts "recall"}}, {{tool .Opts "search"}}, {{tool .Opts "remember"}}.{{else if .Opts.ToolPrefix}}Punk tools are prefixed ` + "`{{.Opts.ToolPrefix}}`" + ` in this agent.{{else}}Punk tools appear under their plain names (recall, search, remember, and so on) in this agent.{{end}}
 
 ## Namespaces
 
 - A namespace is one memory region. {{if .Opts.Namespace}}This project is pinned to ` + "`{{.Opts.Namespace}}`" + `.{{else}}When you omit it, the server resolves it from the workspace root you are in (` + "`agent-<repo>`" + `).{{end}}
 - Call {{tool .Opts "whoami"}} once at session start. It returns the namespace, how it was resolved, and your agent identity.
 - Pass an explicit namespace only to read or write a shared region another agent named (for example a coordination namespace a planner created).
-- Never invent a namespace or a key. Discover keys with {{tool .Opts "list_keys"}} or by recalling a prefix.
+- Never invent a namespace or a key. Discover keys {{if .Opts.Pi}}by recalling a prefix{{else}}with {{tool .Opts "list_keys"}} or by recalling a prefix{{end}}.
 
 ## Reading memory
 {{if not .Opts.Pi}}
 Pick the read tool by what you know: {{tool .Opts "recall"}} for a known key prefix, {{tool .Opts "search"}} for words or identifiers, {{tool .Opts "unified_search"}} when the wording is unknown or the question spans facts and relations.
 {{end}}
-{{.Routing}}
+{{if .Opts.Pi}}{{.RoutingPi}}{{else}}{{.Routing}}{{end}}
 
 ## Key conventions
 
@@ -123,14 +126,28 @@ const routingBody = `- recall: you know the key prefix (for example /decisions, 
 // RoutingSection returns the shared read/write routing prose.
 func RoutingSection() string { return routingBody }
 
+// routingBodyPi is the reading and writing guidance for pi, whose four
+// extension tools call the HTTP API: no relation tools, no batch write,
+// no feedback.
+const routingBodyPi = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked.
+- search: ranked hybrid search, compact hits (key, clipped body, score, flags). Put exact identifiers, error strings, flags or file names in anchors; they are extra retrieval routes, not filters.
+- Flags on hits: stale means newer raw facts exist since this synthesis; invalidated means a later fact superseded it (demoted, not hidden); model means a curated mental model.
+- A compact hit is already-read evidence. recall its key only when the clipped body is insufficient.
+- Writing: remember one durable decision, fix, convention or gotcha per hierarchical key; keep bodies to a paragraph. Do not store secrets.`
+
 // RenderSkill renders the canonical punk skill for one agent.
 func RenderSkill(o SkillOpts) string {
 	var b strings.Builder
+	desc := skillDescription
+	if o.Pi {
+		desc = skillDescriptionPi
+	}
 	_ = skillTmpl.Execute(&b, map[string]any{
 		"Opts":        o,
-		"Description": skillDescription,
+		"Description": desc,
 		"Marker":      SkillMarker,
 		"Routing":     routingBody,
+		"RoutingPi":   routingBodyPi,
 	})
 	return b.String()
 }
