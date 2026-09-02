@@ -116,6 +116,10 @@ func (s *Store) HybridSearchExpandedWith(ctx context.Context, ns, query string, 
 	for _, sf := range base {
 		best[sf.ID] = sf
 	}
+	var tops []string
+	if len(base) > 0 {
+		tops = append(tops, base[0].ID)
+	}
 	for _, q := range refs {
 		hits, herr := s.HybridSearchScoredWith(ctx, ns, q, HybridOpts{Limit: limit, RecencyHalfLife: o.RecencyHalfLife, Anchors: o.Anchors})
 		if herr != nil {
@@ -128,6 +132,9 @@ func (s *Store) HybridSearchExpandedWith(ctx context.Context, ns, query string, 
 			}
 			continue // one bad variant (non-ctx error) never fails the whole search
 		}
+		if len(hits) > 0 {
+			tops = append(tops, hits[0].ID)
+		}
 		for _, sf := range hits {
 			if cur, ok := best[sf.ID]; !ok || sf.Score > cur.Score {
 				best[sf.ID] = sf
@@ -135,15 +142,44 @@ func (s *Store) HybridSearchExpandedWith(ctx context.Context, ns, query string, 
 		}
 	}
 	out := make([]ScoredFact, 0, len(best))
-	for _, sf := range best {
-		out = append(out, sf)
-	}
-	sort.Slice(out, func(a, b int) bool {
-		if out[a].Score != out[b].Score {
-			return out[a].Score > out[b].Score
+	if len(best) > limit {
+		// Coverage first: the top hit of the base query and of every
+		// reformulation is kept, in that order, so a variant that reached
+		// something the others missed is never truncated away by the sum
+		// of the others' scores. The rest is filled by score. Coverage
+		// only reorders when truncation would actually drop candidates;
+		// otherwise the deterministic score-then-key order is kept.
+		seen := map[string]bool{}
+		for _, id := range tops {
+			if sf, ok := best[id]; ok && !seen[id] {
+				seen[id] = true
+				out = append(out, sf)
+			}
 		}
-		return out[a].Key < out[b].Key
-	})
+		rest := make([]ScoredFact, 0, len(best))
+		for id, sf := range best {
+			if !seen[id] {
+				rest = append(rest, sf)
+			}
+		}
+		sort.Slice(rest, func(a, b int) bool {
+			if rest[a].Score != rest[b].Score {
+				return rest[a].Score > rest[b].Score
+			}
+			return rest[a].Key < rest[b].Key
+		})
+		out = append(out, rest...)
+	} else {
+		for _, sf := range best {
+			out = append(out, sf)
+		}
+		sort.Slice(out, func(a, b int) bool {
+			if out[a].Score != out[b].Score {
+				return out[a].Score > out[b].Score
+			}
+			return out[a].Key < out[b].Key
+		})
+	}
 	if len(out) > limit {
 		out = out[:limit]
 	}
