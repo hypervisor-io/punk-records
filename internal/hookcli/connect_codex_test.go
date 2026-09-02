@@ -174,3 +174,26 @@ func TestConnectCodexConfigRefusesForeignPunkTable(t *testing.T) {
 		t.Fatalf("force must replace the foreign table:\n%s", raw)
 	}
 }
+
+func TestConnectCodexConfigKeepsCRLF(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	orig := "model = \"gpt-5\"\r\n\r\n[features]\r\nweb_search = true\r\n"
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "http://localhost:9090"}
+	if _, err := ConnectCodexConfig(p, o, true, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	s := string(raw)
+	if strings.Contains(strings.ReplaceAll(s, "\r\n", ""), "\n") {
+		t.Fatalf("mixed line endings:\n%q", s)
+	}
+	if !strings.Contains(s, "[features]\r\nhooks = true\r\nweb_search = true\r\n") {
+		t.Fatalf("hooks flag not inserted with CRLF:\n%q", s)
+	}
+	if changed, _ := ConnectCodexConfig(p, o, true, false); changed {
+		t.Fatal("idempotent on CRLF files")
+	}
+}

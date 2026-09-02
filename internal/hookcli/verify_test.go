@@ -71,3 +71,12 @@ func TestVerifyHTTPCallsNamespaceEndpoint(t *testing.T) {
 		t.Fatal("unreachable server must error")
 	}
 }
+
+func TestFileURI(t *testing.T) {
+	if got := fileURI("/srv/demo"); got != "file:///srv/demo" {
+		t.Fatalf("posix: %s", got)
+	}
+	if got := fileURI(`C:\work\repo`); got != "file:///C:/work/repo" && got != `file:///C:\work\repo` {
+		t.Fatalf("windows: %s", got)
+	}
+}

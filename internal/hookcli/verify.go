@@ -43,7 +43,7 @@ func VerifyMCP(ctx context.Context, endpoint, apiKey, cwd string) (VerifyReport,
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "punk-connect-verify", Version: "1"}, nil)
 	if cwd != "" {
-		client.AddRoots(&mcp.Root{URI: "file://" + filepath.ToSlash(cwd), Name: filepath.Base(cwd)})
+		client.AddRoots(&mcp.Root{URI: fileURI(cwd), Name: filepath.Base(cwd)})
 	}
 	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
 	if apiKey != "" {
@@ -122,4 +122,15 @@ func VerifyHTTP(ctx context.Context, serverURL, apiKey, cwd string) (string, err
 		return "", fmt.Errorf("%s returned no namespace", serverURL)
 	}
 	return out.Namespace, nil
+}
+
+// fileURI renders an absolute local path as a file:// URI. A Windows
+// drive path ("C:\\work") has no leading slash, so one is added to keep
+// the three-slash form ("file:///C:/work") that MCP clients send.
+func fileURI(path string) string {
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return "file://" + p
 }

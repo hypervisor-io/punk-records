@@ -168,7 +168,11 @@ func ConnectCodexConfig(configPath string, o MCPEntryOpts, enableHooks, force bo
 		return false, readErr
 	}
 	existing := string(raw)
-	body := stripManagedBlock(existing)
+	// Codex runs on Windows too; edit in LF and restore the file's own
+	// line endings on the way out so a CRLF config.toml stays CRLF and
+	// never ends up with mixed endings.
+	crlf := strings.Contains(existing, "\r\n")
+	body := stripManagedBlock(strings.ReplaceAll(existing, "\r\n", "\n"))
 
 	if strings.Contains(body, codexPunkTable) {
 		if !force {
@@ -206,6 +210,9 @@ func ConnectCodexConfig(configPath string, o MCPEntryOpts, enableHooks, force bo
 		body += "\n"
 	}
 	out := body + codexManagedBlock(o, includeFeatures)
+	if crlf {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
 	if out == existing {
 		return false, nil
 	}
