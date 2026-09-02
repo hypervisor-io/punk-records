@@ -2294,9 +2294,38 @@ func cmdConnect(args []string) error {
 		return cmdConnectHermes(args[1:])
 	case "openclaw":
 		return cmdConnectOpenClaw(args[1:])
+	case "verify":
+		return cmdConnectVerify(args[1:])
 	default:
 		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", and \"openclaw\" are supported", target)
 	}
+}
+
+// cmdConnectVerify proves an MCP session to the server works: connect,
+// tools/list, whoami. Standalone or invoked by the connect commands'
+// --verify flag.
+func cmdConnectVerify(args []string) error {
+	fs := flag.NewFlagSet("connect verify", flag.ContinueOnError)
+	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return printVerify(context.Background(), strings.TrimRight(*urlFlag, "/"))
+}
+
+// printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
+// prints a one-line summary.
+func printVerify(ctx context.Context, serverURL string) error {
+	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent")
+	if err != nil {
+		return err
+	}
+	instructions := "no"
+	if rep.Instructions {
+		instructions = "yes"
+	}
+	fmt.Printf("punk: verified: %d tools, namespace %s, instructions %s\n", len(rep.Tools), rep.Namespace, instructions)
+	return nil
 }
 
 func cmdConnectClaudeCode(args []string) error {
@@ -2305,6 +2334,7 @@ func cmdConnectClaudeCode(args []string) error {
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2360,6 +2390,11 @@ func cmdConnectClaudeCode(args []string) error {
 		fmt.Printf("punk: permission %s in %s (%s)\n", hookcli.ClaudeMCPRule, settingsPath, changedWord(permChanged))
 		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
 	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2386,6 +2421,7 @@ func cmdConnectCursor(args []string) error {
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2456,7 +2492,17 @@ func cmdConnectCursor(args []string) error {
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
+		if *verify {
+			if err := printVerify(context.Background(), serverURL); err != nil {
+				return err
+			}
+		}
 		return nil
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL); err != nil {
+			return err
+		}
 	}
 	fmt.Print(cursorMCPRegistrationNote(serverURL))
 	return nil
@@ -2505,6 +2551,7 @@ func cmdConnectOpenCode(args []string) error {
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2549,6 +2596,11 @@ func cmdConnectOpenCode(args []string) error {
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
