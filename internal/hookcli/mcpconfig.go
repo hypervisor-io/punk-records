@@ -26,30 +26,34 @@ func isPunkMCPEntry(entry any) bool {
 	return m["type"] == "http" && strings.Contains(u, "/mcp")
 }
 
-// ConnectClaudeCodeMCP registers punk under mcpServers.punk in a Claude
-// Code config file (~/.claude.json globally, .mcp.json per project).
-// Same guarantees as ConnectClaudeCode: whole-file parse, refuse on wrong
-// shapes, byte-identical no-op detection, atomic mode-preserving write.
-// An existing punk entry that punk did not write is refused unless force.
-func ConnectClaudeCodeMCP(configPath, serverURL string, force bool) (changed bool, err error) {
-	cfg, existing, err := loadSettings(configPath)
+// upsertServerEntry sets <section>.punk = entry in the JSON file at path,
+// refusing to overwrite a foreign punk entry unless force. isOurs decides
+// whether an existing entry was written by punk. seed is merged into a
+// freshly created file (schema pointers and the like).
+func upsertServerEntry(path, section string, entry map[string]any, isOurs func(any) bool, seed map[string]any, force bool) (bool, error) {
+	cfg, existing, err := loadSettings(path)
 	if err != nil {
 		return false, err
 	}
+	if existing == nil {
+		for k, v := range seed {
+			cfg[k] = v
+		}
+	}
 	var servers map[string]any
-	if raw, ok := cfg["mcpServers"]; ok && raw != nil {
+	if raw, ok := cfg[section]; ok && raw != nil {
 		servers, ok = raw.(map[string]any)
 		if !ok {
-			return false, fmt.Errorf("mcpServers is not an object; refusing to modify %s", configPath)
+			return false, fmt.Errorf("%s is not an object; refusing to modify %s", section, path)
 		}
 	} else {
 		servers = map[string]any{}
 	}
-	if prev, ok := servers["punk"]; ok && !isPunkMCPEntry(prev) && !force {
-		return false, fmt.Errorf("%s already has an mcpServers.punk entry that punk did not write; rerun with --force to replace it", configPath)
+	if prev, ok := servers["punk"]; ok && !isOurs(prev) && !force {
+		return false, fmt.Errorf("%s already has a %s.punk entry that punk did not write; rerun with --force to replace it", path, section)
 	}
-	servers["punk"] = map[string]any{"type": "http", "url": mcpEndpoint(serverURL)}
-	cfg["mcpServers"] = servers
+	servers["punk"] = entry
+	cfg[section] = servers
 	out, err := encodeSettings(cfg)
 	if err != nil {
 		return false, err
@@ -57,10 +61,48 @@ func ConnectClaudeCodeMCP(configPath, serverURL string, force bool) (changed boo
 	if existing != nil && string(out) == string(existing) {
 		return false, nil
 	}
-	if err := writePreservingSymlinkAndMode(configPath, out, 0o644); err != nil {
+	if err := writePreservingSymlinkAndMode(path, out, 0o644); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// ConnectClaudeCodeMCP registers punk under mcpServers.punk in a Claude
+// Code config file (~/.claude.json globally, .mcp.json per project).
+// Same guarantees as ConnectClaudeCode: whole-file parse, refuse on wrong
+// shapes, byte-identical no-op detection, atomic mode-preserving write.
+// An existing punk entry that punk did not write is refused unless force.
+func ConnectClaudeCodeMCP(configPath, serverURL string, force bool) (bool, error) {
+	return upsertServerEntry(configPath, "mcpServers",
+		map[string]any{"type": "http", "url": mcpEndpoint(serverURL)}, isPunkMCPEntry, nil, force)
+}
+
+// ConnectCursorMCP registers punk in a Cursor mcp.json ({"mcpServers":{"punk":{"url":...}}}).
+func ConnectCursorMCP(mcpPath, serverURL string, force bool) (bool, error) {
+	ours := func(e any) bool {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return false
+		}
+		u, _ := m["url"].(string)
+		return strings.Contains(u, "/mcp")
+	}
+	return upsertServerEntry(mcpPath, "mcpServers", map[string]any{"url": mcpEndpoint(serverURL)}, ours, nil, force)
+}
+
+// ConnectOpenCodeMCP registers punk in an opencode.json ({"mcp":{"punk":{"type":"remote","url":...,"enabled":true}}}).
+func ConnectOpenCodeMCP(configPath, serverURL string, force bool) (bool, error) {
+	ours := func(e any) bool {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return false
+		}
+		u, _ := m["url"].(string)
+		return m["type"] == "remote" && strings.Contains(u, "/mcp")
+	}
+	return upsertServerEntry(configPath, "mcp",
+		map[string]any{"type": "remote", "url": mcpEndpoint(serverURL), "enabled": true},
+		ours, map[string]any{"$schema": "https://opencode.ai/config.json"}, force)
 }
 
 // EnsureClaudePermission appends rule to permissions.allow in a Claude

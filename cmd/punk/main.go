@@ -2384,6 +2384,8 @@ func cmdConnectCursor(args []string) error {
 	fs := flag.NewFlagSet("connect cursor", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.cursor/hooks.json (instead of the global ~/.cursor/hooks.json) and ./.cursor/rules/punk-memory.mdc; the rules file is project-only and is only written with this flag")
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2446,6 +2448,16 @@ func cmdConnectCursor(args []string) error {
 	}
 
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	if !*noMCP {
+		mcpPath := filepath.Join(cursorDir, "mcp.json")
+		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath, serverURL, *force)
+		if err != nil {
+			return fmt.Errorf("connect cursor mcp: %w", err)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
+		return nil
+	}
 	fmt.Print(cursorMCPRegistrationNote(serverURL))
 	return nil
 }
@@ -2489,21 +2501,30 @@ punk: once an API key exists (punk apikey create --name ...), add a "headers": {
 // always writes the plural, current form.
 func cmdConnectOpenCode(args []string) error {
 	fs := flag.NewFlagSet("connect opencode", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js instead of the global ~/.config/opencode/plugins/punk-memory.js")
+	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js and ./opencode.json instead of the global ~/.config/opencode equivalents")
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
+	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	var pluginPath string
+	var configDir string
 	if *project {
 		pluginPath = filepath.Join(".opencode", "plugins", "punk-memory.js")
+		configDir = "."
 	} else {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("resolve home directory: %w", err)
 		}
-		pluginPath = filepath.Join(home, ".config", "opencode", "plugins", "punk-memory.js")
+		base := os.Getenv("XDG_CONFIG_HOME")
+		if base == "" {
+			base = filepath.Join(home, ".config")
+		}
+		configDir = base
+		pluginPath = filepath.Join(base, "opencode", "plugins", "punk-memory.js")
 	}
 
 	serverURL := strings.TrimRight(*urlFlag, "/")
@@ -2516,6 +2537,18 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Printf("punk: wrote OpenCode plugin to %s\n", pluginPath)
 	} else {
 		fmt.Printf("punk: %s already up to date\n", pluginPath)
+	}
+	if !*noMCP {
+		mcpPath := filepath.Join(configDir, "opencode.json")
+		if *project {
+			mcpPath = filepath.Join("opencode.json")
+		}
+		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath, serverURL, *force)
+		if err != nil {
+			return fmt.Errorf("connect opencode mcp: %w", err)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
 	}
 	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)

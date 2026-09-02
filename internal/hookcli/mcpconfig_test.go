@@ -83,3 +83,41 @@ func TestEnsureClaudePermission(t *testing.T) {
 		t.Fatalf("created permissions = %s", raw)
 	}
 }
+
+func TestConnectCursorMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers":{"gh":{"command":"gh-mcp"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := ConnectCursorMCP(p, "http://localhost:9090", false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readSettings(t, p)["mcpServers"].(map[string]any)
+	if m["punk"].(map[string]any)["url"] != "http://localhost:9090/mcp?toolset=agent" || m["gh"] == nil {
+		t.Fatalf("cursor mcp.json = %v", m)
+	}
+	if changed, _ := ConnectCursorMCP(p, "http://localhost:9090", false); changed {
+		t.Fatal("idempotent")
+	}
+}
+
+func TestConnectOpenCodeMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "opencode.json")
+	if changed, err := ConnectOpenCodeMCP(p, "http://localhost:9090", false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readSettings(t, p)
+	if m["$schema"] != "https://opencode.ai/config.json" {
+		t.Fatalf("created file must carry the schema: %v", m)
+	}
+	punk := m["mcp"].(map[string]any)["punk"].(map[string]any)
+	if punk["type"] != "remote" || punk["enabled"] != true || punk["url"] != "http://localhost:9090/mcp?toolset=agent" {
+		t.Fatalf("opencode entry = %v", punk)
+	}
+	if err := os.WriteFile(p, []byte(`{"mcp":{"punk":{"type":"local","command":["node","x"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectOpenCodeMCP(p, "http://localhost:9090", false); err == nil {
+		t.Fatal("foreign entry must be refused without force")
+	}
+}
