@@ -96,6 +96,7 @@ Usage:
                       --from copilot translates GitHub Copilot CLI's native hook payload (self-identifies its event; SessionStart injects via Copilot's own additionalContext shape)
                       --from hermes translates Hermes Agent's native shell-hook payload (self-identifies its event; first-turn pre_llm_call injects via Hermes' own {"context":...} shape)
   punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex [--project] [--url URL])
+  punk      skill     punk usage skill in the agent's skill directory (skill install|print|paths --agent NAME [--project] [--url URL] [--ns NS])
   punk      --version print version
 `
 
@@ -158,6 +159,8 @@ func run(args []string) error {
 		return cmdHook(args[1:])
 	case "connect":
 		return cmdConnect(args[1:])
+	case "skill":
+		return cmdSkill(args[1:])
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 		return nil
@@ -2348,6 +2351,7 @@ func cmdConnectClaudeCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
@@ -2434,6 +2438,9 @@ func cmdConnectClaudeCode(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("claude-code", *project, serverURL, projNS)
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2449,6 +2456,32 @@ func defaultAgentName() string {
 		host = h
 	}
 	return u + "@" + host
+}
+
+// installSkillFor writes the punk-memory skill where agent loads skills
+// from. A hand-written file at that path is reported and left alone; a
+// skill problem never fails the connect that hooks and MCP already
+// succeeded at.
+func installSkillFor(agent string, project bool, serverURL, ns string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("punk: warning - skill not installed: %v\n", err)
+		return
+	}
+	targets, err := hookcli.SkillTargets(agent, project, home, os.Getenv)
+	if err != nil {
+		fmt.Printf("punk: warning - skill not installed: %v\n", err)
+		return
+	}
+	for _, tg := range targets {
+		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, ns
+		changed, err := hookcli.WriteSkill(tg.Path, hookcli.RenderSkill(tg.Opts))
+		if err != nil {
+			fmt.Printf("punk: warning - %v\n", err)
+			continue
+		}
+		fmt.Printf("punk: skill %s in %s (%s)\n", hookcli.SkillName, tg.Path, changedWord(changed))
+	}
 }
 
 // changedWord renders a change flag for connect summaries.
@@ -2474,6 +2507,7 @@ func cmdConnectCursor(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
@@ -2570,12 +2604,18 @@ func cmdConnectCursor(args []string) error {
 				return err
 			}
 		}
+		if !*noSkill {
+			installSkillFor("cursor", *project, serverURL, projNS)
+		}
 		return nil
 	}
 	if *verify {
 		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
 			return err
 		}
+	}
+	if !*noSkill {
+		installSkillFor("cursor", *project, serverURL, projNS)
 	}
 	fmt.Print(cursorMCPRegistrationNote(serverURL))
 	return nil
@@ -2643,6 +2683,7 @@ func cmdConnectOpenCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
@@ -2685,6 +2726,9 @@ func cmdConnectOpenCode(args []string) error {
 		}
 	}
 	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
+	if !*noSkill {
+		installSkillFor("opencode", *project, serverURL, "")
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2710,6 +2754,7 @@ func cmdConnectPi(args []string) error {
 	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts; bakes the remote-derived namespace into the extension")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	verify := fs.Bool("verify", false, "after writing the extension, call the server's /v1/agent/namespace with this machine's credentials (pi tools use the HTTP API, not MCP)")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2728,9 +2773,11 @@ func cmdConnectPi(args []string) error {
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	var piOpts hookcli.PiOpts
+	var piNS string
 	if *project {
 		ns, nsrc := hookcli.ProjectNamespace(".")
 		piOpts = hookcli.PiOpts{Namespace: ns}
+		piNS = ns
 		fmt.Printf("punk: namespace %s (from %s)\n", ns, nsrc)
 	}
 
@@ -2755,6 +2802,9 @@ func cmdConnectPi(args []string) error {
 		fmt.Printf("punk: verified: HTTP API reachable, namespace %s\n", ns)
 	}
 	fmt.Printf("punk: note - the extension reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart pi or run /reload to pick up this file\n", serverURL)
+	if !*noSkill {
+		installSkillFor("pi", *project, serverURL, piNS)
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2802,6 +2852,7 @@ func cmdConnectAntigravity(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2873,6 +2924,9 @@ func cmdConnectAntigravity(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("antigravity", *project, serverURL, projNS)
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2932,6 +2986,7 @@ func cmdConnectCopilot(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2999,6 +3054,9 @@ func cmdConnectCopilot(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("copilot", *project, serverURL, "")
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -3036,6 +3094,7 @@ func cmdConnectHermes(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3091,6 +3150,9 @@ func cmdConnectHermes(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("hermes", false, serverURL, "")
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -3121,6 +3183,7 @@ func cmdConnectOpenClaw(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3179,6 +3242,9 @@ func cmdConnectOpenClaw(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("openclaw", false, serverURL, "")
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -3201,6 +3267,7 @@ func cmdConnectCodex(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "name of the env var Codex reads the bearer token from (default PUNK_API_KEY when a key is configured)")
 	agent := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3258,7 +3325,60 @@ func cmdConnectCodex(args []string) error {
 			return err
 		}
 	}
+	if !*noSkill {
+		installSkillFor("codex", *project, serverURL, ns)
+	}
 	fmt.Println("punk: restart codex to pick up the changes")
+	return nil
+}
+
+// cmdSkill installs, prints or locates the canonical punk-memory usage
+// skill for one agent (see hookcli.SkillTargets for the per-agent
+// locations and hookcli.RenderSkill for the canonical text). install is
+// marker-gated: a file at the target that punk did not write is refused.
+func cmdSkill(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: punk skill install|print|paths --agent NAME [--project] [--url URL] [--ns NS]")
+	}
+	action := args[0]
+	fs := flag.NewFlagSet("skill "+action, flag.ContinueOnError)
+	agent := fs.String("agent", "", "target agent: claude-code|codex|opencode|cursor|copilot|antigravity|hermes|openclaw|pi")
+	project := fs.Bool("project", false, "project-local location instead of the global one")
+	urlFlag := fs.String("url", "", "server URL mentioned in the skill (default: resolved like connect)")
+	nsFlag := fs.String("ns", "", "pin the skill to a namespace (default: resolved from the workspace)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *agent == "" {
+		return errors.New("skill: --agent is required")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	targets, err := hookcli.SkillTargets(*agent, *project, home, os.Getenv)
+	if err != nil {
+		return err
+	}
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	for _, tg := range targets {
+		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, *nsFlag
+		content := hookcli.RenderSkill(tg.Opts)
+		switch action {
+		case "print":
+			fmt.Print(content)
+		case "paths":
+			fmt.Println(tg.Path)
+		case "install":
+			changed, err := hookcli.WriteSkill(tg.Path, content)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("punk: skill %s in %s (%s)\n", hookcli.SkillName, tg.Path, changedWord(changed))
+		default:
+			return fmt.Errorf("skill: want install, print or paths, got %q", action)
+		}
+	}
 	return nil
 }
 
