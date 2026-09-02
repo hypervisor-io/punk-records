@@ -2,7 +2,7 @@ services:
   punk:
     build: .
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     environment:
       PUNK_DB_DSN: /data/punk.db
       # PUNK_AI_ENABLED: "true"
