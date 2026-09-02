@@ -83,6 +83,7 @@ func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(
 		Router:           route.New(db, reg, ledger, nil, now),
 		Reg:              reg,
 		Mem:              memStore,
+		Region:           region.New(db, nil),
 		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: "agent-default",
@@ -136,8 +137,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 23 {
-		t.Fatalf("tools = %d, want 23 (21 plus whoami, remember_many)", len(tools.Tools))
+	if len(tools.Tools) != 29 {
+		t.Fatalf("tools = %d, want 29 (21 plus whoami, remember_many, 6 region tools)", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -438,8 +439,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 23 {
-		t.Fatalf("tools = %d, want 23 (reflect must stay off without an LLM)", len(tools.Tools))
+	if len(tools.Tools) != 29 {
+		t.Fatalf("tools = %d, want 29 (reflect must stay off without an LLM)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -965,5 +966,35 @@ func TestMemoryResourceSubscription(t *testing.T) {
 	}
 	if len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, `"key":"/tasks/T1"`) {
 		t.Fatalf("read memory resource: %+v", res.Contents)
+	}
+}
+
+func TestAgentToolsetIsLean(t *testing.T) {
+	cs := sessionOpts(t, nil, func(d *Deps) { d.Toolset = "agent" })
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tool := range res.Tools {
+		got[tool.Name] = true
+	}
+	for _, want := range agentToolset {
+		if !got[want] {
+			t.Fatalf("agent toolset missing %s; have %v", want, got)
+		}
+	}
+	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "register", "list_region_members", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
+		if got[name] {
+			t.Fatalf("agent toolset must not expose %s", name)
+		}
+	}
+	full := session(t)
+	fres, err := full.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fres.Tools) <= len(res.Tools) {
+		t.Fatalf("full toolset (%d) must be larger than agent (%d)", len(fres.Tools), len(res.Tools))
 	}
 }

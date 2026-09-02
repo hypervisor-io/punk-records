@@ -40,6 +40,7 @@ type Deps struct {
 	NamespaceFor  func(cwd string) string // maps a workspace path to its memory namespace; nil disables root-based resolution
 	DefaultNamespace string               // used when a call omits namespace and no root is known; empty = agent-default
 	LocalFiles    bool                    // allow remember_document{path}: only for the stdio server, which runs as the user
+	Toolset       string                  // "" or "full": every tool; "agent": the lean session set (see toolset.go)
 }
 
 // A2ARemote is a resolved foreign A2A agent the delegate tool can reach.
@@ -358,6 +359,7 @@ func New(d Deps) *mcp.Server {
 		registerReflectTool(s, d)
 	}
 
+	applyToolset(s, d.Toolset)
 	return s
 }
 

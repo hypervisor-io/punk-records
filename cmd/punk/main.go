@@ -659,7 +659,7 @@ func cmdServe(args []string) error {
 		}
 	}
 
-	mcpSrv := mcpserver.New(mcpserver.Deps{
+	mcpDeps := mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem, Region: regionStore, Bus: eventBus,
 		A2ARemotes: a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
 		NamespaceFor:     api.AgentNamespace,
@@ -670,7 +670,11 @@ func cmdServe(args []string) error {
 			WallMS:    cfg.Budgets.WallMS,
 			Subagents: cfg.Budgets.Subagents,
 		},
-	})
+	}
+	mcpSrv := mcpserver.New(mcpDeps)
+	agentDeps := mcpDeps
+	agentDeps.Toolset = "agent"
+	agentSrv := mcpserver.New(agentDeps)
 
 	srv := api.New(log, api.Deps{
 		Memory:    mem,
@@ -694,7 +698,12 @@ func cmdServe(args []string) error {
 	srv.Ready = db.Ping
 	srv.MountUI()
 	srv.MountAgentCard(version)
-	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpSrv }, nil))
+	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		if r.URL.Query().Get("toolset") == "agent" {
+			return agentSrv
+		}
+		return mcpSrv
+	}, nil))
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
 		Handler:           srv.Router(),
@@ -1306,6 +1315,7 @@ func cmdAPIKey(args []string) error {
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
+	toolset := fs.String("toolset", envOr("PUNK_MCP_TOOLSET", "full"), "agent | full")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1345,6 +1355,7 @@ func cmdMCP(args []string) error {
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
 		LocalFiles:       true,
+		Toolset:          *toolset,
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
@@ -2845,4 +2856,12 @@ func cmdConnectOpenClaw(args []string) error {
 	fmt.Println("punk: note - restart the OpenClaw gateway (plugins load at startup) to pick this up")
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
+}
+
+// envOr returns the environment variable's value, or def when unset/empty.
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
