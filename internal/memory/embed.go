@@ -29,6 +29,16 @@ type Embedder interface {
 // also FTS-invisible today.
 func embedText(key, body string) string { return "key: " + key + "\n" + body }
 
+// SetEmbedMaxTokens records the embedding model's input window so
+// Diagnose can count facts whose keyed input would be silently truncated
+// by the provider. 0 means unknown; nothing is counted.
+func (s *Store) SetEmbedMaxTokens(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.embedMaxTokens = n
+}
+
 // OllamaEmbedder speaks POST {base}/api/embed (Ollama-compatible).
 type OllamaEmbedder struct {
 	BaseURL string

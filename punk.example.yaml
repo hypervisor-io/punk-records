@@ -29,6 +29,7 @@ ai:
     base_url: http://localhost:11434   # Ollama root; punk appends /api/embed itself
     model: ""              # e.g. embeddinggemma or nomic-embed-text
     dims: 768
+    max_input_tokens: 0    # model window; e.g. 2048 for embeddinggemma, 8192 for nomic-embed-text; 0 = unknown
 
 budgets: # per-task defaults; agent specs may lower, never raise
   tokens: 200000

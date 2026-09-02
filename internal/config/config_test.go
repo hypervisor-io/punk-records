@@ -76,3 +76,25 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		t.Fatal("want error for bad bool, got nil")
 	}
 }
+
+func TestEmbeddingsMaxInputTokensValidation(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("ai:\n  embeddings:\n    model: x\n    max_input_tokens: -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("want error for max_input_tokens=-1, got nil")
+	}
+	okPath := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(okPath, []byte("ai:\n  embeddings:\n    model: x\n    max_input_tokens: 2048\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(okPath)
+	if err != nil {
+		t.Fatalf("max_input_tokens=2048 should validate: %v", err)
+	}
+	if c.AI.Embeddings.MaxInputTokens != 2048 {
+		t.Fatalf("MaxInputTokens = %d, want 2048", c.AI.Embeddings.MaxInputTokens)
+	}
+}

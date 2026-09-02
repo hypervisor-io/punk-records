@@ -35,6 +35,7 @@ type Store struct {
 	db              *store.DB
 	now             func() time.Time
 	embedder        Embedder          // nil disables vector search
+	embedMaxTokens  int               // embedding model input window; 0 = unknown (diagnose skips oversize accounting)
 	entityExtractor EntityExtractor   // nil disables entity enrichment
 	reranker        Reranker          // nil disables cross-encoder reranking (R2 Task 9)
 	defense         string            // "" / "off" / "redact" / "block" — global write-time secret scrubbing

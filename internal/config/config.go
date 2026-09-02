@@ -54,6 +54,9 @@ type Embeddings struct {
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
 	Dims    int    `yaml:"dims"`
+	// MaxInputTokens is the model input window in tokens; 0 = unknown
+	// (diagnose skips oversize accounting).
+	MaxInputTokens int `yaml:"max_input_tokens"`
 }
 
 // AIProfile mirrors llm.Profile; config stays dependency-free.
@@ -286,6 +289,9 @@ func (c *Config) validate() error {
 	}
 	if c.Memory.RetentionDays < 0 {
 		errs = append(errs, errors.New("memory.retention_days: must be >= 0"))
+	}
+	if c.AI.Embeddings.MaxInputTokens < 0 {
+		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))
 	}
 	if c.Memory.IVFNprobe < 0 || c.Memory.IVFMinFacts < 0 {
 		errs = append(errs, errors.New("memory.ivf_nprobe, memory.ivf_min_facts: must be >= 0"))

@@ -559,6 +559,7 @@ func cmdServe(args []string) error {
 			Model:   cfg.AI.Embeddings.Model,
 			D:       cfg.AI.Embeddings.Dims,
 		})
+		mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
 		log.Info("embeddings enabled", "model", cfg.AI.Embeddings.Model)
 	}
 	if cfg.Memory.RerankerURL != "" {
@@ -1477,6 +1478,7 @@ func cmdEmbedBackfill(args []string) error {
 		Model:   cfg.AI.Embeddings.Model,
 		D:       cfg.AI.Embeddings.Dims,
 	})
+	mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
 	var n int
 	if *force {
 		n, err = mem.ReembedAll(context.Background(), *ns, 64)
