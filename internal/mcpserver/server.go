@@ -150,6 +150,7 @@ func New(d Deps) *mcp.Server {
 	}
 	opts.Instructions = Instructions
 	s := mcp.NewServer(&mcp.Implementation{Name: "punk-records", Version: "0.1.0"}, opts)
+	s.AddReceivingMiddleware(traceMiddleware)
 
 	if d.Bus != nil {
 		s.AddResourceTemplate(&mcp.ResourceTemplate{
