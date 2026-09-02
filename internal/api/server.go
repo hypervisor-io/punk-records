@@ -93,6 +93,7 @@ func New(log *slog.Logger, d Deps) *Server {
 				ag.Use(s.rateLimit(50, 100)) // hooks fire on every tool call
 				ag.Post("/agent/hooks", s.handleAgentHook)
 				ag.Get("/agent/context", s.handleAgentContext)
+				ag.Get("/agent/namespace", s.handleAgentNamespace)
 			})
 		}
 		if s.ledger != nil && s.router != nil {

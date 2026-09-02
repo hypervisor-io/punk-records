@@ -35,8 +35,15 @@ import (
 //     rename) - shared with ConnectClaudeCode/ConnectCursor/
 //     ConnectOpenCode/WriteCursorRules, see connect.go's doc comment for
 //     the exact guarantees.
-func ConnectPi(extensionPath, serverURL string) (changed bool, err error) {
-	content := piExtensionContent(serverURL)
+// PiOpts carries the optional extension inputs. Namespace, when set
+// (punk connect pi --project), is baked in as a string literal and pins
+// every tool call to that namespace.
+type PiOpts struct {
+	Namespace string
+}
+
+func ConnectPi(extensionPath, serverURL string, o PiOpts) (changed bool, err error) {
+	content := piExtensionContentNS(serverURL, o.Namespace)
 
 	existing, readErr := os.ReadFile(extensionPath)
 	switch {

@@ -338,3 +338,18 @@ func TestSearchAnchorsParam(t *testing.T) {
 		t.Fatalf("anchored runbook missing: %+v", hits)
 	}
 }
+
+func TestAgentNamespaceEndpoint(t *testing.T) {
+	srv := testServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/agent/namespace?cwd=/home/dev/My_Project", nil)
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"namespace":"agent-my-project"`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/agent/namespace", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing cwd must 400, got %d", rec.Code)
+	}
+}

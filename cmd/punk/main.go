@@ -2699,8 +2699,9 @@ func cmdConnectOpenCode(args []string) error {
 // enough - no index.ts subdirectory needed.
 func cmdConnectPi(args []string) error {
 	fs := flag.NewFlagSet("connect pi", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts")
+	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts; bakes the remote-derived namespace into the extension")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2716,9 +2717,16 @@ func cmdConnectPi(args []string) error {
 		extensionPath = filepath.Join(home, ".pi", "agent", "extensions", "punk-memory.ts")
 	}
 
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
-	changed, err := hookcli.ConnectPi(extensionPath, serverURL)
+	var piOpts hookcli.PiOpts
+	if *project {
+		ns, nsrc := hookcli.ProjectNamespace(".")
+		piOpts = hookcli.PiOpts{Namespace: ns}
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, nsrc)
+	}
+
+	changed, err := hookcli.ConnectPi(extensionPath, serverURL, piOpts)
 	if err != nil {
 		return fmt.Errorf("connect pi: %w", err)
 	}
@@ -2729,6 +2737,11 @@ func cmdConnectPi(args []string) error {
 	}
 	if *project {
 		fmt.Println("punk: note - pi only auto-discovers project-local .pi/extensions/ once the project itself is trusted (pi's own project_trust prompt/flow); an untrusted project will not load this file")
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("punk: note - the extension reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart pi or run /reload to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)

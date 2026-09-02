@@ -372,7 +372,7 @@ export default function (pi) {
 func TestConnectPiGoldenContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -393,14 +393,14 @@ func TestConnectPiGoldenContent(t *testing.T) {
 func TestConnectPiIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if changed, err := ConnectPi(path, "http://localhost:9090"); err != nil || !changed {
+	if changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{}); err != nil || !changed {
 		t.Fatal(changed, err)
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestConnectPiRefusesUnmanagedExisting(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ConnectPi(path, "http://localhost:9090")
+	_, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err == nil {
 		t.Fatal("expected error for unmanaged existing extension file")
 	}
@@ -455,7 +455,7 @@ func TestConnectPiUpdatesStaleManagedContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -485,7 +485,7 @@ func TestConnectPiSymlinkedExtensionStaysSymlink(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ConnectPi(link, "http://localhost:9090"); err != nil {
+	if _, err := ConnectPi(link, "http://localhost:9090", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Lstat(link)
@@ -516,13 +516,13 @@ func TestConnectPiSymlinkedExtensionStaysSymlink(t *testing.T) {
 func TestConnectPiPreservesExistingFileMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if _, err := ConnectPi(path, "http://a:1"); err != nil {
+	if _, err := ConnectPi(path, "http://a:1", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ConnectPi(path, "http://b:2"); err != nil {
+	if _, err := ConnectPi(path, "http://b:2", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
@@ -541,7 +541,7 @@ func TestConnectPiPreservesExistingFileMode(t *testing.T) {
 func TestConnectPiCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pi", "extensions", "punk-memory.ts")
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -561,7 +561,7 @@ func TestConnectPiEscapesHostileServerURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
 	hostile := `http://evil","x":"pwned`
-	if _, err := ConnectPi(path, hostile); err != nil {
+	if _, err := ConnectPi(path, hostile, PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -587,7 +587,7 @@ func TestConnectPiEscapesHostileServerURL(t *testing.T) {
 func TestPiExtensionPassesSyntaxCheck(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if _, err := ConnectPi(path, "http://localhost:9090"); err != nil {
+	if _, err := ConnectPi(path, "http://localhost:9090", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -647,7 +647,7 @@ func TestConnectPiEscapesLineAndParagraphSeparators(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
 	hostile := "http://evil.example/\u2028mid\u2029end"
-	if _, err := ConnectPi(path, hostile); err != nil {
+	if _, err := ConnectPi(path, hostile, PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -662,4 +662,27 @@ func TestConnectPiEscapesLineAndParagraphSeparators(t *testing.T) {
 		t.Fatalf("expected the escaped \\u2028/\\u2029 sequences in the fallback string literal, got: %s", s)
 	}
 	runPiSyntaxCheck(t, path, got)
+}
+
+func TestPiExtensionRegistersTools(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "punk-memory.ts")
+	if _, err := ConnectPi(p, "http://localhost:9090", PiOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	src, _ := os.ReadFile(p)
+	for _, want := range []string{`name: "punk_whoami"`, `name: "punk_recall"`, `name: "punk_search"`, `name: "punk_remember"`, "/v1/agent/namespace", "/memories/search", "format=compact"} {
+		if !strings.Contains(string(src), want) {
+			t.Fatalf("extension missing %q", want)
+		}
+	}
+	if strings.Contains(string(src), `PUNK_NAMESPACE_OVERRIDE = "agent-`) {
+		t.Fatal("no override without --project namespace")
+	}
+	if _, err := ConnectPi(p, "http://localhost:9090", PiOpts{Namespace: "agent-x-abcdef"}); err != nil {
+		t.Fatal(err)
+	}
+	src, _ = os.ReadFile(p)
+	if !strings.Contains(string(src), `const PUNK_NAMESPACE_OVERRIDE = "agent-x-abcdef"`) {
+		t.Fatal("namespace override not baked")
+	}
 }

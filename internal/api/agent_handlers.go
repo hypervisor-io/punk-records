@@ -698,3 +698,15 @@ func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, 
 func validNamespace(s string) bool {
 	return s != "" && len(s) <= 128 && nsSlugRe.ReplaceAllString(strings.ToLower(s), "-") == strings.ToLower(s)
 }
+
+// handleAgentNamespace tells a client-side tool which namespace a
+// working directory maps to, using the same derivation hooks use, so no
+// client has to reimplement the slug rule.
+func (s *Server) handleAgentNamespace(w http.ResponseWriter, r *http.Request) {
+	cwd := r.URL.Query().Get("cwd")
+	if cwd == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cwd required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"namespace": AgentNamespace(cwd)})
+}
