@@ -1,0 +1,4 @@
+{$PUNK_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy punk:9090
+}

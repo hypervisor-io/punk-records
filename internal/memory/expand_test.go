@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -503,5 +505,36 @@ func TestHybridSearchExpandedCtxCancellationPropagates(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExpandedSearchKeepsEachVariantTopHit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// Six facts about "alpha" so the base query fills limit=3 on its own.
+	for i := 0; i < 6; i++ {
+		if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: fmt.Sprintf("/alpha/%d", i),
+			Body: "alpha alpha alpha " + strings.Repeat("alpha ", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One fact only the reformulation reaches.
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/beta/only", Body: "beta gamma delta"}); err != nil {
+		t.Fatal(err)
+	}
+	exp := fakeExpander{out: []string{"beta gamma"}}
+	got, err := s.HybridSearchExpandedWith(ctx, "ns", "alpha", HybridOpts{Limit: 3}, exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	found := false
+	for _, h := range got {
+		found = found || h.Key == "/beta/only"
+	}
+	if !found {
+		t.Fatalf("variant top hit dropped: %v", keysOfScored(got))
 	}
 }

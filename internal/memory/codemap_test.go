@@ -261,3 +261,49 @@ func TestSeedCodeMapClipsLongLists(t *testing.T) {
 		t.Fatalf("one domain rendered %d bytes; it would dominate the context budget", len(body))
 	}
 }
+
+func TestSeedCodeMapRecordsRevision(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	stats, err := s.SeedCodeMapWith(ctx, "ns", strings.NewReader(rinneganMapFixture), SeedCodeMapOpts{Revision: "abc1234"})
+	if err != nil || stats.Written != 2 {
+		t.Fatalf("seed: %+v %v", stats, err)
+	}
+	facts, err := s.Recall(ctx, "ns", CodeMapPrefix, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range facts {
+		if f.Attributes["revision"] != "abc1234" {
+			t.Fatalf("%s revision = %v", f.Key, f.Attributes["revision"])
+		}
+	}
+	// Same body, new revision: attribute must move.
+	stats, err = s.SeedCodeMapWith(ctx, "ns", strings.NewReader(rinneganMapFixture), SeedCodeMapOpts{Revision: "def5678"})
+	if err != nil || stats.Written != 2 || stats.Unchanged != 0 {
+		t.Fatalf("reseed with new revision: %+v %v", stats, err)
+	}
+	// Same body, same revision: unchanged.
+	stats, err = s.SeedCodeMapWith(ctx, "ns", strings.NewReader(rinneganMapFixture), SeedCodeMapOpts{Revision: "def5678"})
+	if err != nil || stats.Unchanged != 2 {
+		t.Fatalf("reseed same revision: %+v %v", stats, err)
+	}
+}
+
+func TestCodeMapStale(t *testing.T) {
+	f := Fact{Key: CodeMapPrefix + "memory", Attributes: map[string]any{"revision": "aaa"}}
+	if CodeMapStale(f, "") || CodeMapStale(f, "aaa") {
+		t.Fatalf("unknown or equal revision must not be stale")
+	}
+	if !CodeMapStale(f, "bbb") {
+		t.Fatalf("different revision must be stale")
+	}
+	if CodeMapStale(Fact{Key: "/other", Attributes: map[string]any{"revision": "aaa"}}, "bbb") {
+		t.Fatalf("only code-map keys are subject to revision staleness")
+	}
+	hits := []ScoredFact{{Fact: f}, {Fact: Fact{Key: "/x"}}}
+	MarkCodeMapStale(hits, "bbb")
+	if hits[0].Components["stale"] != 1 || hits[1].Components != nil {
+		t.Fatalf("mark: %v %v", hits[0].Components, hits[1].Components)
+	}
+}

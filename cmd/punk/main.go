@@ -3,17 +3,22 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
-	"regexp"
+	"os/user"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +30,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/config"
 	"github.com/hypervisor-io/punk-records/internal/cost"
+	"github.com/hypervisor-io/punk-records/internal/embedlocal"
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
 	"github.com/hypervisor-io/punk-records/internal/itbench"
 	"github.com/hypervisor-io/punk-records/internal/llm"
@@ -66,7 +72,10 @@ Usage:
   punk      apikey    manage API keys (create|revoke --name <name>)
   punk      mcp       serve the MCP interface on stdio
   punk      backup    snapshot the SQLite database (--out file)
-  punk      embed-backfill  embed facts written before embeddings were enabled (--ns)
+  punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
+  punk      models    list | pull <name>: manage local static embedding models
+  punk      login     store the server URL (and optional API key) in ~/.punk/credentials.json
+  punk      logout    remove the stored credentials
   punk      consolidate  run a consolidation pass now, bypassing the dream triggers (--ns, empty = all)
   punk      card      manage the user's cross-project profile card (add "fact" | list | remove --key)
   punk      replay    re-run a completed task against its frozen snapshots (--task, --k, --mode)
@@ -119,6 +128,14 @@ func run(args []string) error {
 		return cmdBackup(args[1:])
 	case "embed-backfill":
 		return cmdEmbedBackfill(args[1:])
+	case "models":
+		return cmdModels(args[1:])
+	case "login":
+		return cmdLogin(args[1:])
+	case "namespace":
+		return cmdNamespace(args[1:])
+	case "logout":
+		return cmdLogout(args[1:])
 	case "consolidate":
 		return cmdConsolidate(args[1:])
 	case "card":
@@ -553,13 +570,13 @@ func cmdServe(args []string) error {
 		mem.SetDefensePolicy(ns, mode)
 	}
 	regionStore := region.New(db, nil)
-	if cfg.AI.Embeddings.Model != "" {
-		mem.SetEmbedder(&memory.OllamaEmbedder{
-			BaseURL: cfg.AI.Embeddings.BaseURL,
-			Model:   cfg.AI.Embeddings.Model,
-			D:       cfg.AI.Embeddings.Dims,
-		})
-		log.Info("embeddings enabled", "model", cfg.AI.Embeddings.Model)
+	emb, err := newEmbedder(context.Background(), cfg, log)
+	if err != nil {
+		return err
+	}
+	if emb != nil {
+		mem.SetEmbedder(emb)
+		mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
 	}
 	if cfg.Memory.RerankerURL != "" {
 		mem.SetReranker(&memory.HTTPReranker{URL: cfg.Memory.RerankerURL})
@@ -653,27 +670,33 @@ func cmdServe(args []string) error {
 		}
 	}
 
-	mcpSrv := mcpserver.New(mcpserver.Deps{
+	mcpDeps := mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem, Region: regionStore, Bus: eventBus,
 		A2ARemotes: a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
 			WallMS:    cfg.Budgets.WallMS,
 			Subagents: cfg.Budgets.Subagents,
 		},
-	})
+	}
+	mcpSrv := mcpserver.New(mcpDeps)
+	agentDeps := mcpDeps
+	agentDeps.Toolset = "agent"
+	agentSrv := mcpserver.New(agentDeps)
 
 	srv := api.New(log, api.Deps{
-		Memory:    mem,
-		Ledger:    ledger,
-		Router:    router,
-		Proposals: props,
-		Keys:      api.NewKeys(db, nil),
-		Bus:       eventBus,
-		DB:        db,
-		Reg:       reg,
-		Expander:  expander,
+		Memory:            mem,
+		Ledger:            ledger,
+		Router:            router,
+		Proposals:         props,
+		Keys:              api.NewKeys(db, nil),
+		Bus:               eventBus,
+		DB:                db,
+		Reg:               reg,
+		Expander:          expander,
 		TurnContextTokens: cfg.Memory.TurnContextTokens,
 		Inject:            cfg.Memory.Inject,
 		DefaultBudget: task.Budget{
@@ -686,7 +709,12 @@ func cmdServe(args []string) error {
 	srv.Ready = db.Ping
 	srv.MountUI()
 	srv.MountAgentCard(version)
-	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpSrv }, nil))
+	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		if r.URL.Query().Get("toolset") == "agent" {
+			return agentSrv
+		}
+		return mcpSrv
+	}, nil))
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
 		Handler:           srv.Router(),
@@ -782,7 +810,7 @@ func cmdServe(args []string) error {
 	if cfg.Memory.ConsolidateDays > 0 || cfg.Memory.IVFNprobe > 0 {
 		horizon := time.Duration(cfg.Memory.ConsolidateDays) * 24 * time.Hour
 		go func() {
-			lastRun := map[string]time.Time{}   // per-ns last pass (this process)
+			lastRun := map[string]time.Time{}    // per-ns last pass (this process)
 			ivfBootstrapped := map[string]bool{} // per-ns first BuildIVF done
 			tick := time.NewTicker(consolidateCheckInterval)
 			defer tick.Stop()
@@ -1039,6 +1067,97 @@ func openMemory(cfgPath string) (*memory.Store, func(), error) {
 	return mem, func() { _ = db.Close() }, nil
 }
 
+// newEmbedder builds the configured embedder, or nil when embeddings are
+// off. "local" loads a pinned static model from the model cache,
+// downloading it on first use; "ollama" (or empty) keeps today's
+// behaviour and stays off when model is empty.
+func newEmbedder(ctx context.Context, cfg *config.Config, log *slog.Logger) (memory.Embedder, error) {
+	e := cfg.AI.Embeddings
+	switch e.Provider {
+	case "local":
+		name := e.Model
+		if name == "" {
+			name = embedlocal.DefaultModel
+		}
+		cache := e.ModelCache
+		if cache == "" {
+			cache = embedlocal.DefaultCacheDir()
+		}
+		dir, err := embedlocal.Ensure(ctx, cache, name, "", os.Stderr)
+		if err != nil {
+			return nil, err
+		}
+		st, err := embedlocal.Load(dir, e.MaxInputTokens)
+		if err != nil {
+			return nil, err
+		}
+		if log != nil {
+			log.Info("embeddings enabled", "provider", "local", "model", name, "dims", st.Dims())
+		}
+		return st, nil
+	case "", "ollama":
+		if e.Model == "" {
+			return nil, nil
+		}
+		if log != nil {
+			log.Info("embeddings enabled", "provider", "ollama", "model", e.Model)
+		}
+		return &memory.OllamaEmbedder{BaseURL: e.BaseURL, Model: e.Model, D: e.Dims}, nil
+	default:
+		return nil, fmt.Errorf("ai.embeddings.provider %q not supported", e.Provider)
+	}
+}
+
+func cmdModels(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: punk models list | pull <name> [--cache DIR]")
+	}
+	switch args[0] {
+	case "list":
+		names := make([]string, 0, len(embedlocal.Catalog))
+		for n := range embedlocal.Catalog {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			m := embedlocal.Catalog[n]
+			fmt.Printf("%s\t%s@%s\tdims=%d\n", n, m.Repo, m.Revision[:7], m.Dims)
+		}
+		return nil
+	case "pull":
+		// Flags may appear before or after the model name, so parse
+		// manually instead of flag.FlagSet (which stops at the first
+		// positional argument).
+		var cache string
+		var rest []string
+		for i := 1; i < len(args); i++ {
+			switch {
+			case args[i] == "--cache" && i+1 < len(args):
+				cache = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--cache="):
+				cache = strings.TrimPrefix(args[i], "--cache=")
+			default:
+				rest = append(rest, args[i])
+			}
+		}
+		if cache == "" {
+			cache = embedlocal.DefaultCacheDir()
+		}
+		if len(rest) != 1 {
+			return errors.New("usage: punk models pull <name> [--cache DIR]")
+		}
+		dir, err := embedlocal.Ensure(context.Background(), cache, rest[0], "", os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("ready: %s\n", dir)
+		return nil
+	default:
+		return fmt.Errorf("unknown models subcommand %q", args[0])
+	}
+}
+
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
@@ -1114,6 +1233,7 @@ func cmdSeed(args []string) error {
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
 	ns := fs.String("ns", "", "namespace to seed (default: the agent namespace for --dir)")
 	dir := fs.String("dir", ".", "repository the map describes; picks the default namespace")
+	revision := fs.String("revision", "", "repository revision the map describes (default: git rev-parse HEAD in --dir)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1137,12 +1257,26 @@ func cmdSeed(args []string) error {
 	}
 	defer closeDB()
 
-	stats, err := mem.SeedCodeMap(context.Background(), namespace, os.Stdin)
+	rev := *revision
+	if rev == "" {
+		out, err := exec.Command("git", "-C", *dir, "rev-parse", "HEAD").Output()
+		if err == nil {
+			rev = strings.TrimSpace(string(out))
+		}
+	}
+
+	stats, err := mem.SeedCodeMapWith(context.Background(), namespace, os.Stdin, memory.SeedCodeMapOpts{Revision: rev})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("seeded %s: %d written, %d unchanged, %d removed\n",
-		namespace, stats.Written, stats.Unchanged, stats.Removed)
+	summary := ""
+	if len(rev) >= 7 {
+		summary = " at " + rev[:7]
+	} else if rev != "" {
+		summary = " at " + rev
+	}
+	fmt.Printf("seeded %s%s: %d written, %d unchanged, %d removed\n",
+		namespace, summary, stats.Written, stats.Unchanged, stats.Removed)
 	return nil
 }
 
@@ -1192,6 +1326,7 @@ func cmdAPIKey(args []string) error {
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
+	toolset := fs.String("toolset", envOr("PUNK_MCP_TOOLSET", "full"), "agent | full")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1227,7 +1362,11 @@ func cmdMCP(args []string) error {
 	}
 	srv := mcpserver.New(mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem,
-		A2ARemotes: a2aRemotes(cfg),
+		A2ARemotes:       a2aRemotes(cfg),
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
+		LocalFiles:       true,
+		Toolset:          *toolset,
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
@@ -1447,6 +1586,7 @@ func cmdEmbedBackfill(args []string) error {
 	fs := flag.NewFlagSet("embed-backfill", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
 	ns := fs.String("ns", "", "namespace (required)")
+	force := fs.Bool("force", false, "re-embed every live fact, not only those missing a vector")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1456,9 +1596,6 @@ func cmdEmbedBackfill(args []string) error {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
-	}
-	if cfg.AI.Embeddings.Model == "" {
-		return errors.New("embed-backfill: ai.embeddings.model not configured")
 	}
 	db, err := store.Open(cfg.DB.Driver, cfg.DB.DSN)
 	if err != nil {
@@ -1471,12 +1608,21 @@ func cmdEmbedBackfill(args []string) error {
 	for ns, mode := range cfg.Memory.DefensePolicies {
 		mem.SetDefensePolicy(ns, mode)
 	}
-	mem.SetEmbedder(&memory.OllamaEmbedder{
-		BaseURL: cfg.AI.Embeddings.BaseURL,
-		Model:   cfg.AI.Embeddings.Model,
-		D:       cfg.AI.Embeddings.Dims,
-	})
-	n, err := mem.BackfillEmbeddings(context.Background(), *ns, 64)
+	emb, err := newEmbedder(context.Background(), cfg, nil)
+	if err != nil {
+		return err
+	}
+	if emb == nil {
+		return errors.New("embed-backfill: embeddings not configured")
+	}
+	mem.SetEmbedder(emb)
+	mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
+	var n int
+	if *force {
+		n, err = mem.ReembedAll(context.Background(), *ns, 64)
+	} else {
+		n, err = mem.BackfillEmbeddings(context.Background(), *ns, 64)
+	}
 	if err != nil {
 		return err
 	}
@@ -2056,18 +2202,14 @@ func cmdHook(args []string) error {
 	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
 	from := fs.String("from", "", "source agent the stdin payload is native to (default empty = Claude Code passthrough; e.g. \"cursor\")")
 	event := fs.String("event", "", "hook event name, required for agents whose native payload doesn't self-identify it (currently only antigravity: PostToolUse, PreInvocation, or Stop - see hookcli.ConnectAntigravity)")
+	nsFlag := fs.String("ns", "", "namespace override (written by punk connect --project)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	baseURL := *urlFlag
-	if baseURL == "" {
-		baseURL = os.Getenv("PUNK_URL")
+	if *nsFlag != "" {
+		hookcli.SetNamespaceOverride(*nsFlag)
 	}
-	if baseURL == "" {
-		baseURL = "http://localhost:9090"
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-	apiKey := os.Getenv("PUNK_API_KEY")
+	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
 	// Antigravity CLI's hook payloads carry no field identifying which
 	// event fired (see hookcli.RunFromAntigravity's doc comment), so
 	// ConnectAntigravity wires a distinct "punk hook --from antigravity
@@ -2159,24 +2301,61 @@ func cmdConnect(args []string) error {
 		return cmdConnectHermes(args[1:])
 	case "openclaw":
 		return cmdConnectOpenClaw(args[1:])
+	case "verify":
+		return cmdConnectVerify(args[1:])
 	default:
 		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", and \"openclaw\" are supported", target)
 	}
 }
 
+// cmdConnectVerify proves an MCP session to the server works: connect,
+// tools/list, whoami. Standalone or invoked by the connect commands'
+// --verify flag.
+func cmdConnectVerify(args []string) error {
+	fs := flag.NewFlagSet("connect verify", flag.ContinueOnError)
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	return printVerify(context.Background(), serverURL, apiKey)
+}
+
+// printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
+// prints a one-line summary.
+func printVerify(ctx context.Context, serverURL, apiKey string) error {
+	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent", apiKey)
+	if err != nil {
+		return err
+	}
+	instructions := "no"
+	if rep.Instructions {
+		instructions = "yes"
+	}
+	fmt.Printf("punk: verified: %d tools, namespace %s, instructions %s\n", len(rep.Tools), rep.Namespace, instructions)
+	return nil
+}
+
 func cmdConnectClaudeCode(args []string) error {
 	fs := flag.NewFlagSet("connect claude-code", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.claude/settings.json instead of the global ~/.claude/settings.json")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	var settingsPath string
+	var home string
 	if *project {
 		settingsPath = filepath.Join(".claude", "settings.json")
 	} else {
-		home, err := os.UserHomeDir()
+		var err error
+		home, err = os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("resolve home directory: %w", err)
 		}
@@ -2187,12 +2366,32 @@ func cmdConnectClaudeCode(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+
+	var projNS string
+	if *project {
+		ns, src := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, src)
+	}
 
 	_, statErr := os.Stat(settingsPath)
 	existedBefore := statErr == nil
 
-	changed, err := hookcli.ConnectClaudeCode(settingsPath, punkPath, serverURL)
+	var changed bool
+	if *project {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, projNS)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	} else {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCode(settingsPath, punkPath, serverURL)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("connect claude-code: %w", err)
 	}
@@ -2204,8 +2403,55 @@ func cmdConnectClaudeCode(args []string) error {
 	} else {
 		fmt.Printf("punk: %s already has punk's Claude Code hooks up to date\n", settingsPath)
 	}
+	if !*noMCP {
+		mcpPath := filepath.Join(".mcp.json")
+		if !*project {
+			mcpPath = filepath.Join(home, ".claude.json")
+		}
+		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect claude-code mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		permChanged, err := hookcli.EnsureClaudePermission(settingsPath, hookcli.ClaudeMCPRule)
+		if err != nil {
+			return fmt.Errorf("connect claude-code permission: %w", err)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Printf("punk: permission %s in %s (%s)\n", hookcli.ClaudeMCPRule, settingsPath, changedWord(permChanged))
+		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
+}
+
+// defaultAgentName is user@host, the identity claims default to when
+// the operator does not name the machine's agent explicitly.
+func defaultAgentName() string {
+	u, host := "user", "host"
+	if cu, err := user.Current(); err == nil && cu.Username != "" {
+		u = cu.Username
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		host = h
+	}
+	return u + "@" + host
+}
+
+// changedWord renders a change flag for connect summaries.
+func changedWord(b bool) string {
+	if b {
+		return "written"
+	}
+	return "already up to date"
 }
 
 // cmdConnectCursor wires punk into Cursor: a hooks.json merge (six mapped
@@ -2219,7 +2465,12 @@ func cmdConnectClaudeCode(args []string) error {
 func cmdConnectCursor(args []string) error {
 	fs := flag.NewFlagSet("connect cursor", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.cursor/hooks.json (instead of the global ~/.cursor/hooks.json) and ./.cursor/rules/punk-memory.mdc; the rules file is project-only and is only written with this flag")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2240,14 +2491,29 @@ func cmdConnectCursor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+
+	var projNS string
+	if *project {
+		ns, src := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, src)
+	}
 
 	_, statErr := os.Stat(hooksPath)
 	hooksExistedBefore := statErr == nil
 
-	hooksChanged, err := hookcli.ConnectCursor(hooksPath, punkPath, serverURL)
-	if err != nil {
-		return fmt.Errorf("connect cursor: %w", err)
+	var hooksChanged bool
+	{
+		var hookErr error
+		if *project {
+			hooksChanged, hookErr = hookcli.ConnectCursorNS(hooksPath, punkPath, serverURL, projNS)
+		} else {
+			hooksChanged, hookErr = hookcli.ConnectCursor(hooksPath, punkPath, serverURL)
+		}
+		if hookErr != nil {
+			return fmt.Errorf("connect cursor: %w", hookErr)
+		}
 	}
 	if hooksChanged {
 		fmt.Printf("punk: wired Cursor hooks into %s\n", hooksPath)
@@ -2282,6 +2548,30 @@ func cmdConnectCursor(args []string) error {
 	}
 
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	if !*noMCP {
+		mcpPath := filepath.Join(cursorDir, "mcp.json")
+		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect cursor mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
+		if *verify {
+			if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Print(cursorMCPRegistrationNote(serverURL))
 	return nil
 }
@@ -2325,24 +2615,36 @@ punk: once an API key exists (punk apikey create --name ...), add a "headers": {
 // always writes the plural, current form.
 func cmdConnectOpenCode(args []string) error {
 	fs := flag.NewFlagSet("connect opencode", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js instead of the global ~/.config/opencode/plugins/punk-memory.js")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
+	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js and ./opencode.json instead of the global ~/.config/opencode equivalents")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	var pluginPath string
+	var configDir string
 	if *project {
 		pluginPath = filepath.Join(".opencode", "plugins", "punk-memory.js")
+		configDir = "."
 	} else {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("resolve home directory: %w", err)
 		}
-		pluginPath = filepath.Join(home, ".config", "opencode", "plugins", "punk-memory.js")
+		base := os.Getenv("XDG_CONFIG_HOME")
+		if base == "" {
+			base = filepath.Join(home, ".config")
+		}
+		configDir = base
+		pluginPath = filepath.Join(base, "opencode", "plugins", "punk-memory.js")
 	}
 
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	changed, err := hookcli.ConnectOpenCode(pluginPath, serverURL)
 	if err != nil {
@@ -2352,6 +2654,27 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Printf("punk: wrote OpenCode plugin to %s\n", pluginPath)
 	} else {
 		fmt.Printf("punk: %s already up to date\n", pluginPath)
+	}
+	if !*noMCP {
+		mcpPath := filepath.Join(configDir, "opencode.json")
+		if *project {
+			mcpPath = filepath.Join("opencode.json")
+		}
+		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect opencode mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
@@ -2376,8 +2699,9 @@ func cmdConnectOpenCode(args []string) error {
 // enough - no index.ts subdirectory needed.
 func cmdConnectPi(args []string) error {
 	fs := flag.NewFlagSet("connect pi", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the extension should call")
+	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts; bakes the remote-derived namespace into the extension")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	verify := fs.Bool("verify", false, "after writing the extension, call the server's /v1/agent/namespace with this machine's credentials (pi tools use the HTTP API, not MCP)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2393,9 +2717,16 @@ func cmdConnectPi(args []string) error {
 		extensionPath = filepath.Join(home, ".pi", "agent", "extensions", "punk-memory.ts")
 	}
 
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
-	changed, err := hookcli.ConnectPi(extensionPath, serverURL)
+	var piOpts hookcli.PiOpts
+	if *project {
+		ns, nsrc := hookcli.ProjectNamespace(".")
+		piOpts = hookcli.PiOpts{Namespace: ns}
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, nsrc)
+	}
+
+	changed, err := hookcli.ConnectPi(extensionPath, serverURL, piOpts)
 	if err != nil {
 		return fmt.Errorf("connect pi: %w", err)
 	}
@@ -2406,6 +2737,14 @@ func cmdConnectPi(args []string) error {
 	}
 	if *project {
 		fmt.Println("punk: note - pi only auto-discovers project-local .pi/extensions/ once the project itself is trusted (pi's own project_trust prompt/flow); an untrusted project will not load this file")
+	}
+	if *verify {
+		cwd, _ := os.Getwd()
+		ns, err := hookcli.VerifyHTTP(context.Background(), serverURL, apiKey, cwd)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("punk: verified: HTTP API reachable, namespace %s\n", ns)
 	}
 	fmt.Printf("punk: note - the extension reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart pi or run /reload to pick up this file\n", serverURL)
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
@@ -2448,8 +2787,13 @@ func cmdConnectPi(args []string) error {
 // gap.
 func cmdConnectAntigravity(args []string) error {
 	fs := flag.NewFlagSet("connect antigravity", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.agents/hooks.json instead of the global ~/.gemini/config/hooks.json")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	project := fs.Bool("project", false, "write ./.agents/hooks.json and ./.agents/mcp_config.json instead of the global ~/.gemini/config equivalents")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2469,7 +2813,14 @@ func cmdConnectAntigravity(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+
+	var projNS string
+	if *project {
+		ns, nsrc := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, nsrc)
+	}
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2488,6 +2839,32 @@ func cmdConnectAntigravity(args []string) error {
 	}
 	fmt.Println("punk: note - PreToolUse (permission gating) and PostInvocation are deliberately not wired; punk only observes PostToolUse, PreInvocation (session start + once-per-conversation context injection), and Stop")
 	fmt.Println("punk: note - Antigravity's own hook payloads carry no prompt text, so there is no UserPromptSubmit capture for Antigravity")
+	if !*noMCP {
+		mcpPath := ""
+		if *project {
+			mcpPath = filepath.Join(".agents", "mcp_config.json")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home directory: %w", err)
+			}
+			mcpPath = filepath.Join(home, ".gemini", "config", "mcp_config.json")
+		}
+		mcpChanged, err := hookcli.ConnectAntigravityMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect antigravity mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2541,7 +2918,12 @@ func cmdConnectAntigravity(args []string) error {
 func cmdConnectCopilot(args []string) error {
 	fs := flag.NewFlagSet("connect copilot", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.github/hooks/punk.json instead of the global ~/.copilot/hooks/punk.json (or $COPILOT_HOME/hooks/punk.json when COPILOT_HOME is set)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2563,7 +2945,7 @@ func cmdConnectCopilot(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2581,6 +2963,34 @@ func cmdConnectCopilot(args []string) error {
 		fmt.Printf("punk: %s already has punk's Copilot hooks up to date\n", hooksPath)
 	}
 	fmt.Println("punk: note - restart Copilot CLI (hook configuration is loaded when the CLI starts) to pick up this file")
+	if !*noMCP {
+		mcpPath := ""
+		if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
+			mcpPath = filepath.Join(copilotHome, "mcp-config.json")
+		} else if *project {
+			mcpPath = filepath.Join(".copilot", "mcp-config.json")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home directory: %w", err)
+			}
+			mcpPath = filepath.Join(home, ".copilot", "mcp-config.json")
+		}
+		mcpChanged, err := hookcli.ConnectCopilotMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect copilot mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2612,7 +3022,12 @@ func cmdConnectCopilot(args []string) error {
 func cmdConnectHermes(args []string) error {
 	fs := flag.NewFlagSet("connect hermes", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Hermes config.yaml to merge into (default ~/.hermes/config.yaml)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp_servers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2630,7 +3045,7 @@ func cmdConnectHermes(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
@@ -2652,6 +3067,22 @@ func cmdConnectHermes(args []string) error {
 	// command is not punk's call to make.
 	fmt.Println("punk: note - Hermes prompts for consent the first time a shell hook runs, unless hooks_auto_accept is true in the same config")
 	fmt.Println("punk: note - restart Hermes (hooks are registered at CLI and gateway startup) to pick up these entries")
+	if !*noMCP {
+		mcpChanged, err := hookcli.ConnectHermesMCP(path,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect hermes mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", path)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", path, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
@@ -2676,7 +3107,12 @@ func cmdConnectHermes(args []string) error {
 func cmdConnectOpenClaw(args []string) error {
 	fs := flag.NewFlagSet("connect openclaw", flag.ContinueOnError)
 	homeFlag := fs.String("home", "", "OpenClaw home directory (default ~/.openclaw)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire the plugin; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp.servers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2691,7 +3127,7 @@ func cmdConnectOpenClaw(args []string) error {
 	}
 	pluginDir := filepath.Join(root, "plugins", hookcli.OpenClawPluginID)
 	configPath := filepath.Join(root, "config.json")
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	pluginChanged, err := hookcli.WriteOpenClawPlugin(pluginDir, serverURL)
 	if err != nil {
@@ -2719,6 +3155,82 @@ func cmdConnectOpenClaw(args []string) error {
 		fmt.Printf("punk: %s already enables punk's plugin\n", configPath)
 	}
 	fmt.Println("punk: note - restart the OpenClaw gateway (plugins load at startup) to pick this up")
+	if !*noMCP {
+		mcpChanged, err := hookcli.ConnectOpenClawMCP(configPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect openclaw mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", configPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", configPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	return nil
+}
+
+// envOr returns the environment variable's value, or def when unset/empty.
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func cmdLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	urlFlag := fs.String("url", "", "punk-records server URL (required)")
+	key := fs.String("api-key", "", "bearer token from 'punk apikey create' on the server")
+	keyStdin := fs.Bool("api-key-stdin", false, "read the token from stdin (first line)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *urlFlag == "" {
+		return errors.New("login: --url is required")
+	}
+	token := *key
+	if *keyStdin {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		token = strings.TrimSpace(line)
+	}
+	path := hookcli.CredentialsPath()
+	if err := hookcli.SaveCredentials(path, hookcli.Credentials{URL: *urlFlag, APIKey: token}); err != nil {
+		return err
+	}
+	if token == "" {
+		fmt.Printf("punk: saved %s (no API key; fine for an unauthenticated server)\n", path)
+	} else {
+		fmt.Printf("punk: saved %s\n", path)
+	}
+	return nil
+}
+
+// cmdNamespace prints the namespace a checkout maps to and how it was
+// derived (remote = stable across machines, path = local fallback).
+func cmdNamespace(args []string) error {
+	dir := "."
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	ns, source := hookcli.ProjectNamespace(dir)
+	fmt.Printf("%s\t%s\n", ns, source)
+	return nil
+}
+
+func cmdLogout(_ []string) error {
+	path := hookcli.CredentialsPath()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fmt.Printf("punk: removed %s\n", path)
 	return nil
 }

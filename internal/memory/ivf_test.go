@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -47,7 +48,14 @@ func (e *vecEmbedder) Dims() int { return e.dims }
 func (e *vecEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
-		out[i] = e.m[t]
+		// Document inputs are key-prefixed ("key: <key>\n<body>"); strip
+		// the first line so the map (keyed by body) still matches. Queries
+		// are plain text and pass through unchanged.
+		key := t
+		if strings.HasPrefix(t, "key: ") {
+			key = t[strings.IndexByte(t, '\n')+1:]
+		}
+		out[i] = e.m[key]
 	}
 	return out, nil
 }

@@ -41,6 +41,12 @@ var cursorHookEvents = []string{"sessionStart", "beforeSubmitPrompt", "postToolU
 //     rename) - shared with ConnectClaudeCode and WriteCursorRules, see
 //     connect.go's doc comment for the exact guarantees.
 func ConnectCursor(hooksPath, punkPath, serverURL string) (changed bool, err error) {
+	return ConnectCursorNS(hooksPath, punkPath, serverURL, "")
+}
+
+// ConnectCursorNS is ConnectCursor with a namespace override baked into
+// the generated hook commands (from punk connect --project).
+func ConnectCursorNS(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -56,7 +62,7 @@ func ConnectCursor(hooksPath, punkPath, serverURL string) (changed bool, err err
 		hooksAny = map[string]any{}
 	}
 
-	command := punkCursorHookCommand(punkPath, serverURL)
+	command := punkCursorHookCommand(punkPath, serverURL, ns)
 	for _, ev := range cursorHookEvents {
 		if raw, ok := hooksAny[ev]; ok && raw != nil {
 			if _, isArr := raw.([]any); !isArr {
@@ -95,8 +101,12 @@ func ConnectCursor(hooksPath, punkPath, serverURL string) (changed bool, err err
 // sharing quotePunkPath's whitespace-quoting with punkHookCommand (see
 // connect.go) so isPunkManagedCursor's optional-quote tolerance on a later
 // run applies identically.
-func punkCursorHookCommand(punkPath, serverURL string) string {
-	return fmt.Sprintf("%s hook --from cursor --url %s", quotePunkPath(punkPath), serverURL)
+func punkCursorHookCommand(punkPath, serverURL, ns string) string {
+	cmd := fmt.Sprintf("%s hook --from cursor --url %s", quotePunkPath(punkPath), serverURL)
+	if ns != "" {
+		cmd += " --ns " + ns
+	}
+	return cmd
 }
 
 // mergeCursorEntries returns one event's entry list with any stale

@@ -105,7 +105,7 @@ func TestPiExtensionNodeRoundTripsThroughRealServer(t *testing.T) {
 
 	dir := t.TempDir()
 	extPath := filepath.Join(dir, "punk-memory.ts")
-	if _, err := hookcli.ConnectPi(extPath, httpSrv.URL); err != nil {
+	if _, err := hookcli.ConnectPi(extPath, httpSrv.URL, hookcli.PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	extSrc, err := os.ReadFile(extPath)
@@ -127,8 +127,10 @@ func TestPiExtensionNodeRoundTripsThroughRealServer(t *testing.T) {
 	// driver exits and Go reads the stored facts back out.
 	driver := `
 const handlers = {}
+const registeredTools = []
 const fakePi = {
   on(name, handler) { handlers[name] = handler },
+  registerTool(tool) { registeredTools.push(tool.name) },
 }
 const fakeCtx = {
   cwd: "` + piNodeRTCWD + `",

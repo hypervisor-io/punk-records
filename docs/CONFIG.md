@@ -26,6 +26,16 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `route.fallback` | - | empty | agent for unmatched tasks; empty parks them |
 | `proposals.expire_after_hours` | - | `72` | stale-proposal sweep; 0 disables |
 | `ai.embeddings.model` | - | empty | write-time vectors for hybrid search; empty = FTS only |
+| `ai.embeddings.provider` | - | `ollama` | `ollama` (or empty): use base_url + model; `local`: in-process static model, no service needed (downloads about 31 MB once from huggingface.co) |
+| `ai.embeddings.base_url` | - | `http://localhost:11434` | Ollama-compatible root URL; punk appends `/api/embed` |
+| `ai.embeddings.model_cache` | - | `~/.punk/models` | local provider only; directory for downloaded static models (or set `PUNK_MODEL_CACHE`) |
+| `mcp.default_namespace` | `PUNK_NAMESPACE` | `agent-default` | namespace used when a client advertises no root and omits namespace |
+| `mcp.toolset` | `PUNK_MCP_TOOLSET` | `full` | stdio server toolset: `agent` (lean session set) or `full` |
+| credentials | `PUNK_CREDENTIALS` | `~/.punk/credentials.json` | file `punk login` writes (mode 0600); override the path, not the file's role |
+| server URL | `PUNK_URL` | - | server base URL; flag > this env > credentials file > `http://localhost:9090` |
+| API key | `PUNK_API_KEY` | - | bearer token; flag/env wins over the credentials file |
+| request headers | - | - | the MCP server reads `X-Punk-Namespace` and `X-Punk-Agent` from clients; `X-Punk-Subject` is set by the auth middleware from the verified API key and any client-supplied value is deleted |
+| `ai.embeddings.max_input_tokens` | - | `0` | model input window in tokens; 0 = unknown (diagnose skips oversize accounting) |
 | `budgets.global_daily_usd` | - | `0` | burn-rate projection alerts; 0 disables |
 | `budgets.price_table_path` | - | empty | override the shipped model price table |
 | `mcp_client.servers[]` | - | - | `{name, command+args}` or `{name, url, token_env}` |

@@ -364,6 +364,91 @@ export default function (pi) {
       return undefined
     }
   })
+
+  const PUNK_NAMESPACE_OVERRIDE = ""; // "" unless punk connect pi --project baked one
+  let punkNamespaceCache = ""
+  function punkCredentialsKey() {
+    const fromEnv = process.env && process.env.PUNK_API_KEY
+    if (fromEnv) return fromEnv
+    try {
+      const fs = require("node:fs")
+      const os = require("node:os")
+      const path = require("node:path")
+      const p = (process.env && process.env.PUNK_CREDENTIALS) || path.join(os.homedir(), ".punk", "credentials.json")
+      const c = JSON.parse(fs.readFileSync(p, "utf8"))
+      return (c && c.api_key) || ""
+    } catch (_) {
+      return ""
+    }
+  }
+  async function punkAPICall(path, init) {
+    const headers = Object.assign({ "Content-Type": "application/json" }, (init && init.headers) || {})
+    const key = punkCredentialsKey()
+    if (key) headers["Authorization"] = "Bearer " + key
+    const res = await fetch(punkServerURL() + path, Object.assign({}, init, { headers }))
+    const text = await res.text()
+    if (!res.ok) throw new Error("punk " + res.status + ": " + text.slice(0, 300))
+    return text ? JSON.parse(text) : null
+  }
+  async function punkNamespace(ctx) {
+    if (PUNK_NAMESPACE_OVERRIDE) return PUNK_NAMESPACE_OVERRIDE
+    if (punkNamespaceCache) return punkNamespaceCache
+    const out = await punkAPICall("/v1/agent/namespace?cwd=" + encodeURIComponent(ctx.cwd || process.cwd()))
+    punkNamespaceCache = (out && out.namespace) || "agent-default"
+    return punkNamespaceCache
+  }
+  const textResult = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }], details: {} })
+
+  pi.registerTool({
+    name: "punk_whoami",
+    label: "Punk whoami",
+    description: "Namespace and server this session's punk memory tools use.",
+    promptSnippet: "Show which punk memory namespace this project maps to",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      return textResult({ namespace: await punkNamespace(ctx), server: punkServerURL() })
+    },
+  })
+  pi.registerTool({
+    name: "punk_recall",
+    label: "Punk recall",
+    description: "Recall the latest live facts under a key prefix from punk memory (deterministic, unranked).",
+    promptSnippet: "Read punk memory facts under a known key prefix such as /decisions",
+    parameters: { type: "object", properties: { prefix: { type: "string", description: "key prefix, e.g. /decisions" } }, required: ["prefix"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      return textResult(await punkAPICall("/v1/namespaces/" + encodeURIComponent(ns) + "/memories?prefix=" + encodeURIComponent(params.prefix) + "&max_tokens=1500"))
+    },
+  })
+  pi.registerTool({
+    name: "punk_search",
+    label: "Punk search",
+    description: "Ranked hybrid search over punk memory; compact hits (key, clipped body, score, flags). Put exact identifiers or error strings in anchors.",
+    promptSnippet: "Search punk memory when wording or location of prior context is unknown",
+    promptGuidelines: ["Use punk_search before re-deriving a decision, convention or incident that an earlier session may have recorded."],
+    parameters: { type: "object", properties: { query: { type: "string" }, anchors: { type: "array", items: { type: "string" } } }, required: ["query"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      let q = "/v1/namespaces/" + encodeURIComponent(ns) + "/memories/search?mode=hybrid&scored=1&format=compact&max_tokens=1500&q=" + encodeURIComponent(params.query)
+      for (const a of params.anchors || []) q += "&anchor=" + encodeURIComponent(a)
+      return textResult(await punkAPICall(q))
+    },
+  })
+  pi.registerTool({
+    name: "punk_remember",
+    label: "Punk remember",
+    description: "Store a durable fact (decision, fix, convention, gotcha) in punk memory under a hierarchical key; latest wins per key.",
+    promptSnippet: "Persist a durable decision or gotcha to punk memory",
+    parameters: { type: "object", properties: { key: { type: "string", description: "hierarchical key like /decisions/auth" }, body: { type: "string" }, importance: { type: "number", minimum: 0, maximum: 1 } }, required: ["key", "body"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      const out = await punkAPICall("/v1/namespaces/" + encodeURIComponent(ns) + "/memories", {
+        method: "POST",
+        body: JSON.stringify({ key: params.key, body: params.body, importance: params.importance || 0, author: "pi" }),
+      })
+      return textResult({ stored: out && out.key, id: out && out.id })
+    },
+  })
 }
 `
 
@@ -372,7 +457,7 @@ export default function (pi) {
 func TestConnectPiGoldenContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -393,14 +478,14 @@ func TestConnectPiGoldenContent(t *testing.T) {
 func TestConnectPiIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if changed, err := ConnectPi(path, "http://localhost:9090"); err != nil || !changed {
+	if changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{}); err != nil || !changed {
 		t.Fatal(changed, err)
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +513,7 @@ func TestConnectPiRefusesUnmanagedExisting(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ConnectPi(path, "http://localhost:9090")
+	_, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err == nil {
 		t.Fatal("expected error for unmanaged existing extension file")
 	}
@@ -455,7 +540,7 @@ func TestConnectPiUpdatesStaleManagedContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -485,7 +570,7 @@ func TestConnectPiSymlinkedExtensionStaysSymlink(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ConnectPi(link, "http://localhost:9090"); err != nil {
+	if _, err := ConnectPi(link, "http://localhost:9090", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Lstat(link)
@@ -516,13 +601,13 @@ func TestConnectPiSymlinkedExtensionStaysSymlink(t *testing.T) {
 func TestConnectPiPreservesExistingFileMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if _, err := ConnectPi(path, "http://a:1"); err != nil {
+	if _, err := ConnectPi(path, "http://a:1", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ConnectPi(path, "http://b:2"); err != nil {
+	if _, err := ConnectPi(path, "http://b:2", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
@@ -541,7 +626,7 @@ func TestConnectPiPreservesExistingFileMode(t *testing.T) {
 func TestConnectPiCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pi", "extensions", "punk-memory.ts")
-	changed, err := ConnectPi(path, "http://localhost:9090")
+	changed, err := ConnectPi(path, "http://localhost:9090", PiOpts{})
 	if err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -561,7 +646,7 @@ func TestConnectPiEscapesHostileServerURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
 	hostile := `http://evil","x":"pwned`
-	if _, err := ConnectPi(path, hostile); err != nil {
+	if _, err := ConnectPi(path, hostile, PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -587,7 +672,7 @@ func TestConnectPiEscapesHostileServerURL(t *testing.T) {
 func TestPiExtensionPassesSyntaxCheck(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
-	if _, err := ConnectPi(path, "http://localhost:9090"); err != nil {
+	if _, err := ConnectPi(path, "http://localhost:9090", PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -647,7 +732,7 @@ func TestConnectPiEscapesLineAndParagraphSeparators(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "punk-memory.ts")
 	hostile := "http://evil.example/\u2028mid\u2029end"
-	if _, err := ConnectPi(path, hostile); err != nil {
+	if _, err := ConnectPi(path, hostile, PiOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -662,4 +747,27 @@ func TestConnectPiEscapesLineAndParagraphSeparators(t *testing.T) {
 		t.Fatalf("expected the escaped \\u2028/\\u2029 sequences in the fallback string literal, got: %s", s)
 	}
 	runPiSyntaxCheck(t, path, got)
+}
+
+func TestPiExtensionRegistersTools(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "punk-memory.ts")
+	if _, err := ConnectPi(p, "http://localhost:9090", PiOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	src, _ := os.ReadFile(p)
+	for _, want := range []string{`name: "punk_whoami"`, `name: "punk_recall"`, `name: "punk_search"`, `name: "punk_remember"`, "/v1/agent/namespace", "/memories/search", "format=compact"} {
+		if !strings.Contains(string(src), want) {
+			t.Fatalf("extension missing %q", want)
+		}
+	}
+	if strings.Contains(string(src), `PUNK_NAMESPACE_OVERRIDE = "agent-`) {
+		t.Fatal("no override without --project namespace")
+	}
+	if _, err := ConnectPi(p, "http://localhost:9090", PiOpts{Namespace: "agent-x-abcdef"}); err != nil {
+		t.Fatal(err)
+	}
+	src, _ = os.ReadFile(p)
+	if !strings.Contains(string(src), `const PUNK_NAMESPACE_OVERRIDE = "agent-x-abcdef"`) {
+		t.Fatal("namespace override not baked")
+	}
 }

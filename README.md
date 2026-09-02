@@ -193,6 +193,23 @@ Enable the model when ready (any OpenAI-compatible endpoint, Ollama
 included): copy `punk.example.yaml` to `config.yaml`, set
 `ai.enabled: true` and one profile.
 
+## Central server
+
+One punk, many machines.
+
+On the server:
+
+    docker compose --profile central up -d          # PUNK_DOMAIN=punk.example.com in .env
+    docker compose exec punk punk apikey create --name alice --subject alice
+
+On each developer machine (needs the punk binary; see Install):
+
+    punk login --url https://punk.example.com --api-key prk_...
+    cd ~/src/billing
+    punk connect claude-code --project --verify
+
+What that does: hooks and the MCP entry carry the bearer token from `~/.punk/credentials.json` (0600); the namespace is derived from the git remote, so every clone of `billing` on every machine shares `agent-billing-<hash>`; claims and registrations default to `<user>@<host>`; `--verify` proves the round trip from that machine. `punk namespace` prints what a directory maps to. Keep `/mcp` and `/v1` behind TLS: the token is a bearer credential.
+
 ## Using Postgres
 
 SQLite is the default and needs nothing. To run on Postgres instead —
@@ -256,6 +273,23 @@ hook and plugin systems, wired the same way.
 punk serve                # memory server on :9090
 punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, hermes, openclaw - see the matrix below
 ```
+
+`punk connect claude-code` (also `cursor`, `opencode`) now wires three things: the capture and injection hooks, the punk MCP server entry (`/mcp?toolset=agent`, the lean session toolset), and, for Claude Code, the `mcp__punk` permission rule so calls never prompt. Add `--verify` to open a real MCP session and call `whoami` before you trust it. Use `--no-mcp` to keep the old hooks-only behaviour and `--force` to replace an `mcpServers.punk` entry punk did not write.
+
+Inside a session the agent can omit `namespace` on every tool: it resolves from the workspace root the client advertises, exactly as the hooks derive it. `whoami` shows the result. `remember_many` writes up to 200 facts in one call; the stdio server (`punk mcp`) also accepts `remember_document {path}`. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
+
+| Target | Capture hooks | In-session tools | Where the tools come from |
+| --- | --- | --- | --- |
+| claude-code | settings.json | MCP | `~/.claude.json` or `.mcp.json`, `mcp__punk` permission |
+| cursor | hooks.json | MCP | `~/.cursor/mcp.json` or `.cursor/mcp.json` |
+| opencode | plugin | MCP | `opencode.json` `mcp.punk` |
+| copilot | hooks.json | MCP | `~/.copilot/mcp-config.json` |
+| antigravity | hooks.json | MCP | `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json` |
+| hermes | config.yaml hooks | MCP | `~/.hermes/config.yaml` `mcp_servers.punk` |
+| openclaw | plugin | MCP | `config.json` `mcp.servers.punk` |
+| pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
+
+Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--project`, which also derives the namespace from the git remote.
 
 | Agent | Wire up | Capture | Context injection |
 |---|---|---|---|
@@ -404,6 +438,10 @@ on the version they started with). Skills are
 | CLI | `serve` / `migrate` / `validate` / `apikey` / `export` + `import` (memory JSONL) / `a2a` / `itbench` / `membench` / `hook` / `connect` / `skills` |
 | Evals | `punk replay` (golden-ledger trajectory), `punk itbench run` (ITBench SRE faulty-entity scoring), `punk membench` (recall@k + MRR) |
 | OTel | `invoke_agent`, `chat`, `execute_tool`, `task.route` spans, OTLP export |
+
+Agents should ask for `format: compact` (MCP) or `?format=compact` (HTTP): each hit becomes key, clipped body, score and flags, which is what an agent needs to judge relevance and roughly a third of the tokens of a full fact. Put exact identifiers, error strings or file names in `anchors`; each becomes an extra phrase-match route in the fusion rather than a filter. Pass `repo_revision` to have code-map facts seeded from another revision flagged `stale`.
+
+With `ai.embeddings.provider: local`, punk embeds in-process with a pinned static model (about 31 MB, downloaded once from huggingface.co) and needs no Ollama. Run `punk embed-backfill --ns <ns> --force` after switching providers or upgrading past a release that changed the embedding input.
 
 ## Repo map
 

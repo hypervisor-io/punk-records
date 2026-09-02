@@ -12,6 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/hypervisor-io/punk-records/internal/api"
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/llm"
 	"github.com/hypervisor-io/punk-records/internal/memory"
@@ -36,6 +37,50 @@ prompt
 // session connects a real in-memory client to the real server, so tests
 // exercise the actual protocol (Susanoo's pattern).
 func session(t *testing.T) *mcp.ClientSession {
+	cs, _ := sessionWithStore(t, nil)
+	return cs
+}
+
+// sessionOpts is session with a hook to configure the MCP client (for
+// example to advertise roots) before it connects, plus optional Deps
+// tweaks applied before the server is built.
+func sessionOpts(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps)) *mcp.ClientSession {
+	cs, _ := sessionWithStore(t, configure, tweaks...)
+	return cs
+}
+
+// sessionWithStore is session plus the memory.Store the server was built
+// with, for tests that need to seed data the MCP surface has no tool for.
+func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps)) (*mcp.ClientSession, *memory.Store) {
+	t.Helper()
+	deps, memStore := newTestDeps(t)
+	for _, tweak := range tweaks {
+		if tweak != nil {
+			tweak(&deps)
+		}
+	}
+	srv := New(deps)
+
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	if configure != nil {
+		configure(client)
+	}
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, memStore
+}
+
+// newTestDeps builds the exact Deps sessionOpts uses, without a server
+// attached, so HTTP-level tests can mount New(deps) themselves.
+func newTestDeps(t *testing.T) (Deps, *memory.Store) {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "mcps.db"))
 	if err != nil {
@@ -60,26 +105,25 @@ func session(t *testing.T) *mcp.ClientSession {
 	clk := time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { clk = clk.Add(time.Millisecond); return clk }
 	ledger := task.NewLedger(db, now)
+	memStore := memory.New(db, now)
+	return Deps{
+		Ledger:           ledger,
+		Router:           route.New(db, reg, ledger, nil, now),
+		Reg:              reg,
+		Mem:              memStore,
+		Region:           region.New(db, nil),
+		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: "agent-default",
+	}, memStore
+}
 
-	srv := New(Deps{
-		Ledger:        ledger,
-		Router:        route.New(db, reg, ledger, nil, now),
-		Reg:           reg,
-		Mem:           memory.New(db, now),
-		DefaultBudget: task.Budget{Tokens: 1000, ToolCalls: 10},
-	})
-
-	st, ct := mcp.NewInMemoryTransports()
-	if _, err := srv.Connect(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+// newTestServerForHTTP is New(newTestDeps(t)) for tests that exercise the
+// server over a real HTTP transport.
+func newTestServerForHTTP(t *testing.T) *mcp.Server {
+	t.Helper()
+	deps, _ := newTestDeps(t)
+	return New(deps)
 }
 
 func text(t *testing.T, res *mcp.CallToolResult) string {
@@ -108,8 +152,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21", len(tools.Tools))
+	if len(tools.Tools) != 29 {
+		t.Fatalf("tools = %d, want 29 (21 plus whoami, remember_many, 6 region tools)", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -410,8 +454,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21 (reflect must stay off without an LLM)", len(tools.Tools))
+	if len(tools.Tools) != 29 {
+		t.Fatalf("tools = %d, want 29 (reflect must stay off without an LLM)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -676,5 +720,296 @@ func TestSearchExpandFlag(t *testing.T) {
 	}
 	if got := text(t, res); !strings.Contains(got, "/a") || strings.Contains(got, "/b") {
 		t.Fatalf("search expand=true no expander = %s, want only /a (flag ignored, no error)", got)
+	}
+}
+
+func TestSearchCompactFormat(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	long := strings.Repeat("z", 800)
+	for _, k := range []string{"/svc/a", "/svc/b"} {
+		if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember",
+			Arguments: map[string]any{"namespace": "ns", "key": k, "body": "outage " + long}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "outage", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search compact: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Facts []json.RawMessage `json:"facts"`
+		Hits  []struct {
+			Key  string `json:"key"`
+			Body string `json:"body"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Facts) != 0 {
+		t.Fatalf("compact must not also return facts, got %d", len(out.Facts))
+	}
+	if len(out.Hits) != 2 {
+		t.Fatalf("hits = %d, want 2", len(out.Hits))
+	}
+	if len([]rune(out.Hits[0].Body)) != 603 {
+		t.Fatalf("body not clipped: %d runes", len([]rune(out.Hits[0].Body)))
+	}
+
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "unified_search",
+		Arguments: map[string]any{"namespace": "ns", "query": "outage", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("unified_search compact: %v %s", err, text(t, res))
+	}
+	var uo struct {
+		Hits    []json.RawMessage `json:"hits"`
+		Compact []struct {
+			Key string `json:"key"`
+		} `json:"compact"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &uo); err != nil {
+		t.Fatal(err)
+	}
+	if len(uo.Hits) != 0 || len(uo.Compact) != 2 {
+		t.Fatalf("unified compact: hits=%d compact=%d", len(uo.Hits), len(uo.Compact))
+	}
+}
+
+func TestServerInstructionsAdvertised(t *testing.T) {
+	cs := session(t)
+	got := cs.InitializeResult().Instructions
+	for _, want := range []string{"unified_search", "recall", "compact", "list_keys", "remember"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("instructions missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestSearchAnchorsInput(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	for k, b := range map[string]string{
+		"/incident/1":   "database outage traced to connection saturation",
+		"/runbook/pool": "when ERR_POOL_EXHAUSTED appears, raise max_connections",
+	} {
+		if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember",
+			Arguments: map[string]any{"namespace": "ns", "key": k, "body": b}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "database outage", "hybrid": true, "scored": true,
+			"anchors": []string{"ERR_POOL_EXHAUSTED"}, "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search anchors: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Hits []struct {
+			Key string `json:"key"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range out.Hits {
+		found = found || h.Key == "/runbook/pool"
+	}
+	if !found {
+		t.Fatalf("anchored runbook missing: %+v", out.Hits)
+	}
+}
+
+func TestSearchRepoRevisionFlagsStaleCodeMap(t *testing.T) {
+	cs, st := sessionWithStore(t, nil)
+	ctx := context.Background()
+	// Seed through the store directly: the MCP surface has no seed tool.
+	if _, err := st.SeedCodeMapWith(ctx, "ns", strings.NewReader(`{"domains":[{"name":"memory","label":"internal/memory","files":["a.go"],"entrypoints":["a.go"],"topSymbols":[]}],"edges":[]}`), memory.SeedCodeMapOpts{Revision: "aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "architecture domain memory", "hybrid": true, "scored": true,
+			"repo_revision": "bbb", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search repo_revision: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Hits []struct {
+			Key   string   `json:"key"`
+			Flags []string `json:"flags"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Hits) != 1 || strings.Join(out.Hits[0].Flags, ",") != "stale" {
+		t.Fatalf("hits = %+v, want one stale code-map hit", out.Hits)
+	}
+}
+
+func TestRememberManyWritesAll(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember_many", Arguments: map[string]any{
+		"namespace": "ns", "author": "t",
+		"facts": []map[string]any{
+			{"key": "/a", "body": "one", "importance": 0.4},
+			{"key": "/b", "body": "two", "attributes": map[string]any{"tag": "x"}},
+		}}})
+	if err != nil || res.IsError {
+		t.Fatalf("remember_many: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Written int      `json:"written"`
+		IDs     []string `json:"ids"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Written != 2 || len(out.IDs) != 2 {
+		t.Fatalf("out = %+v", out)
+	}
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_keys", Arguments: map[string]any{"namespace": "ns"}})
+	if err != nil || !strings.Contains(text(t, res), "/a") || !strings.Contains(text(t, res), "/b") {
+		t.Fatalf("keys: %s %v", text(t, res), err)
+	}
+	if res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember_many", Arguments: map[string]any{"namespace": "ns", "facts": []map[string]any{}}}); err == nil && !res.IsError {
+		t.Fatal("empty facts must error")
+	}
+}
+
+func TestRememberDocumentFromPathOnlyWhenLocalFiles(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(p, []byte("para one\n\npara two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// default session: LocalFiles false -> refused
+	cs := session(t)
+	if res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "remember_document",
+		Arguments: map[string]any{"namespace": "ns", "prefix": "/docs/x", "path": p}}); err == nil && !res.IsError {
+		t.Fatal("path must be refused when LocalFiles is off")
+	}
+	cs = sessionOpts(t, nil, func(d *Deps) { d.LocalFiles = true })
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "remember_document",
+		Arguments: map[string]any{"namespace": "ns", "prefix": "/docs/x", "path": p}})
+	if err != nil || res.IsError {
+		t.Fatalf("remember_document path: %v %s", err, text(t, res))
+	}
+	if !strings.Contains(text(t, res), `"written":2`) {
+		t.Fatalf("document from path: %s", text(t, res))
+	}
+}
+
+func TestMemoryResourceSubscription(t *testing.T) {
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "memsub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if _, err := db.MigrateUp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	specDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(specDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "agents", "database.md"), []byte(agentSpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(specDir, db, slog.New(slog.DiscardHandler))
+	if err := reg.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ledger := task.NewLedger(db, nil)
+	b := bus.New()
+	mem := memory.New(db, nil)
+	srv := New(Deps{
+		Ledger: ledger, Router: route.New(db, reg, ledger, nil, nil),
+		Reg: reg, Mem: mem, Bus: b,
+		DefaultBudget: task.Budget{Tokens: 100, ToolCalls: 5},
+	})
+
+	updated := make(chan string, 8)
+	st, ct := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(_ context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	uri := "punk://memory/ns/tasks"
+	if err := cs.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+		t.Fatal(err)
+	}
+	// The in-memory transport processes the subscribe request on the
+	// server's connection goroutine; give it a moment so the events
+	// published below observe the subscription.
+	time.Sleep(200 * time.Millisecond)
+	b.Publish(bus.Event{Kind: "memory", Key: "other:/tasks/x", Data: map[string]string{"action": "add"}})
+	b.Publish(bus.Event{Kind: "memory", Key: "ns:/unrelated", Data: map[string]string{"action": "add"}})
+	b.Publish(bus.Event{Kind: "memory", Key: "ns:/tasks/T1/status", Data: map[string]string{"action": "add"}})
+	select {
+	case got := <-updated:
+		if got != uri {
+			t.Fatalf("updated uri = %s, want %s", got, uri)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no resources/updated notification for a matching memory event")
+	}
+	select {
+	case extra := <-updated:
+		t.Fatalf("unexpected second notification %s (non-matching events must not fire)", extra)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := mem.Write(ctx, memory.WriteInput{Namespace: "ns", Key: "/tasks/T1", Body: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, `"key":"/tasks/T1"`) {
+		t.Fatalf("read memory resource: %+v", res.Contents)
+	}
+}
+
+func TestAgentToolsetIsLean(t *testing.T) {
+	cs := sessionOpts(t, nil, func(d *Deps) { d.Toolset = "agent" })
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tool := range res.Tools {
+		got[tool.Name] = true
+	}
+	for _, want := range agentToolset {
+		if !got[want] {
+			t.Fatalf("agent toolset missing %s; have %v", want, got)
+		}
+	}
+	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "register", "list_region_members", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
+		if got[name] {
+			t.Fatalf("agent toolset must not expose %s", name)
+		}
+	}
+	full := session(t)
+	fres, err := full.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fres.Tools) <= len(res.Tools) {
+		t.Fatalf("full toolset (%d) must be larger than agent (%d)", len(fres.Tools), len(res.Tools))
 	}
 }

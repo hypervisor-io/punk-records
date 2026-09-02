@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -59,5 +60,61 @@ func TestVectorSearchExcludesExpiredFacts(t *testing.T) {
 	}
 	if len(scored) != 1 || scored[0].Key != "/keep" {
 		t.Fatalf("HybridSearchScored = %+v, want only /keep", scored)
+	}
+}
+
+type recordingEmbedder struct {
+	inputs []string
+	dims   int
+}
+
+func (r *recordingEmbedder) Dims() int { return r.dims }
+func (r *recordingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	r.inputs = append(r.inputs, texts...)
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, r.dims)
+		out[i][0] = 1
+	}
+	return out, nil
+}
+
+func TestWriteEmbedsKeyedInput(t *testing.T) {
+	s := newTestStore(t)
+	rec := &recordingEmbedder{dims: 2}
+	s.SetEmbedder(rec)
+	if _, err := s.Write(context.Background(), WriteInput{Namespace: "ns", Key: "/svc/db", Body: "primary is pg14"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.inputs) != 1 || rec.inputs[0] != "key: /svc/db\nprimary is pg14" {
+		t.Fatalf("embed inputs = %q", rec.inputs)
+	}
+}
+
+func TestBackfillAndReembedUseKeyedInput(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/a", Body: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recordingEmbedder{dims: 2}
+	s.SetEmbedder(rec)
+	n, err := s.BackfillEmbeddings(ctx, "ns", 64)
+	if err != nil || n != 1 {
+		t.Fatalf("backfill = %d %v", n, err)
+	}
+	if rec.inputs[0] != "key: /a\none" {
+		t.Fatalf("backfill input = %q", rec.inputs[0])
+	}
+	rec.inputs = nil
+	n, err = s.ReembedAll(ctx, "ns", 64)
+	if err != nil || n != 1 {
+		t.Fatalf("reembed = %d %v", n, err)
+	}
+	if len(rec.inputs) != 1 || rec.inputs[0] != "key: /a\none" {
+		t.Fatalf("reembed inputs = %q", rec.inputs)
+	}
+	if n, _ := s.BackfillEmbeddings(ctx, "ns", 64); n != 0 {
+		t.Fatalf("nothing should be missing after reembed, got %d", n)
 	}
 }

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +219,32 @@ func TestDiagnoseBeyondCap(t *testing.T) {
 	}
 	if d.StaleObservations != 1 {
 		t.Fatalf("stale observations = %d, want 1 (sorts past a namespace-wide cap but within the observations-only cap)", d.StaleObservations)
+	}
+}
+
+func TestDiagnoseCountsOversizeEmbeddings(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/small", Body: "tiny"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/big", Body: strings.Repeat("w", 4*50)}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.Diagnose(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.OversizeEmbeddings != -1 {
+		t.Fatalf("no embedder: OversizeEmbeddings = %d, want -1", d.OversizeEmbeddings)
+	}
+	s.SetEmbedder(&recordingEmbedder{dims: 2})
+	s.SetEmbedMaxTokens(20)
+	d, err = s.Diagnose(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.OversizeEmbeddings != 1 {
+		t.Fatalf("OversizeEmbeddings = %d, want 1", d.OversizeEmbeddings)
 	}
 }

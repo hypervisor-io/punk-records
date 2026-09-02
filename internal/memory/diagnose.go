@@ -14,9 +14,14 @@ type Diagnosis struct {
 	Namespace         string `json:"namespace"`
 	Quarantined       int    `json:"quarantined"`
 	MissingEmbeddings int    `json:"missing_embeddings"` // -1 when no embedder configured
-	OrphanLinks       int    `json:"orphan_links"`
-	StaleObservations int    `json:"stale_observations"`
-	ExpiredClaims     int    `json:"expired_claims"`
+	// OversizeEmbeddings counts latest live facts whose embedding input
+	// (key + body) estimates above the configured model window and is
+	// therefore truncated by the provider; -1 when no embedder or no
+	// window is configured. Recall caps the scan at 1000 facts.
+	OversizeEmbeddings int `json:"oversize_embeddings"`
+	OrphanLinks        int `json:"orphan_links"`
+	StaleObservations  int `json:"stale_observations"`
+	ExpiredClaims      int `json:"expired_claims"`
 
 	// Consolidation observability. LastConsolidatedAt is when this process last finished a
 	// consolidation pass for the namespace (RFC3339; empty when it hasn't
@@ -75,7 +80,7 @@ func (s *Store) Diagnose(ctx context.Context, ns string) (*Diagnosis, error) {
 	// take - intentional, it keeps the two counters mutually consistent
 	// with each other rather than drifting apart over the scan duration.
 	now := s.now()
-	d := &Diagnosis{Namespace: ns, MissingEmbeddings: -1}
+	d := &Diagnosis{Namespace: ns, MissingEmbeddings: -1, OversizeEmbeddings: -1}
 	nsID, ok, err := s.namespaceID(ctx, ns)
 	if err != nil {
 		return nil, fmt.Errorf("diagnose namespace lookup: %w", err)
@@ -186,6 +191,19 @@ func (s *Store) Diagnose(ctx context.Context, ns string) (*Diagnosis, error) {
 			// no facts to be missing embeddings, but an embedder is
 			// configured: 0, not the "no embedder" sentinel.
 			d.MissingEmbeddings = 0
+		}
+	}
+
+	if s.embedder != nil && s.embedMaxTokens > 0 {
+		facts, err := s.Recall(ctx, ns, "", 0)
+		if err != nil {
+			return nil, fmt.Errorf("diagnose oversize scan: %w", err)
+		}
+		d.OversizeEmbeddings = 0
+		for _, f := range facts {
+			if EstimateTokens(embedText(f.Key, f.Body)) > s.embedMaxTokens {
+				d.OversizeEmbeddings++
+			}
 		}
 	}
 

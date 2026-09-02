@@ -221,7 +221,14 @@ func (s *Store) entityArm(ctx context.Context, ns, query string) ([]Fact, error)
 	return facts, nil
 }
 
+// HybridSearchScored is HybridSearchScoredWith without anchors; kept as
+// the stable signature every existing caller uses.
 func (s *Store) HybridSearchScored(ctx context.Context, ns, query string, limit int, recencyHalfLife time.Duration) ([]ScoredFact, error) {
+	return s.HybridSearchScoredWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: recencyHalfLife})
+}
+
+func (s *Store) HybridSearchScoredWith(ctx context.Context, ns, query string, o HybridOpts) ([]ScoredFact, error) {
+	limit, recencyHalfLife := o.Limit, o.RecencyHalfLife
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -277,6 +284,16 @@ func (s *Store) HybridSearchScored(ctx context.Context, ns, query string, limit 
 		get(f.ID)["entity"] += 1.0 / (k + float64(rank+1))
 		byID[f.ID] = f
 	}
+	if len(o.Anchors) > 0 {
+		contrib, anchored, err := s.anchorArm(ctx, ns, o.Anchors, sourceCap)
+		if err != nil {
+			return nil, err
+		}
+		for id, c := range contrib {
+			get(id)["anchor"] += c
+			byID[id] = anchored[id]
+		}
+	}
 	// --- bridge discovery (multi-hop) ---
 	// Seeds: top 20 candidates by base (fts+vector+entity), the RRF-strong
 	// hits whose neighbors are worth pulling in. Key-asc tie-break: without
@@ -290,7 +307,7 @@ func (s *Store) HybridSearchScored(ctx context.Context, ns, query string, limit 
 	}
 	sort.Slice(seedIDs, func(a, b int) bool {
 		ca, cb := comp[seedIDs[a]], comp[seedIDs[b]]
-		sa, sb := ca["fts"]+ca["vector"]+ca["entity"], cb["fts"]+cb["vector"]+cb["entity"]
+		sa, sb := ca["fts"]+ca["vector"]+ca["entity"]+ca["anchor"], cb["fts"]+cb["vector"]+cb["entity"]+cb["anchor"]
 		if sa != sb {
 			return sa > sb
 		}
@@ -449,7 +466,7 @@ func (s *Store) HybridSearchScored(ctx context.Context, ns, query string, limit 
 	}
 
 	score := func(c map[string]float64) float64 {
-		v := (c["fts"] + c["vector"] + c["entity"] + c["bridge"]) * c["recency"] * c["importance"] * c["access"] * c["feedback"] * c["reinforce"]
+		v := (c["fts"] + c["vector"] + c["entity"] + c["anchor"] + c["bridge"]) * c["recency"] * c["importance"] * c["access"] * c["feedback"] * c["reinforce"]
 		if p := c["proof"]; p > 0 {
 			v *= p
 		}

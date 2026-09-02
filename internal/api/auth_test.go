@@ -107,3 +107,31 @@ func TestIntakeRateLimit(t *testing.T) {
 		t.Fatal("60 rapid intakes never rate limited (burst 40)")
 	}
 }
+
+func TestForgedSubjectHeaderIsReplaced(t *testing.T) {
+	s, keys := authServer(t)
+	ctx := context.Background()
+	token, err := keys.Create(ctx, "test-key", "real-subject")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// probe handler mounted behind the auth middleware reads the header
+	// the middleware is supposed to own
+	var got string
+	probe := http.NewServeMux()
+	probe.Handle("/probe", s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Punk-Subject")
+	})))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Punk-Subject", "forged-attacker")
+	probe.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe = %d", rec.Code)
+	}
+	if got != "real-subject" {
+		t.Fatalf("subject = %q, want real-subject (forged value must be replaced)", got)
+	}
+}

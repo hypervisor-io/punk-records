@@ -362,3 +362,47 @@ func encodeHermesConfig(doc *yaml.Node) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
+
+// ConnectHermesMCP registers punk under mcp_servers.punk in a Hermes
+// config.yaml: {url: <endpoint>, headers: {...}}. Same document handling
+// as ConnectHermes, so comments and every other key are preserved.
+func ConnectHermesMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
+	doc, existing, err := loadHermesConfig(configPath)
+	if err != nil {
+		return false, err
+	}
+	root := doc.Content[0]
+	servers, err := hermesChildMapping(root, "mcp_servers", "mcp_servers")
+	if err != nil {
+		return false, err
+	}
+	if prev := yamlMapValue(servers, "punk"); prev != nil && !force {
+		u := yamlMapValue(prev, "url")
+		if prev.Kind != yaml.MappingNode || u == nil || !strings.Contains(u.Value, "/mcp") {
+			return false, fmt.Errorf("%s already has an mcp_servers.punk entry that punk did not write; rerun with --force to replace it", configPath)
+		}
+	}
+	entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	yamlMapSet(entry, "url", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: mcpEndpoint(o.ServerURL)})
+	if h := mcpHeaders(o); h != nil {
+		hn := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		for _, k := range []string{"Authorization", "X-Punk-Namespace", "X-Punk-Agent"} {
+			if v, ok := h[k].(string); ok {
+				yamlMapSet(hn, k, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v})
+			}
+		}
+		yamlMapSet(entry, "headers", hn)
+	}
+	yamlMapSet(servers, "punk", entry)
+	out, err := encodeHermesConfig(doc)
+	if err != nil {
+		return false, fmt.Errorf("encode config: %w", err)
+	}
+	if existing != nil && bytes.Equal(out, existing) {
+		return false, nil
+	}
+	if err := writePreservingSymlinkAndMode(configPath, out, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}

@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.3.0 (2026-09-03)
+
+### Added
+- `format: compact` on `search` and `unified_search` (MCP) and `?format=compact` (HTTP).
+- MCP initialize instructions describing retrieval routing.
+- `anchors` on hybrid scored search: exact phrase routes fused by rank.
+- `repo_revision` / `?revision=` flags code-map hits from another revision as stale; `punk seed rinnegan` records the revision.
+- `ai.embeddings.provider: local` with a pinned static model and `punk models pull`.
+- `diagnose.oversize_embeddings` and `ai.embeddings.max_input_tokens`.
+- `punk embed-backfill --force`.
+- MCP calls join the caller's W3C trace context from `_meta`.
+- `punk connect claude-code|cursor|opencode` register the MCP server (and the Claude Code permission rule); `--verify`, `--no-mcp`, `--force`.
+- MCP: `whoami`; `namespace` optional on every memory and region tool, resolved from client roots; `remember_many`; `remember_document {path}` on the stdio server; subscribable `punk://memory/{ns}{prefix}` resources; `agent` and `full` toolsets (`punk mcp --toolset`, `/mcp?toolset=agent`).
+- `punk login` / `punk logout`; hooks and connect read `~/.punk/credentials.json`.
+- MCP entries carry `Authorization` (literal or `${VAR}` with `--api-key-env`), `X-Punk-Namespace`, `X-Punk-Agent`; `connect --verify` authenticates.
+- `punk connect --project` derives the namespace from the git remote; `punk namespace`; `punk hook --ns`; `/v1/agent/hooks?ns=`.
+- `claim_work`, `release_work`, `register` default holder/agent to the session identity; `whoami` reports `agent`.
+- `docker compose --profile central` adds a Caddy TLS front; `deploy/Caddyfile`.
+- `punk connect` registers the punk MCP server for Copilot CLI, Antigravity, Hermes and OpenClaw; the pi extension registers `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember`.
+- `GET /v1/agent/namespace?cwd=` returns the namespace a directory maps to.
+
+### Changed
+- Embedding input is `key: <key>` + body; re-embed with `embed-backfill --force`.
+- Expanded search keeps each reformulation's top hit before filling by score.
+- Document chunks are bounded (4000 chars); oversize paragraphs split at sentence or line breaks.
+
+### Fixed
+- Example config embeddings `base_url` no longer carries a `/v1` suffix.
+
 - P0.1: repo skeleton - go module, cmd/amaterasu, internal packages, Makefile, lint config
 - P0.2: CLI subcommands serve/migrate/validate stubs + --version
 - P0.3: config package - YAML + PUNK_* env overrides, validation

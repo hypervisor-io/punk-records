@@ -175,6 +175,13 @@ func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns := AgentNamespace(in.CWD)
+	if override := r.URL.Query().Get("ns"); override != "" {
+		if !validNamespace(override) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad ns"})
+			return
+		}
+		ns = override
+	}
 	expiresAt := time.Now().Add(agentCaptureTTL)
 
 	var key, body string
@@ -684,4 +691,22 @@ func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, 
 		s.recordInjectedIDs(r.Context(), ns, sid, seen, ids)
 	}
 	writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: context, FactIDs: ids})
+}
+
+// validNamespace accepts what AgentNamespace and ProjectNamespace emit:
+// lowercase letters/digits (any script) with single dashes, bounded length.
+func validNamespace(s string) bool {
+	return s != "" && len(s) <= 128 && nsSlugRe.ReplaceAllString(strings.ToLower(s), "-") == strings.ToLower(s)
+}
+
+// handleAgentNamespace tells a client-side tool which namespace a
+// working directory maps to, using the same derivation hooks use, so no
+// client has to reimplement the slug rule.
+func (s *Server) handleAgentNamespace(w http.ResponseWriter, r *http.Request) {
+	cwd := r.URL.Query().Get("cwd")
+	if cwd == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cwd required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"namespace": AgentNamespace(cwd)})
 }

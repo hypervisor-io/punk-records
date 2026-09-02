@@ -83,11 +83,18 @@ func filterRefs(query string, refs []string) []string {
 // worded queries; the single final rerank pass (when a reranker is
 // configured) mitigates that by re-scoring the merged set against one
 // shared query. Both relaxations are deliberate.
+// HybridSearchExpanded is HybridSearchExpandedWith without anchors; kept as
+// the stable signature every existing caller uses.
 func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limit int, recencyHalfLife time.Duration, exp QueryExpander) ([]ScoredFact, error) {
+	return s.HybridSearchExpandedWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: recencyHalfLife}, exp)
+}
+
+func (s *Store) HybridSearchExpandedWith(ctx context.Context, ns, query string, o HybridOpts, exp QueryExpander) ([]ScoredFact, error) {
+	limit := o.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	base, err := s.HybridSearchScored(ctx, ns, query, limit, recencyHalfLife)
+	base, err := s.HybridSearchScoredWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: o.RecencyHalfLife, Anchors: o.Anchors})
 	if err != nil {
 		return base, err
 	}
@@ -109,8 +116,12 @@ func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limi
 	for _, sf := range base {
 		best[sf.ID] = sf
 	}
+	var tops []string
+	if len(base) > 0 {
+		tops = append(tops, base[0].ID)
+	}
 	for _, q := range refs {
-		hits, herr := s.HybridSearchScored(ctx, ns, q, limit, recencyHalfLife)
+		hits, herr := s.HybridSearchScoredWith(ctx, ns, q, HybridOpts{Limit: limit, RecencyHalfLife: o.RecencyHalfLife, Anchors: o.Anchors})
 		if herr != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				// A canceled/deadline-exceeded ctx must propagate as an
@@ -121,6 +132,9 @@ func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limi
 			}
 			continue // one bad variant (non-ctx error) never fails the whole search
 		}
+		if len(hits) > 0 {
+			tops = append(tops, hits[0].ID)
+		}
 		for _, sf := range hits {
 			if cur, ok := best[sf.ID]; !ok || sf.Score > cur.Score {
 				best[sf.ID] = sf
@@ -128,15 +142,44 @@ func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limi
 		}
 	}
 	out := make([]ScoredFact, 0, len(best))
-	for _, sf := range best {
-		out = append(out, sf)
-	}
-	sort.Slice(out, func(a, b int) bool {
-		if out[a].Score != out[b].Score {
-			return out[a].Score > out[b].Score
+	if len(best) > limit {
+		// Coverage first: the top hit of the base query and of every
+		// reformulation is kept, in that order, so a variant that reached
+		// something the others missed is never truncated away by the sum
+		// of the others' scores. The rest is filled by score. Coverage
+		// only reorders when truncation would actually drop candidates;
+		// otherwise the deterministic score-then-key order is kept.
+		seen := map[string]bool{}
+		for _, id := range tops {
+			if sf, ok := best[id]; ok && !seen[id] {
+				seen[id] = true
+				out = append(out, sf)
+			}
 		}
-		return out[a].Key < out[b].Key
-	})
+		rest := make([]ScoredFact, 0, len(best))
+		for id, sf := range best {
+			if !seen[id] {
+				rest = append(rest, sf)
+			}
+		}
+		sort.Slice(rest, func(a, b int) bool {
+			if rest[a].Score != rest[b].Score {
+				return rest[a].Score > rest[b].Score
+			}
+			return rest[a].Key < rest[b].Key
+		})
+		out = append(out, rest...)
+	} else {
+		for _, sf := range best {
+			out = append(out, sf)
+		}
+		sort.Slice(out, func(a, b int) bool {
+			if out[a].Score != out[b].Score {
+				return out[a].Score > out[b].Score
+			}
+			return out[a].Key < out[b].Key
+		})
+	}
 	if len(out) > limit {
 		out = out[:limit]
 	}
