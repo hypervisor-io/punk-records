@@ -405,6 +405,10 @@ on the version they started with). Skills are
 | Evals | `punk replay` (golden-ledger trajectory), `punk itbench run` (ITBench SRE faulty-entity scoring), `punk membench` (recall@k + MRR) |
 | OTel | `invoke_agent`, `chat`, `execute_tool`, `task.route` spans, OTLP export |
 
+Agents should ask for `format: compact` (MCP) or `?format=compact` (HTTP): each hit becomes key, clipped body, score and flags, which is what an agent needs to judge relevance and roughly a third of the tokens of a full fact. Put exact identifiers, error strings or file names in `anchors`; each becomes an extra phrase-match route in the fusion rather than a filter. Pass `repo_revision` to have code-map facts seeded from another revision flagged `stale`.
+
+With `ai.embeddings.provider: local`, punk embeds in-process with a pinned static model (about 31 MB, downloaded once from huggingface.co) and needs no Ollama. Run `punk embed-backfill --ns <ns> --force` after switching providers or upgrading past a release that changed the embedding input.
+
 ## Repo map
 
 ```

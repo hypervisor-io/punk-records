@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `format: compact` on `search` and `unified_search` (MCP) and `?format=compact` (HTTP).
+- MCP initialize instructions describing retrieval routing.
+- `anchors` on hybrid scored search: exact phrase routes fused by rank.
+- `repo_revision` / `?revision=` flags code-map hits from another revision as stale; `punk seed rinnegan` records the revision.
+- `ai.embeddings.provider: local` with a pinned static model and `punk models pull`.
+- `diagnose.oversize_embeddings` and `ai.embeddings.max_input_tokens`.
+- `punk embed-backfill --force`.
+- MCP calls join the caller's W3C trace context from `_meta`.
+
+### Changed
+- Embedding input is `key: <key>` + body; re-embed with `embed-backfill --force`.
+- Expanded search keeps each reformulation's top hit before filling by score.
+- Document chunks are bounded (4000 chars); oversize paragraphs split at sentence or line breaks.
+
+### Fixed
+- Example config embeddings `base_url` no longer carries a `/v1` suffix.
+
 - P0.1: repo skeleton - go module, cmd/amaterasu, internal packages, Makefile, lint config
 - P0.2: CLI subcommands serve/migrate/validate stubs + --version
 - P0.3: config package - YAML + PUNK_* env overrides, validation
