@@ -278,6 +278,19 @@ punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, herme
 
 Inside a session the agent can omit `namespace` on every tool: it resolves from the workspace root the client advertises, exactly as the hooks derive it. `whoami` shows the result. `remember_many` writes up to 200 facts in one call; the stdio server (`punk mcp`) also accepts `remember_document {path}`. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
 
+| Target | Capture hooks | In-session tools | Where the tools come from |
+| --- | --- | --- | --- |
+| claude-code | settings.json | MCP | `~/.claude.json` or `.mcp.json`, `mcp__punk` permission |
+| cursor | hooks.json | MCP | `~/.cursor/mcp.json` or `.cursor/mcp.json` |
+| opencode | plugin | MCP | `opencode.json` `mcp.punk` |
+| copilot | hooks.json | MCP | `~/.copilot/mcp-config.json` |
+| antigravity | hooks.json | MCP | `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json` |
+| hermes | config.yaml hooks | MCP | `~/.hermes/config.yaml` `mcp_servers.punk` |
+| openclaw | plugin | MCP | `config.json` `mcp.servers.punk` |
+| pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
+
+Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--project`, which also derives the namespace from the git remote.
+
 | Agent | Wire up | Capture | Context injection |
 |---|---|---|---|
 | Claude Code | `punk connect claude-code` | hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop) | native: SessionStart's `additionalContext` |

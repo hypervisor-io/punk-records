@@ -18,6 +18,8 @@
 - `punk connect --project` derives the namespace from the git remote; `punk namespace`; `punk hook --ns`; `/v1/agent/hooks?ns=`.
 - `claim_work`, `release_work`, `register` default holder/agent to the session identity; `whoami` reports `agent`.
 - `docker compose --profile central` adds a Caddy TLS front; `deploy/Caddyfile`.
+- `punk connect` registers the punk MCP server for Copilot CLI, Antigravity, Hermes and OpenClaw; the pi extension registers `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember`.
+- `GET /v1/agent/namespace?cwd=` returns the namespace a directory maps to.
 
 ### Changed
 - Embedding input is `key: <key>` + body; re-embed with `embed-backfill --force`.
