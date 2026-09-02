@@ -257,6 +257,10 @@ punk serve                # memory server on :9090
 punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, hermes, openclaw - see the matrix below
 ```
 
+`punk connect claude-code` (also `cursor`, `opencode`) now wires three things: the capture and injection hooks, the punk MCP server entry (`/mcp?toolset=agent`, the lean session toolset), and, for Claude Code, the `mcp__punk` permission rule so calls never prompt. Add `--verify` to open a real MCP session and call `whoami` before you trust it. Use `--no-mcp` to keep the old hooks-only behaviour and `--force` to replace an `mcpServers.punk` entry punk did not write.
+
+Inside a session the agent can omit `namespace` on every tool: it resolves from the workspace root the client advertises, exactly as the hooks derive it. `whoami` shows the result. `remember_many` writes up to 200 facts in one call; the stdio server (`punk mcp`) also accepts `remember_document {path}`. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
+
 | Agent | Wire up | Capture | Context injection |
 |---|---|---|---|
 | Claude Code | `punk connect claude-code` | hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop) | native: SessionStart's `additionalContext` |

@@ -11,6 +11,8 @@
 - `diagnose.oversize_embeddings` and `ai.embeddings.max_input_tokens`.
 - `punk embed-backfill --force`.
 - MCP calls join the caller's W3C trace context from `_meta`.
+- `punk connect claude-code|cursor|opencode` register the MCP server (and the Claude Code permission rule); `--verify`, `--no-mcp`, `--force`.
+- MCP: `whoami`; `namespace` optional on every memory and region tool, resolved from client roots; `remember_many`; `remember_document {path}` on the stdio server; subscribable `punk://memory/{ns}{prefix}` resources; `agent` and `full` toolsets (`punk mcp --toolset`, `/mcp?toolset=agent`).
 
 ### Changed
 - Embedding input is `key: <key>` + body; re-embed with `embed-backfill --force`.
