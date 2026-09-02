@@ -160,7 +160,11 @@ func Run(stdin io.Reader, baseURL, apiKey string, out, errw io.Writer) error {
 // point of view, so this stays fail-open and never affects Run's return
 // value or stdout.
 func forwardHook(baseURL, apiKey string, raw []byte, errw io.Writer) {
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/agent/hooks", bytes.NewReader(raw))
+	target := baseURL + "/v1/agent/hooks"
+	if namespaceOverride != "" {
+		target += "?ns=" + url.QueryEscape(namespaceOverride)
+	}
+	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(raw))
 	if err != nil {
 		fmt.Fprintln(errw, "punk hook: build request:", err)
 		return
@@ -188,6 +192,9 @@ func sessionParams(cwd, sid string) url.Values {
 	if sid != "" {
 		v.Set("sid", sid)
 	}
+	if namespaceOverride != "" {
+		v.Set("ns", namespaceOverride)
+	}
 	return v
 }
 
@@ -199,6 +206,9 @@ func turnParams(cwd, sid, prompt string) url.Values {
 	v := url.Values{"cwd": {cwd}, "mode": {"turn"}, "q": {clipRunes(prompt, turnQueryClip)}}
 	if sid != "" {
 		v.Set("sid", sid)
+	}
+	if namespaceOverride != "" {
+		v.Set("ns", namespaceOverride)
 	}
 	return v
 }
@@ -806,3 +816,11 @@ func setAuth(req *http.Request, apiKey string) {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 }
+
+// namespaceOverride, when set by SetNamespaceOverride, is sent with every
+// hook request so capture and injection land in the namespace punk
+// connect computed for this checkout rather than the cwd-derived one.
+var namespaceOverride string
+
+// SetNamespaceOverride fixes the namespace for this process's hook calls.
+func SetNamespaceOverride(ns string) { namespaceOverride = ns }

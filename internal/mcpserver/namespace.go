@@ -60,10 +60,17 @@ func (r *nsResolver) rootPath(ctx context.Context, ss *mcp.ServerSession) string
 }
 
 // resolve picks the namespace for a tool call: explicit wins, then the
-// client's workspace root, then the server default.
+// X-Punk-Namespace header (punk connect --project bakes the checkout's
+// namespace into the MCP entry), then the client's workspace root, then
+// the server default.
 func (r *nsResolver) resolve(ctx context.Context, req *mcp.CallToolRequest, explicit string) (ns, source string) {
 	if strings.TrimSpace(explicit) != "" {
 		return explicit, "explicit"
+	}
+	if req != nil && req.Extra != nil && req.Extra.Header != nil {
+		if h := strings.TrimSpace(req.Extra.Header.Get("X-Punk-Namespace")); h != "" {
+			return h, "header"
+		}
 	}
 	if req != nil && r.namespaceFor != nil {
 		if p := r.rootPath(ctx, req.Session); p != "" {
@@ -75,7 +82,7 @@ func (r *nsResolver) resolve(ctx context.Context, req *mcp.CallToolRequest, expl
 
 type whoamiOut struct {
 	Namespace string `json:"namespace"`
-	Source    string `json:"source"` // explicit | roots | default
+	Source    string `json:"source"` // explicit | header | roots | default
 	Root      string `json:"root,omitempty"`
 }
 

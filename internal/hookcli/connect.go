@@ -43,6 +43,12 @@ var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "St
 // torn write, but implemented and relied on for the "no torn write"
 // guarantee).
 func ConnectClaudeCode(settingsPath, punkPath, serverURL string) (changed bool, err error) {
+	return ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, "")
+}
+
+// ConnectClaudeCodeNS is ConnectClaudeCode with a namespace override
+// baked into the generated hook commands (from punk connect --project).
+func ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
 	settings, existing, err := loadSettings(settingsPath)
 	if err != nil {
 		return false, err
@@ -58,7 +64,7 @@ func ConnectClaudeCode(settingsPath, punkPath, serverURL string) (changed bool, 
 		hooksAny = map[string]any{}
 	}
 
-	command := punkHookCommand(punkPath, serverURL)
+	command := punkHookCommand(punkPath, serverURL, ns)
 	for _, ev := range hookEvents {
 		if raw, ok := hooksAny[ev]; ok && raw != nil {
 			if _, isArr := raw.([]any); !isArr {
@@ -171,8 +177,12 @@ func quotePunkPath(punkPath string) string {
 
 // punkHookCommand builds the shell command punk's managed hook group
 // invokes.
-func punkHookCommand(punkPath, serverURL string) string {
-	return fmt.Sprintf("%s hook --url %s", quotePunkPath(punkPath), serverURL)
+func punkHookCommand(punkPath, serverURL, ns string) string {
+	cmd := fmt.Sprintf("%s hook --url %s", quotePunkPath(punkPath), serverURL)
+	if ns != "" {
+		cmd += " --ns " + ns
+	}
+	return cmd
 }
 
 // mergeEventGroups returns the hook-group list for one event with any

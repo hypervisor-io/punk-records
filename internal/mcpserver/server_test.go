@@ -53,6 +53,35 @@ func sessionOpts(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps
 // with, for tests that need to seed data the MCP surface has no tool for.
 func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps)) (*mcp.ClientSession, *memory.Store) {
 	t.Helper()
+	deps, memStore := newTestDeps(t)
+	for _, tweak := range tweaks {
+		if tweak != nil {
+			tweak(&deps)
+		}
+	}
+	srv := New(deps)
+
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	if configure != nil {
+		configure(client)
+	}
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, memStore
+}
+
+// newTestDeps builds the exact Deps sessionOpts uses, without a server
+// attached, so HTTP-level tests can mount New(deps) themselves.
+func newTestDeps(t *testing.T) (Deps, *memory.Store) {
+	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "mcps.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -77,8 +106,7 @@ func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(
 	now := func() time.Time { clk = clk.Add(time.Millisecond); return clk }
 	ledger := task.NewLedger(db, now)
 	memStore := memory.New(db, now)
-
-	deps := Deps{
+	return Deps{
 		Ledger:           ledger,
 		Router:           route.New(db, reg, ledger, nil, now),
 		Reg:              reg,
@@ -87,28 +115,15 @@ func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(
 		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: "agent-default",
-	}
-	for _, tweak := range tweaks {
-		if tweak != nil {
-			tweak(&deps)
-		}
-	}
-	srv := New(deps)
+	}, memStore
+}
 
-	st, ct := mcp.NewInMemoryTransports()
-	if _, err := srv.Connect(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
-	if configure != nil {
-		configure(client)
-	}
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs, memStore
+// newTestServerForHTTP is New(newTestDeps(t)) for tests that exercise the
+// server over a real HTTP transport.
+func newTestServerForHTTP(t *testing.T) *mcp.Server {
+	t.Helper()
+	deps, _ := newTestDeps(t)
+	return New(deps)
 }
 
 func text(t *testing.T, res *mcp.CallToolResult) string {

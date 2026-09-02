@@ -131,6 +131,8 @@ func run(args []string) error {
 		return cmdModels(args[1:])
 	case "login":
 		return cmdLogin(args[1:])
+	case "namespace":
+		return cmdNamespace(args[1:])
 	case "logout":
 		return cmdLogout(args[1:])
 	case "consolidate":
@@ -2199,8 +2201,12 @@ func cmdHook(args []string) error {
 	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
 	from := fs.String("from", "", "source agent the stdin payload is native to (default empty = Claude Code passthrough; e.g. \"cursor\")")
 	event := fs.String("event", "", "hook event name, required for agents whose native payload doesn't self-identify it (currently only antigravity: PostToolUse, PreInvocation, or Stop - see hookcli.ConnectAntigravity)")
+	nsFlag := fs.String("ns", "", "namespace override (written by punk connect --project)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *nsFlag != "" {
+		hookcli.SetNamespaceOverride(*nsFlag)
 	}
 	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
 	// Antigravity CLI's hook payloads carry no field identifying which
@@ -2360,10 +2366,30 @@ func cmdConnectClaudeCode(args []string) error {
 	}
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
+	var projNS string
+	if *project {
+		ns, src := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, src)
+	}
+
 	_, statErr := os.Stat(settingsPath)
 	existedBefore := statErr == nil
 
-	changed, err := hookcli.ConnectClaudeCode(settingsPath, punkPath, serverURL)
+	var changed bool
+	if *project {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, projNS)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	} else {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCode(settingsPath, punkPath, serverURL)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("connect claude-code: %w", err)
 	}
@@ -2381,7 +2407,7 @@ func cmdConnectClaudeCode(args []string) error {
 			mcpPath = filepath.Join(home, ".claude.json")
 		}
 		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS}, *force)
 		if err != nil {
 			return fmt.Errorf("connect claude-code mcp: %w", err)
 		}
@@ -2451,12 +2477,27 @@ func cmdConnectCursor(args []string) error {
 	}
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
+	var projNS string
+	if *project {
+		ns, src := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, src)
+	}
+
 	_, statErr := os.Stat(hooksPath)
 	hooksExistedBefore := statErr == nil
 
-	hooksChanged, err := hookcli.ConnectCursor(hooksPath, punkPath, serverURL)
-	if err != nil {
-		return fmt.Errorf("connect cursor: %w", err)
+	var hooksChanged bool
+	{
+		var hookErr error
+		if *project {
+			hooksChanged, hookErr = hookcli.ConnectCursorNS(hooksPath, punkPath, serverURL, projNS)
+		} else {
+			hooksChanged, hookErr = hookcli.ConnectCursor(hooksPath, punkPath, serverURL)
+		}
+		if hookErr != nil {
+			return fmt.Errorf("connect cursor: %w", hookErr)
+		}
 	}
 	if hooksChanged {
 		fmt.Printf("punk: wired Cursor hooks into %s\n", hooksPath)
@@ -2494,7 +2535,7 @@ func cmdConnectCursor(args []string) error {
 	if !*noMCP {
 		mcpPath := filepath.Join(cursorDir, "mcp.json")
 		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS}, *force)
 		if err != nil {
 			return fmt.Errorf("connect cursor mcp: %w", err)
 		}
@@ -3024,6 +3065,18 @@ func cmdLogin(args []string) error {
 	} else {
 		fmt.Printf("punk: saved %s\n", path)
 	}
+	return nil
+}
+
+// cmdNamespace prints the namespace a checkout maps to and how it was
+// derived (remote = stable across machines, path = local fallback).
+func cmdNamespace(args []string) error {
+	dir := "."
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	ns, source := hookcli.ProjectNamespace(dir)
+	fmt.Printf("%s\t%s\n", ns, source)
 	return nil
 }
 

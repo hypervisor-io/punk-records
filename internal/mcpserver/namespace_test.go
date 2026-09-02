@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -63,4 +65,38 @@ func TestRememberWithoutNamespaceUsesRoots(t *testing.T) {
 	if !strings.Contains(text(t, res), `"body":"v"`) {
 		t.Fatalf("fact not stored under resolved namespace: %s", text(t, res))
 	}
+}
+
+func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
+	srv := newTestServerForHTTP(t) // builds Deps exactly like sessionOpts and returns *mcp.Server
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	client.AddRoots(&mcp.Root{URI: "file:///tmp/other"})
+	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL,
+		HTTPClient: &http.Client{Transport: headerRT{h: http.Header{"X-Punk-Namespace": {"agent-billing-1a2b3c"}}}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := text(t, res); !strings.Contains(got, `"namespace":"agent-billing-1a2b3c"`) || !strings.Contains(got, `"source":"header"`) {
+		t.Fatalf("whoami = %s", got)
+	}
+}
+
+type headerRT struct{ h http.Header }
+
+func (r headerRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	c := req.Clone(req.Context())
+	for k, v := range r.h {
+		c.Header[k] = v
+	}
+	return http.DefaultTransport.RoundTrip(c)
 }
