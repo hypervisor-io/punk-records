@@ -311,3 +311,31 @@ func codeMapSlug(name string) string {
 	}
 	return out
 }
+
+// CodeMapStale reports whether a code-map fact was seeded from a
+// different repository revision than currentRevision. Unknown on either
+// side means not stale: staleness is advisory and must never fire on
+// missing data.
+func CodeMapStale(f Fact, currentRevision string) bool {
+	if currentRevision == "" || !strings.HasPrefix(f.Key, CodeMapPrefix) {
+		return false
+	}
+	rev, _ := f.Attributes["revision"].(string)
+	return rev != "" && rev != currentRevision
+}
+
+// MarkCodeMapStale decorates stale code-map hits with Components["stale"]
+// = 1, the same advisory flag observations carry. Ranking is untouched.
+func MarkCodeMapStale(hits []ScoredFact, currentRevision string) {
+	if currentRevision == "" {
+		return
+	}
+	for i := range hits {
+		if CodeMapStale(hits[i].Fact, currentRevision) {
+			if hits[i].Components == nil {
+				hits[i].Components = map[string]float64{}
+			}
+			hits[i].Components["stale"] = 1
+		}
+	}
+}

@@ -36,6 +36,13 @@ prompt
 // session connects a real in-memory client to the real server, so tests
 // exercise the actual protocol (Susanoo's pattern).
 func session(t *testing.T) *mcp.ClientSession {
+	cs, _ := sessionWithStore(t)
+	return cs
+}
+
+// sessionWithStore is session plus the memory.Store the server was built
+// with, for tests that need to seed data the MCP surface has no tool for.
+func sessionWithStore(t *testing.T) (*mcp.ClientSession, *memory.Store) {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "mcps.db"))
 	if err != nil {
@@ -60,12 +67,13 @@ func session(t *testing.T) *mcp.ClientSession {
 	clk := time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { clk = clk.Add(time.Millisecond); return clk }
 	ledger := task.NewLedger(db, now)
+	memStore := memory.New(db, now)
 
 	srv := New(Deps{
 		Ledger:        ledger,
 		Router:        route.New(db, reg, ledger, nil, now),
 		Reg:           reg,
-		Mem:           memory.New(db, now),
+		Mem:           memStore,
 		DefaultBudget: task.Budget{Tokens: 1000, ToolCalls: 10},
 	})
 
@@ -79,7 +87,7 @@ func session(t *testing.T) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+	return cs, memStore
 }
 
 func text(t *testing.T, res *mcp.CallToolResult) string {
@@ -775,5 +783,32 @@ func TestSearchAnchorsInput(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("anchored runbook missing: %+v", out.Hits)
+	}
+}
+
+func TestSearchRepoRevisionFlagsStaleCodeMap(t *testing.T) {
+	cs, st := sessionWithStore(t)
+	ctx := context.Background()
+	// Seed through the store directly: the MCP surface has no seed tool.
+	if _, err := st.SeedCodeMapWith(ctx, "ns", strings.NewReader(`{"domains":[{"name":"memory","label":"internal/memory","files":["a.go"],"entrypoints":["a.go"],"topSymbols":[]}],"edges":[]}`), memory.SeedCodeMapOpts{Revision: "aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "architecture domain memory", "hybrid": true, "scored": true,
+			"repo_revision": "bbb", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search repo_revision: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Hits []struct {
+			Key   string   `json:"key"`
+			Flags []string `json:"flags"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Hits) != 1 || strings.Join(out.Hits[0].Flags, ",") != "stale" {
+		t.Fatalf("hits = %+v, want one stale code-map hit", out.Hits)
 	}
 }

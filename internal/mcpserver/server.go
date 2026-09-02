@@ -319,17 +319,18 @@ func registerReflectTool(s *mcp.Server, d Deps) {
 }
 
 type searchIn struct {
-	Namespace string `json:"namespace"`
-	Query     string `json:"query"`
-	Hybrid    bool   `json:"hybrid,omitempty" jsonschema:"fuse vector + full-text when embeddings are enabled"`
-	Scored    bool   `json:"scored,omitempty" jsonschema:"with hybrid, return each hit's score and its fts/vector/recency/importance/access components"`
-	Fusion    string `json:"fusion,omitempty" jsonschema:"rrf (default) or interleave"`
-	Temporal  bool   `json:"temporal,omitempty" jsonschema:"parse a time window from the query text (e.g. 'errors last month') and search within it"`
-	Expand    bool   `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
-	Limit     int    `json:"limit,omitempty"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
-	Format    string `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
-	Anchors   []string `json:"anchors,omitempty" jsonschema:"exact identifiers, error strings, flags or file names; each is an extra phrase-match retrieval route fused by rank, not a filter (hybrid+scored only)"`
+	Namespace    string   `json:"namespace"`
+	Query        string   `json:"query"`
+	Hybrid       bool     `json:"hybrid,omitempty" jsonschema:"fuse vector + full-text when embeddings are enabled"`
+	Scored       bool     `json:"scored,omitempty" jsonschema:"with hybrid, return each hit's score and its fts/vector/recency/importance/access components"`
+	Fusion       string   `json:"fusion,omitempty" jsonschema:"rrf (default) or interleave"`
+	Temporal     bool     `json:"temporal,omitempty" jsonschema:"parse a time window from the query text (e.g. 'errors last month') and search within it"`
+	Expand       bool     `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
+	Limit        int      `json:"limit,omitempty"`
+	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
+	Format       string   `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
+	Anchors      []string `json:"anchors,omitempty" jsonschema:"exact identifiers, error strings, flags or file names; each is an extra phrase-match retrieval route fused by rank, not a filter (hybrid+scored only)"`
+	RepoRevision string   `json:"repo_revision,omitempty" jsonschema:"current git revision of the workspace; code-map hits seeded from another revision are flagged stale"`
 }
 
 // searchOut is search's response shape: plain facts, or (with Hybrid+Scored)
@@ -391,20 +392,21 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 			// is FTS-only and can't do hybrid/scored/interleave).
 			if in.Temporal && !in.Hybrid && in.Fusion != "interleave" {
 				if from, to, cleaned, ok := memory.ParseTemporal(in.Query, time.Now()); ok {
-				facts, err := d.Mem.WindowedSearch(ctx, in.Namespace, cleaned, from, to, in.Limit)
+					facts, err := d.Mem.WindowedSearch(ctx, in.Namespace, cleaned, from, to, in.Limit)
+					if err != nil {
+						return nil, searchOut{}, err
+					}
+					return nil, finishSearch(in, facts, nil), nil
+				}
+			}
+			if in.Fusion == "interleave" {
+				scored, err := d.Mem.InterleaveSearch(ctx, in.Namespace, in.Query, in.Limit)
 				if err != nil {
 					return nil, searchOut{}, err
 				}
-				return nil, finishSearch(in, facts, nil), nil
+				memory.MarkCodeMapStale(scored, in.RepoRevision)
+				return nil, finishSearch(in, nil, scored), nil
 			}
-			}
-			if in.Fusion == "interleave" {
-			scored, err := d.Mem.InterleaveSearch(ctx, in.Namespace, in.Query, in.Limit)
-			if err != nil {
-				return nil, searchOut{}, err
-			}
-			return nil, finishSearch(in, nil, scored), nil
-		}
 			if in.Hybrid && in.Scored {
 				var scored []memory.ScoredFact
 				var err error
@@ -420,6 +422,7 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 				if err != nil {
 					return nil, searchOut{}, err
 				}
+				memory.MarkCodeMapStale(scored, in.RepoRevision)
 				return nil, finishSearch(in, nil, scored), nil
 			}
 			var facts []memory.Fact

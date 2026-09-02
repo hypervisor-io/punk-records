@@ -168,6 +168,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		memory.MarkCodeMapStale(scored, r.URL.Query().Get("revision"))
 		writeScored(scored)
 		return
 	}
@@ -197,6 +198,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusBadRequest, err)
 				return
 			}
+			memory.MarkCodeMapStale(scored, r.URL.Query().Get("revision"))
 			writeScored(scored)
 			return
 		}

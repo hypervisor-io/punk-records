@@ -289,3 +289,21 @@ func TestSeedCodeMapRecordsRevision(t *testing.T) {
 		t.Fatalf("reseed same revision: %+v %v", stats, err)
 	}
 }
+
+func TestCodeMapStale(t *testing.T) {
+	f := Fact{Key: CodeMapPrefix + "memory", Attributes: map[string]any{"revision": "aaa"}}
+	if CodeMapStale(f, "") || CodeMapStale(f, "aaa") {
+		t.Fatalf("unknown or equal revision must not be stale")
+	}
+	if !CodeMapStale(f, "bbb") {
+		t.Fatalf("different revision must be stale")
+	}
+	if CodeMapStale(Fact{Key: "/other", Attributes: map[string]any{"revision": "aaa"}}, "bbb") {
+		t.Fatalf("only code-map keys are subject to revision staleness")
+	}
+	hits := []ScoredFact{{Fact: f}, {Fact: Fact{Key: "/x"}}}
+	MarkCodeMapStale(hits, "bbb")
+	if hits[0].Components["stale"] != 1 || hits[1].Components != nil {
+		t.Fatalf("mark: %v %v", hits[0].Components, hits[1].Components)
+	}
+}
