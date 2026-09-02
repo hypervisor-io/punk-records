@@ -2865,6 +2865,11 @@ func cmdConnectCopilot(args []string) error {
 	fs := flag.NewFlagSet("connect copilot", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.github/hooks/punk.json instead of the global ~/.copilot/hooks/punk.json (or $COPILOT_HOME/hooks/punk.json when COPILOT_HOME is set)")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2886,7 +2891,7 @@ func cmdConnectCopilot(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2904,6 +2909,34 @@ func cmdConnectCopilot(args []string) error {
 		fmt.Printf("punk: %s already has punk's Copilot hooks up to date\n", hooksPath)
 	}
 	fmt.Println("punk: note - restart Copilot CLI (hook configuration is loaded when the CLI starts) to pick up this file")
+	if !*noMCP {
+		mcpPath := ""
+		if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
+			mcpPath = filepath.Join(copilotHome, "mcp-config.json")
+		} else if *project {
+			mcpPath = filepath.Join(".copilot", "mcp-config.json")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home directory: %w", err)
+			}
+			mcpPath = filepath.Join(home, ".copilot", "mcp-config.json")
+		}
+		mcpChanged, err := hookcli.ConnectCopilotMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect copilot mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }

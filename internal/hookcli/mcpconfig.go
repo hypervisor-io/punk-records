@@ -185,3 +185,10 @@ func EnsureClaudePermission(settingsPath, rule string) (changed bool, err error)
 	}
 	return true, nil
 }
+
+// ConnectCopilotMCP registers punk in a Copilot CLI mcp-config.json:
+// {"mcpServers":{"punk":{"type":"http","url":...,"headers":{...},"tools":["*"]}}}.
+func ConnectCopilotMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
+	entry := withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL), "tools": []any{"*"}}, o)
+	return upsertServerEntry(configPath, "mcpServers", entry, isPunkMCPEntry, nil, force)
+}

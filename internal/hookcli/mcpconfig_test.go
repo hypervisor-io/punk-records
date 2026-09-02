@@ -158,3 +158,28 @@ func TestMCPEntriesCarryHeaders(t *testing.T) {
 		t.Fatal("opencode entry missing headers")
 	}
 }
+
+func TestConnectCopilotMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mcp-config.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "prk_c"}
+	if changed, err := ConnectCopilotMCP(p, o, false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readSettings(t, p)["mcpServers"].(map[string]any)
+	punk := m["punk"].(map[string]any)
+	if punk["type"] != "http" || punk["url"] != "https://punk.example.com/mcp?toolset=agent" {
+		t.Fatalf("entry = %v", punk)
+	}
+	if tools, _ := json.Marshal(punk["tools"]); string(tools) != `["*"]` {
+		t.Fatalf("tools = %s", tools)
+	}
+	if punk["headers"].(map[string]any)["Authorization"] != "Bearer prk_c" || m["context7"] == nil {
+		t.Fatalf("headers/other = %v", m)
+	}
+	if changed, _ := ConnectCopilotMCP(p, o, false); changed {
+		t.Fatal("idempotent")
+	}
+}
