@@ -106,6 +106,23 @@ func (s *Server) handleForget(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ns, q, limit := chi.URLParam(r, "ns"), r.URL.Query().Get("q"), queryLimit(r)
 	maxTokens := queryMaxTokens(r)
+	compact := r.URL.Query().Get("format") == "compact"
+	// Compaction runs before budgeting so the token budget is spent on
+	// clipped bodies, which is the point of asking for compact.
+	writeFacts := func(facts []memory.Fact) {
+		if compact {
+			writeJSON(w, http.StatusOK, memory.TokenBudgetCompact(memory.CompactFacts(facts, 0), maxTokens))
+			return
+		}
+		writeJSON(w, http.StatusOK, memory.TokenBudget(facts, maxTokens))
+	}
+	writeScored := func(scored []memory.ScoredFact) {
+		if compact {
+			writeJSON(w, http.StatusOK, memory.TokenBudgetCompact(memory.CompactScored(scored, 0), maxTokens))
+			return
+		}
+		writeJSON(w, http.StatusOK, memory.TokenBudgetScored(scored, maxTokens))
+	}
 	if sinceRaw, untilRaw := r.URL.Query().Get("since"), r.URL.Query().Get("until"); sinceRaw != "" || untilRaw != "" {
 		if sinceRaw == "" || untilRaw == "" {
 			writeErr(w, http.StatusBadRequest, errors.New("memory: since requires until"))
@@ -126,7 +143,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, memory.TokenBudget(facts, maxTokens))
+		writeFacts(facts)
 		return
 	}
 	// Auto-parsed temporal phrases only apply to the plain search path.
@@ -141,7 +158,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusBadRequest, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, memory.TokenBudget(facts, maxTokens))
+			writeFacts(facts)
 			return
 		}
 	}
@@ -151,7 +168,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, memory.TokenBudgetScored(scored, maxTokens))
+		writeScored(scored)
 		return
 	}
 	if r.URL.Query().Get("mode") == "hybrid" {
@@ -179,7 +196,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusBadRequest, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, memory.TokenBudgetScored(scored, maxTokens))
+			writeScored(scored)
 			return
 		}
 		facts, err := s.mem.HybridSearch(r.Context(), ns, q, limit, halfLife)
@@ -187,7 +204,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, memory.TokenBudget(facts, maxTokens))
+		writeFacts(facts)
 		return
 	}
 	facts, err := s.mem.Search(r.Context(), ns, q, limit)
@@ -195,7 +212,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, memory.TokenBudget(facts, maxTokens))
+	writeFacts(facts)
 }
 
 // handleMemoryEvents streams memory changes for a namespace prefix over

@@ -678,3 +678,57 @@ func TestSearchExpandFlag(t *testing.T) {
 		t.Fatalf("search expand=true no expander = %s, want only /a (flag ignored, no error)", got)
 	}
 }
+
+func TestSearchCompactFormat(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	long := strings.Repeat("z", 800)
+	for _, k := range []string{"/svc/a", "/svc/b"} {
+		if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember",
+			Arguments: map[string]any{"namespace": "ns", "key": k, "body": "outage " + long}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "outage", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search compact: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Facts []json.RawMessage `json:"facts"`
+		Hits  []struct {
+			Key  string `json:"key"`
+			Body string `json:"body"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Facts) != 0 {
+		t.Fatalf("compact must not also return facts, got %d", len(out.Facts))
+	}
+	if len(out.Hits) != 2 {
+		t.Fatalf("hits = %d, want 2", len(out.Hits))
+	}
+	if len([]rune(out.Hits[0].Body)) != 603 {
+		t.Fatalf("body not clipped: %d runes", len([]rune(out.Hits[0].Body)))
+	}
+
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "unified_search",
+		Arguments: map[string]any{"namespace": "ns", "query": "outage", "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("unified_search compact: %v %s", err, text(t, res))
+	}
+	var uo struct {
+		Hits    []json.RawMessage `json:"hits"`
+		Compact []struct {
+			Key string `json:"key"`
+		} `json:"compact"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &uo); err != nil {
+		t.Fatal(err)
+	}
+	if len(uo.Hits) != 0 || len(uo.Compact) != 2 {
+		t.Fatalf("unified compact: hits=%d compact=%d", len(uo.Hits), len(uo.Compact))
+	}
+}

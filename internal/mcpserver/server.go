@@ -324,13 +324,16 @@ type searchIn struct {
 	Expand    bool   `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
 	Limit     int    `json:"limit,omitempty"`
 	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
+	Format    string `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
 }
 
 // searchOut is search's response shape: plain facts, or (with Hybrid+Scored)
 // facts plus the score breakdown that explains why each one ranked where it did.
+// With Format=compact, Hits carries the token-lean projection instead.
 type searchOut struct {
 	Facts   []memory.Fact       `json:"facts,omitempty"`
 	Results []memory.ScoredFact `json:"results,omitempty"`
+	Hits    []memory.CompactHit `json:"hits,omitempty"`
 }
 
 type asOfIn struct {
@@ -344,6 +347,25 @@ type forgetIn struct {
 	Namespace string `json:"namespace"`
 	Key       string `json:"key"`
 	Author    string `json:"author,omitempty"`
+}
+
+// finishSearch applies the token budget and, for format=compact, the
+// compact projection. Compaction runs before budgeting so the budget is
+// spent on clipped bodies, which is the point of asking for compact.
+func finishSearch(in searchIn, facts []memory.Fact, scored []memory.ScoredFact) searchOut {
+	if in.Format == "compact" {
+		var hits []memory.CompactHit
+		if scored != nil {
+			hits = memory.CompactScored(scored, 0)
+		} else {
+			hits = memory.CompactFacts(facts, 0)
+		}
+		return searchOut{Hits: memory.TokenBudgetCompact(hits, in.MaxTokens)}
+	}
+	if scored != nil {
+		return searchOut{Results: memory.TokenBudgetScored(scored, in.MaxTokens)}
+	}
+	return searchOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}
 }
 
 func registerMemoryV2Tools(s *mcp.Server, d Deps) {
@@ -364,20 +386,20 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 			// is FTS-only and can't do hybrid/scored/interleave).
 			if in.Temporal && !in.Hybrid && in.Fusion != "interleave" {
 				if from, to, cleaned, ok := memory.ParseTemporal(in.Query, time.Now()); ok {
-					facts, err := d.Mem.WindowedSearch(ctx, in.Namespace, cleaned, from, to, in.Limit)
-					if err != nil {
-						return nil, searchOut{}, err
-					}
-					return nil, searchOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}, nil
-				}
-			}
-			if in.Fusion == "interleave" {
-				scored, err := d.Mem.InterleaveSearch(ctx, in.Namespace, in.Query, in.Limit)
+				facts, err := d.Mem.WindowedSearch(ctx, in.Namespace, cleaned, from, to, in.Limit)
 				if err != nil {
 					return nil, searchOut{}, err
 				}
-				return nil, searchOut{Results: memory.TokenBudgetScored(scored, in.MaxTokens)}, nil
+				return nil, finishSearch(in, facts, nil), nil
 			}
+			}
+			if in.Fusion == "interleave" {
+			scored, err := d.Mem.InterleaveSearch(ctx, in.Namespace, in.Query, in.Limit)
+			if err != nil {
+				return nil, searchOut{}, err
+			}
+			return nil, finishSearch(in, nil, scored), nil
+		}
 			if in.Hybrid && in.Scored {
 				var scored []memory.ScoredFact
 				var err error
@@ -392,7 +414,7 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 				if err != nil {
 					return nil, searchOut{}, err
 				}
-				return nil, searchOut{Results: memory.TokenBudgetScored(scored, in.MaxTokens)}, nil
+				return nil, finishSearch(in, nil, scored), nil
 			}
 			var facts []memory.Fact
 			var err error
@@ -404,7 +426,7 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 			if err != nil {
 				return nil, searchOut{}, err
 			}
-			return nil, searchOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}, nil
+			return nil, finishSearch(in, facts, nil), nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "recall_as_of",
 		Description: "Read a region as it was at a past instant (bi-temporal); shows the facts valid then."},
@@ -466,6 +488,9 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 			hits, err := d.Mem.UnifiedSearch(ctx, in.Namespace, in.Query, in.K)
 			if err != nil {
 				return nil, unifiedSearchOut{}, err
+			}
+			if in.Format == "compact" {
+				return nil, unifiedSearchOut{Compact: memory.CompactUnified(hits, 0)}, nil
 			}
 			return nil, unifiedSearchOut{Hits: hits}, nil
 		})
@@ -614,10 +639,12 @@ type unifiedSearchIn struct {
 	Namespace string `json:"namespace"`
 	Query     string `json:"query"`
 	K         int    `json:"k,omitempty"`
+	Format    string `json:"format,omitempty" jsonschema:"'' or 'compact': key, clipped body, score, flags; relations render as 'from -> type -> to'"`
 }
 
 type unifiedSearchOut struct {
-	Hits []memory.UnifiedHit `json:"hits"`
+	Hits    []memory.UnifiedHit `json:"hits,omitempty"`
+	Compact []memory.CompactHit `json:"compact,omitempty"`
 }
 
 type neighborsIn struct {

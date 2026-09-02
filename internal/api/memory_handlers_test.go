@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -282,5 +283,27 @@ func TestMemorySSEAndAsOf(t *testing.T) {
 	rr := do(t, s, http.MethodGet, "/v1/namespaces/ns/memories?prefix=/svc&as_of="+mid.Format(time.RFC3339), "")
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"v1"`) || strings.Contains(rr.Body.String(), `"v2"`) {
 		t.Fatalf("as_of = %d: %s", rr.Code, rr.Body)
+	}
+}
+
+func TestSearchCompactParam(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	if _, err := srv.mem.Write(ctx, memory.WriteInput{Namespace: "ns", Key: "/k", Body: "disk full " + strings.Repeat("q", 700)}); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, srv, http.MethodGet, "/v1/namespaces/ns/memories/search?q=disk&format=compact", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var hits []struct {
+		Key  string `json:"key"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hits); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Key != "/k" || len([]rune(hits[0].Body)) != 603 {
+		t.Fatalf("hits = %+v", hits)
 	}
 }
