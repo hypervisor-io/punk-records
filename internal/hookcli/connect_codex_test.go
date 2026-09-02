@@ -81,3 +81,96 @@ func TestRunFromCodexIsPassthrough(t *testing.T) {
 		t.Fatalf("non-SessionStart must print nothing: %s", out2.String())
 	}
 }
+
+func TestConnectCodexConfigWritesManagedBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	orig := "model = \"gpt-5\"\n\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n"
+	if err := os.WriteFile(p, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "prk_secret", Namespace: "agent-x-abcdef", Agent: "alice@laptop"}
+	changed, err := ConnectCodexConfig(p, o, true, false)
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	raw, _ := os.ReadFile(p)
+	s := string(raw)
+	if !strings.HasPrefix(s, orig) {
+		t.Fatalf("user content must be preserved verbatim at the top:\n%s", s)
+	}
+	for _, want := range []string{
+		"# punk-managed-start", "# punk-managed-end",
+		"[mcp_servers.punk]", `url = "https://punk.example.com/mcp?toolset=agent"`,
+		`bearer_token_env_var = "PUNK_API_KEY"`,
+		`"X-Punk-Namespace" = "agent-x-abcdef"`, `"X-Punk-Agent" = "alice@laptop"`,
+		`default_tools_approval_mode = "approve"`, "[features]", "hooks = true",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "prk_secret") {
+		t.Fatal("literal API key must never be written into config.toml")
+	}
+	if info, _ := os.Stat(p); info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+	if changed, _ := ConnectCodexConfig(p, o, true, false); changed {
+		t.Fatal("idempotent")
+	}
+	// URL change rewrites only the block.
+	o.ServerURL = "https://punk2.example.com"
+	if changed, _ := ConnectCodexConfig(p, o, true, false); !changed {
+		t.Fatal("changed URL must rewrite the block")
+	}
+	raw, _ = os.ReadFile(p)
+	if strings.Count(string(raw), "# punk-managed-start") != 1 || !strings.Contains(string(raw), "punk2.example.com") || strings.Contains(string(raw), "punk.example.com/mcp") {
+		t.Fatalf("block not replaced in place:\n%s", raw)
+	}
+}
+
+func TestConnectCodexConfigFeaturesTableOutsideBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("[features]\nweb_search = true\n\n[tui]\ntheme = \"dark\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexConfig(p, MCPEntryOpts{ServerURL: "http://localhost:9090"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	s := string(raw)
+	if strings.Count(s, "[features]") != 1 {
+		t.Fatalf("must not create a second [features] table:\n%s", s)
+	}
+	if !strings.Contains(s, "[features]\nhooks = true\nweb_search = true\n") {
+		t.Fatalf("hooks = true must be inserted into the existing [features] table:\n%s", s)
+	}
+	if !strings.Contains(s, "[tui]\ntheme = \"dark\"\n") {
+		t.Fatal("other tables must be untouched")
+	}
+	// Existing hooks = false is left alone (user's choice) but reported.
+	if err := os.WriteFile(p, []byte("[features]\nhooks = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexConfig(p, MCPEntryOpts{ServerURL: "http://localhost:9090"}, true, false); err == nil {
+		t.Fatal("hooks = false set by the user must be reported as an error naming the line, not silently flipped")
+	}
+}
+
+func TestConnectCodexConfigRefusesForeignPunkTable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("[mcp_servers.punk]\ncommand = \"something-else\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "http://localhost:9090"}
+	if _, err := ConnectCodexConfig(p, o, false, false); err == nil {
+		t.Fatal("foreign [mcp_servers.punk] must be refused without force")
+	}
+	if _, err := ConnectCodexConfig(p, o, false, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	if strings.Contains(string(raw), "something-else") || strings.Count(string(raw), "[mcp_servers.punk]") != 1 {
+		t.Fatalf("force must replace the foreign table:\n%s", raw)
+	}
+}
