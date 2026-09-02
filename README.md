@@ -193,6 +193,23 @@ Enable the model when ready (any OpenAI-compatible endpoint, Ollama
 included): copy `punk.example.yaml` to `config.yaml`, set
 `ai.enabled: true` and one profile.
 
+## Central server
+
+One punk, many machines.
+
+On the server:
+
+    docker compose --profile central up -d          # PUNK_DOMAIN=punk.example.com in .env
+    docker compose exec punk punk apikey create --name alice --subject alice
+
+On each developer machine (needs the punk binary; see Install):
+
+    punk login --url https://punk.example.com --api-key prk_...
+    cd ~/src/billing
+    punk connect claude-code --project --verify
+
+What that does: hooks and the MCP entry carry the bearer token from `~/.punk/credentials.json` (0600); the namespace is derived from the git remote, so every clone of `billing` on every machine shares `agent-billing-<hash>`; claims and registrations default to `<user>@<host>`; `--verify` proves the round trip from that machine. `punk namespace` prints what a directory maps to. Keep `/mcp` and `/v1` behind TLS: the token is a bearer credential.
+
 ## Using Postgres
 
 SQLite is the default and needs nothing. To run on Postgres instead —

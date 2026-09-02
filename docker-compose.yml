@@ -18,5 +18,21 @@ services:
       timeout: 3s
       retries: 5
 
+  caddy:
+    image: caddy:2
+    profiles: ["central"]
+    ports:
+      - "443:443"
+      - "80:80"
+    environment:
+      PUNK_DOMAIN: ${PUNK_DOMAIN:?set PUNK_DOMAIN to the public hostname}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      punk:
+        condition: service_healthy
+
 volumes:
   punk-data:
+  caddy-data:

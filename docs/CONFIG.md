@@ -31,6 +31,10 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `ai.embeddings.model_cache` | - | `~/.punk/models` | local provider only; directory for downloaded static models (or set `PUNK_MODEL_CACHE`) |
 | `mcp.default_namespace` | `PUNK_NAMESPACE` | `agent-default` | namespace used when a client advertises no root and omits namespace |
 | `mcp.toolset` | `PUNK_MCP_TOOLSET` | `full` | stdio server toolset: `agent` (lean session set) or `full` |
+| credentials | `PUNK_CREDENTIALS` | `~/.punk/credentials.json` | file `punk login` writes (mode 0600); override the path, not the file's role |
+| server URL | `PUNK_URL` | - | server base URL; flag > this env > credentials file > `http://localhost:9090` |
+| API key | `PUNK_API_KEY` | - | bearer token; flag/env wins over the credentials file |
+| request headers | - | - | the MCP server reads `X-Punk-Namespace` and `X-Punk-Agent` from clients; `X-Punk-Subject` is set by the auth middleware from the verified API key and any client-supplied value is deleted |
 | `ai.embeddings.max_input_tokens` | - | `0` | model input window in tokens; 0 = unknown (diagnose skips oversize accounting) |
 | `budgets.global_daily_usd` | - | `0` | burn-rate projection alerts; 0 disables |
 | `budgets.price_table_path` | - | empty | override the shipped model price table |
