@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `punk connect codex`: capture hooks (`hooks.json`, passthrough payload) and the punk MCP entry in `config.toml`; `--project` derives the namespace from the git remote.
+
 ## v1.3.1 (2026-09-03)
 
 ### Fixed
