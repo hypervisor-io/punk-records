@@ -2303,15 +2303,19 @@ func cmdConnectClaudeCode(args []string) error {
 	fs := flag.NewFlagSet("connect claude-code", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.claude/settings.json instead of the global ~/.claude/settings.json")
 	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	var settingsPath string
+	var home string
 	if *project {
 		settingsPath = filepath.Join(".claude", "settings.json")
 	} else {
-		home, err := os.UserHomeDir()
+		var err error
+		home, err = os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("resolve home directory: %w", err)
 		}
@@ -2339,8 +2343,33 @@ func cmdConnectClaudeCode(args []string) error {
 	} else {
 		fmt.Printf("punk: %s already has punk's Claude Code hooks up to date\n", settingsPath)
 	}
+	if !*noMCP {
+		mcpPath := filepath.Join(".mcp.json")
+		if !*project {
+			mcpPath = filepath.Join(home, ".claude.json")
+		}
+		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath, serverURL, *force)
+		if err != nil {
+			return fmt.Errorf("connect claude-code mcp: %w", err)
+		}
+		permChanged, err := hookcli.EnsureClaudePermission(settingsPath, hookcli.ClaudeMCPRule)
+		if err != nil {
+			return fmt.Errorf("connect claude-code permission: %w", err)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+		fmt.Printf("punk: permission %s in %s (%s)\n", hookcli.ClaudeMCPRule, settingsPath, changedWord(permChanged))
+		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
+}
+
+// changedWord renders a change flag for connect summaries.
+func changedWord(b bool) string {
+	if b {
+		return "written"
+	}
+	return "already up to date"
 }
 
 // cmdConnectCursor wires punk into Cursor: a hooks.json merge (six mapped
