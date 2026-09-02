@@ -364,8 +364,94 @@ export default function (pi) {
       return undefined
     }
   })
+
+  const PUNK_NAMESPACE_OVERRIDE = ""; // "" unless punk connect pi --project baked one
+  let punkNamespaceCache = ""
+  function punkCredentialsKey() {
+    const fromEnv = process.env && process.env.PUNK_API_KEY
+    if (fromEnv) return fromEnv
+    try {
+      const fs = require("node:fs")
+      const os = require("node:os")
+      const path = require("node:path")
+      const p = (process.env && process.env.PUNK_CREDENTIALS) || path.join(os.homedir(), ".punk", "credentials.json")
+      const c = JSON.parse(fs.readFileSync(p, "utf8"))
+      return (c && c.api_key) || ""
+    } catch (_) {
+      return ""
+    }
+  }
+  async function punkAPICall(path, init) {
+    const headers = Object.assign({ "Content-Type": "application/json" }, (init && init.headers) || {})
+    const key = punkCredentialsKey()
+    if (key) headers["Authorization"] = "Bearer " + key
+    const res = await fetch(punkServerURL() + path, Object.assign({}, init, { headers }))
+    const text = await res.text()
+    if (!res.ok) throw new Error("punk " + res.status + ": " + text.slice(0, 300))
+    return text ? JSON.parse(text) : null
+  }
+  async function punkNamespace(ctx) {
+    if (PUNK_NAMESPACE_OVERRIDE) return PUNK_NAMESPACE_OVERRIDE
+    if (punkNamespaceCache) return punkNamespaceCache
+    const out = await punkAPICall("/v1/agent/namespace?cwd=" + encodeURIComponent(ctx.cwd || process.cwd()))
+    punkNamespaceCache = (out && out.namespace) || "agent-default"
+    return punkNamespaceCache
+  }
+  const textResult = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }], details: {} })
+
+  pi.registerTool({
+    name: "punk_whoami",
+    label: "Punk whoami",
+    description: "Namespace and server this session's punk memory tools use.",
+    promptSnippet: "Show which punk memory namespace this project maps to",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      return textResult({ namespace: await punkNamespace(ctx), server: punkServerURL() })
+    },
+  })
+  pi.registerTool({
+    name: "punk_recall",
+    label: "Punk recall",
+    description: "Recall the latest live facts under a key prefix from punk memory (deterministic, unranked).",
+    promptSnippet: "Read punk memory facts under a known key prefix such as /decisions",
+    parameters: { type: "object", properties: { prefix: { type: "string", description: "key prefix, e.g. /decisions" } }, required: ["prefix"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      return textResult(await punkAPICall("/v1/namespaces/" + encodeURIComponent(ns) + "/memories?prefix=" + encodeURIComponent(params.prefix) + "&max_tokens=1500"))
+    },
+  })
+  pi.registerTool({
+    name: "punk_search",
+    label: "Punk search",
+    description: "Ranked hybrid search over punk memory; compact hits (key, clipped body, score, flags). Put exact identifiers or error strings in anchors.",
+    promptSnippet: "Search punk memory when wording or location of prior context is unknown",
+    promptGuidelines: ["Use punk_search before re-deriving a decision, convention or incident that an earlier session may have recorded."],
+    parameters: { type: "object", properties: { query: { type: "string" }, anchors: { type: "array", items: { type: "string" } } }, required: ["query"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      let q = "/v1/namespaces/" + encodeURIComponent(ns) + "/memories/search?mode=hybrid&scored=1&format=compact&max_tokens=1500&q=" + encodeURIComponent(params.query)
+      for (const a of params.anchors || []) q += "&anchor=" + encodeURIComponent(a)
+      return textResult(await punkAPICall(q))
+    },
+  })
+  pi.registerTool({
+    name: "punk_remember",
+    label: "Punk remember",
+    description: "Store a durable fact (decision, fix, convention, gotcha) in punk memory under a hierarchical key; latest wins per key.",
+    promptSnippet: "Persist a durable decision or gotcha to punk memory",
+    parameters: { type: "object", properties: { key: { type: "string", description: "hierarchical key like /decisions/auth" }, body: { type: "string" }, importance: { type: "number", minimum: 0, maximum: 1 } }, required: ["key", "body"], additionalProperties: false },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const ns = await punkNamespace(ctx)
+      const out = await punkAPICall("/v1/namespaces/" + encodeURIComponent(ns) + "/memories", {
+        method: "POST",
+        body: JSON.stringify({ key: params.key, body: params.body, importance: params.importance || 0, author: "pi" }),
+      })
+      return textResult({ stored: out && out.key, id: out && out.id })
+    },
+  })
 }
 `
+
 
 // TestConnectPiGoldenContent pins the exact bytes ConnectPi writes for a
 // fresh extension file.
