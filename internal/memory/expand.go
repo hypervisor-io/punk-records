@@ -83,11 +83,18 @@ func filterRefs(query string, refs []string) []string {
 // worded queries; the single final rerank pass (when a reranker is
 // configured) mitigates that by re-scoring the merged set against one
 // shared query. Both relaxations are deliberate.
+// HybridSearchExpanded is HybridSearchExpandedWith without anchors; kept as
+// the stable signature every existing caller uses.
 func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limit int, recencyHalfLife time.Duration, exp QueryExpander) ([]ScoredFact, error) {
+	return s.HybridSearchExpandedWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: recencyHalfLife}, exp)
+}
+
+func (s *Store) HybridSearchExpandedWith(ctx context.Context, ns, query string, o HybridOpts, exp QueryExpander) ([]ScoredFact, error) {
+	limit := o.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	base, err := s.HybridSearchScored(ctx, ns, query, limit, recencyHalfLife)
+	base, err := s.HybridSearchScoredWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: o.RecencyHalfLife, Anchors: o.Anchors})
 	if err != nil {
 		return base, err
 	}
@@ -110,7 +117,7 @@ func (s *Store) HybridSearchExpanded(ctx context.Context, ns, query string, limi
 		best[sf.ID] = sf
 	}
 	for _, q := range refs {
-		hits, herr := s.HybridSearchScored(ctx, ns, q, limit, recencyHalfLife)
+		hits, herr := s.HybridSearchScoredWith(ctx, ns, q, HybridOpts{Limit: limit, RecencyHalfLife: o.RecencyHalfLife, Anchors: o.Anchors})
 		if herr != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				// A canceled/deadline-exceeded ctx must propagate as an

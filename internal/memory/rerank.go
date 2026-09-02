@@ -74,7 +74,12 @@ const rerankTopK = 50
 // (byte-identical): reranking degrades gracefully, it never fails or
 // explains a failed search.
 func (s *Store) HybridSearchReranked(ctx context.Context, ns, query string, limit int, recencyHalfLife time.Duration) ([]ScoredFact, error) {
-	scored, err := s.HybridSearchScored(ctx, ns, query, limit, recencyHalfLife)
+	return s.HybridSearchRerankedWith(ctx, ns, query, HybridOpts{Limit: limit, RecencyHalfLife: recencyHalfLife})
+}
+
+// HybridSearchRerankedWith is HybridSearchReranked with HybridOpts (anchors).
+func (s *Store) HybridSearchRerankedWith(ctx context.Context, ns, query string, o HybridOpts) ([]ScoredFact, error) {
+	scored, err := s.HybridSearchScoredWith(ctx, ns, query, o)
 	if err != nil {
 		return scored, err
 	}

@@ -307,3 +307,34 @@ func TestSearchCompactParam(t *testing.T) {
 		t.Fatalf("hits = %+v", hits)
 	}
 }
+
+func TestSearchAnchorsParam(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	for k, b := range map[string]string{
+		"/incident/1":   "database outage traced to connection saturation",
+		"/runbook/pool": "when ERR_POOL_EXHAUSTED appears, raise max_connections",
+	} {
+		if _, err := srv.mem.Write(ctx, memory.WriteInput{Namespace: "ns", Key: k, Body: b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := do(t, srv, http.MethodGet,
+		"/v1/namespaces/ns/memories/search?q=database+outage&mode=hybrid&scored=1&anchor=ERR_POOL_EXHAUSTED&format=compact", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var hits []struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hits); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range hits {
+		found = found || h.Key == "/runbook/pool"
+	}
+	if !found {
+		t.Fatalf("anchored runbook missing: %+v", hits)
+	}
+}

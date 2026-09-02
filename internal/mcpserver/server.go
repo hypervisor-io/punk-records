@@ -329,6 +329,7 @@ type searchIn struct {
 	Limit     int    `json:"limit,omitempty"`
 	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
 	Format    string `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
+	Anchors   []string `json:"anchors,omitempty" jsonschema:"exact identifiers, error strings, flags or file names; each is an extra phrase-match retrieval route fused by rank, not a filter (hybrid+scored only)"`
 }
 
 // searchOut is search's response shape: plain facts, or (with Hybrid+Scored)
@@ -407,13 +408,14 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps) {
 			if in.Hybrid && in.Scored {
 				var scored []memory.ScoredFact
 				var err error
+				opts := memory.HybridOpts{Limit: in.Limit, Anchors: in.Anchors}
 				if in.Expand && d.Expander != nil {
-					// HybridSearchExpanded already applies applyRerank
+					// HybridSearchExpandedWith already applies applyRerank
 					// internally over the merged candidates; routing here
 					// avoids a second, redundant rerank pass.
-					scored, err = d.Mem.HybridSearchExpanded(ctx, in.Namespace, in.Query, in.Limit, 0, d.Expander)
+					scored, err = d.Mem.HybridSearchExpandedWith(ctx, in.Namespace, in.Query, opts, d.Expander)
 				} else {
-					scored, err = d.Mem.HybridSearchReranked(ctx, in.Namespace, in.Query, in.Limit, 0)
+					scored, err = d.Mem.HybridSearchRerankedWith(ctx, in.Namespace, in.Query, opts)
 				}
 				if err != nil {
 					return nil, searchOut{}, err

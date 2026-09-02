@@ -742,3 +742,38 @@ func TestServerInstructionsAdvertised(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchAnchorsInput(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	for k, b := range map[string]string{
+		"/incident/1":   "database outage traced to connection saturation",
+		"/runbook/pool": "when ERR_POOL_EXHAUSTED appears, raise max_connections",
+	} {
+		if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember",
+			Arguments: map[string]any{"namespace": "ns", "key": k, "body": b}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search",
+		Arguments: map[string]any{"namespace": "ns", "query": "database outage", "hybrid": true, "scored": true,
+			"anchors": []string{"ERR_POOL_EXHAUSTED"}, "format": "compact"}})
+	if err != nil || res.IsError {
+		t.Fatalf("search anchors: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Hits []struct {
+			Key string `json:"key"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range out.Hits {
+		found = found || h.Key == "/runbook/pool"
+	}
+	if !found {
+		t.Fatalf("anchored runbook missing: %+v", out.Hits)
+	}
+}

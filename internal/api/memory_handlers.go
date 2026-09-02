@@ -184,13 +184,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if sc := r.URL.Query().Get("scored"); sc == "1" || sc == "true" {
 			var scored []memory.ScoredFact
 			var err error
+			opts := memory.HybridOpts{Limit: limit, RecencyHalfLife: halfLife, Anchors: r.URL.Query()["anchor"]}
 			if exp := r.URL.Query().Get("expand"); (exp == "1" || exp == "true") && s.expander != nil {
-				// HybridSearchExpanded already applies its own rerank pass
-				// internally over the merged candidates; routing here
+				// HybridSearchExpandedWith already applies its own rerank
+				// pass internally over the merged candidates; routing here
 				// avoids a second, redundant rerank pass.
-				scored, err = s.mem.HybridSearchExpanded(r.Context(), ns, q, limit, halfLife, s.expander)
+				scored, err = s.mem.HybridSearchExpandedWith(r.Context(), ns, q, opts, s.expander)
 			} else {
-				scored, err = s.mem.HybridSearchReranked(r.Context(), ns, q, limit, halfLife)
+				scored, err = s.mem.HybridSearchRerankedWith(r.Context(), ns, q, opts)
 			}
 			if err != nil {
 				writeErr(w, http.StatusBadRequest, err)
