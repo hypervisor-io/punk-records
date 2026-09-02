@@ -2618,6 +2618,24 @@ punk: once an API key exists (punk apikey create --name ...), add a "headers": {
 // "plugins/" as the current directory name (a singular "plugin/" is also
 // accepted, for backwards compatibility only, per that same page) - punk
 // always writes the plural, current form.
+// openCodePaths returns the plugin file and the config file punk connect
+// opencode writes: project-local under ./.opencode and ./opencode.json,
+// else under $XDG_CONFIG_HOME/opencode (default ~/.config/opencode).
+// OpenCode reads opencode.json from its config directory (verified with
+// `opencode mcp list`), not from ~/.config itself - v1.3.1 wrote the
+// global MCP entry one directory too high.
+func openCodePaths(project bool, xdgConfigHome, home string) (pluginPath, configPath string) {
+	if project {
+		return filepath.Join(".opencode", "plugins", "punk-memory.js"), "opencode.json"
+	}
+	base := xdgConfigHome
+	if base == "" {
+		base = filepath.Join(home, ".config")
+	}
+	dir := filepath.Join(base, "opencode")
+	return filepath.Join(dir, "plugins", "punk-memory.js"), filepath.Join(dir, "opencode.json")
+}
+
 func cmdConnectOpenCode(args []string) error {
 	fs := flag.NewFlagSet("connect opencode", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js and ./opencode.json instead of the global ~/.config/opencode equivalents")
@@ -2631,23 +2649,11 @@ func cmdConnectOpenCode(args []string) error {
 		return err
 	}
 
-	var pluginPath string
-	var configDir string
-	if *project {
-		pluginPath = filepath.Join(".opencode", "plugins", "punk-memory.js")
-		configDir = "."
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolve home directory: %w", err)
-		}
-		base := os.Getenv("XDG_CONFIG_HOME")
-		if base == "" {
-			base = filepath.Join(home, ".config")
-		}
-		configDir = base
-		pluginPath = filepath.Join(base, "opencode", "plugins", "punk-memory.js")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
 	}
+	pluginPath, configPath := openCodePaths(*project, os.Getenv("XDG_CONFIG_HOME"), home)
 
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
@@ -2661,10 +2667,7 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Printf("punk: %s already up to date\n", pluginPath)
 	}
 	if !*noMCP {
-		mcpPath := filepath.Join(configDir, "opencode.json")
-		if *project {
-			mcpPath = filepath.Join("opencode.json")
-		}
+		mcpPath := configPath
 		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
 		if err != nil {
