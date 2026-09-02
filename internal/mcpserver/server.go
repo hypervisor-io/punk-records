@@ -145,6 +145,10 @@ func New(d Deps) *mcp.Server {
 			},
 		}
 	}
+	if opts == nil {
+		opts = &mcp.ServerOptions{}
+	}
+	opts.Instructions = Instructions
 	s := mcp.NewServer(&mcp.Implementation{Name: "punk-records", Version: "0.1.0"}, opts)
 
 	if d.Bus != nil {

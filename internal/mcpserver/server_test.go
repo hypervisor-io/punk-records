@@ -732,3 +732,13 @@ func TestSearchCompactFormat(t *testing.T) {
 		t.Fatalf("unified compact: hits=%d compact=%d", len(uo.Hits), len(uo.Compact))
 	}
 }
+
+func TestServerInstructionsAdvertised(t *testing.T) {
+	cs := session(t)
+	got := cs.InitializeResult().Instructions
+	for _, want := range []string{"unified_search", "recall", "compact", "list_keys", "remember"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("instructions missing %q:\n%s", want, got)
+		}
+	}
+}
