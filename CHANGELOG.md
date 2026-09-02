@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.3.0 (2026-09-03)
 
 ### Added
 - `format: compact` on `search` and `unified_search` (MCP) and `?format=compact` (HTTP).
