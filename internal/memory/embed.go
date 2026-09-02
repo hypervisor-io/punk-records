@@ -22,6 +22,13 @@ type Embedder interface {
 	Dims() int
 }
 
+// embedText is the document-side embedding input: the key is prepended
+// so the vector carries the fact's place in the hierarchy (/incident/...,
+// /runbook/..., /code-map/...) as well as its body. Queries are embedded
+// as plain text; the asymmetry is intentional and mirrors how the key is
+// also FTS-invisible today.
+func embedText(key, body string) string { return "key: " + key + "\n" + body }
+
 // OllamaEmbedder speaks POST {base}/api/embed (Ollama-compatible).
 type OllamaEmbedder struct {
 	BaseURL string
@@ -293,7 +300,7 @@ func (s *Store) BackfillEmbeddings(ctx context.Context, ns string, batch int) (i
 	total := 0
 	for {
 		rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
-			SELECT id, body FROM memories
+			SELECT id, key, body FROM memories
 			WHERE namespace_id = $1 AND action <> 'tombstone' AND embedding IS NULL AND invalid_at IS NULL
 			LIMIT $2`), nsID, batch)
 		if err != nil {
@@ -302,13 +309,13 @@ func (s *Store) BackfillEmbeddings(ctx context.Context, ns string, batch int) (i
 		var ids []string
 		var bodies []string
 		for rows.Next() {
-			var id, body string
-			if err := rows.Scan(&id, &body); err != nil {
+			var id, key, body string
+			if err := rows.Scan(&id, &key, &body); err != nil {
 				rows.Close()
 				return total, err
 			}
 			ids = append(ids, id)
-			bodies = append(bodies, body)
+			bodies = append(bodies, embedText(key, body))
 		}
 		rows.Close()
 		if len(ids) == 0 {
@@ -327,6 +334,66 @@ func (s *Store) BackfillEmbeddings(ctx context.Context, ns string, batch int) (i
 			total++
 		}
 	}
+}
+
+// ReembedAll recomputes the vector of every latest live fact in ns,
+// including those that already have one. Use after changing the
+// embedding model or the embedding input format; batch <= 0 means 64.
+func (s *Store) ReembedAll(ctx context.Context, ns string, batch int) (int, error) {
+	if s.embedder == nil {
+		return 0, fmt.Errorf("memory: no embedder configured")
+	}
+	if batch <= 0 {
+		batch = 64
+	}
+	nsID, ok, err := s.namespaceID(ctx, ns)
+	if err != nil || !ok {
+		return 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
+		SELECT m.id, m.key, m.body FROM memories m
+		WHERE m.namespace_id = $1 AND m.action <> 'tombstone' AND m.invalid_at IS NULL
+		  AND m.created_at = (SELECT MAX(created_at) FROM memories
+		                      WHERE namespace_id = m.namespace_id AND key = m.key)
+		ORDER BY m.key`), nsID)
+	if err != nil {
+		return 0, err
+	}
+	type row struct{ id, key, body string }
+	var all []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.key, &r.body); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, r)
+	}
+	rows.Close()
+	total := 0
+	for start := 0; start < len(all); start += batch {
+		end := start + batch
+		if end > len(all) {
+			end = len(all)
+		}
+		inputs := make([]string, 0, end-start)
+		for _, r := range all[start:end] {
+			inputs = append(inputs, embedText(r.key, r.body))
+		}
+		vecs, err := s.embedder.Embed(ctx, inputs)
+		if err != nil {
+			return total, err
+		}
+		for i, r := range all[start:end] {
+			if _, err := s.db.ExecContext(ctx, s.db.Rebind(
+				`UPDATE memories SET embedding = $1 WHERE id = $2`),
+				encodeVector(vecs[i], s.quantize), r.id); err != nil {
+				return total, err
+			}
+			total++
+		}
+	}
+	return total, nil
 }
 
 // liveWithVectors loads the latest live facts of a namespace with their

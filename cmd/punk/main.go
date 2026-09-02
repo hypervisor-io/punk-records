@@ -66,7 +66,7 @@ Usage:
   punk      apikey    manage API keys (create|revoke --name <name>)
   punk      mcp       serve the MCP interface on stdio
   punk      backup    snapshot the SQLite database (--out file)
-  punk      embed-backfill  embed facts written before embeddings were enabled (--ns)
+  punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
   punk      consolidate  run a consolidation pass now, bypassing the dream triggers (--ns, empty = all)
   punk      card      manage the user's cross-project profile card (add "fact" | list | remove --key)
   punk      replay    re-run a completed task against its frozen snapshots (--task, --k, --mode)
@@ -1447,6 +1447,7 @@ func cmdEmbedBackfill(args []string) error {
 	fs := flag.NewFlagSet("embed-backfill", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
 	ns := fs.String("ns", "", "namespace (required)")
+	force := fs.Bool("force", false, "re-embed every live fact, not only those missing a vector")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1476,7 +1477,12 @@ func cmdEmbedBackfill(args []string) error {
 		Model:   cfg.AI.Embeddings.Model,
 		D:       cfg.AI.Embeddings.Dims,
 	})
-	n, err := mem.BackfillEmbeddings(context.Background(), *ns, 64)
+	var n int
+	if *force {
+		n, err = mem.ReembedAll(context.Background(), *ns, 64)
+	} else {
+		n, err = mem.BackfillEmbeddings(context.Background(), *ns, 64)
+	}
 	if err != nil {
 		return err
 	}

@@ -161,7 +161,14 @@ func (f *fakeEmbedder) Dims() int { return 3 }
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
-		if v, ok := f.m[t]; ok {
+		// Document inputs are key-prefixed ("key: <key>\n<body>"); strip
+		// the first line so the map (keyed by body) still matches. Queries
+		// are plain text and pass through unchanged.
+		key := t
+		if strings.HasPrefix(t, "key: ") {
+			key = t[strings.IndexByte(t, '\n')+1:]
+		}
+		if v, ok := f.m[key]; ok {
 			out[i] = v
 		} else {
 			out[i] = []float32{0.1, 0.1, 0.1}

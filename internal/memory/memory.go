@@ -250,7 +250,7 @@ func (s *Store) write(ctx context.Context, in WriteInput, outbox bool) (*Fact, e
 	}
 	var embedded []byte
 	if s.embedder != nil {
-		if vecs, err := s.embedder.Embed(ctx, []string{in.Body}); err == nil && len(vecs) == 1 {
+		if vecs, err := s.embedder.Embed(ctx, []string{embedText(in.Key, in.Body)}); err == nil && len(vecs) == 1 {
 			embedded = encodeVector(vecs[0], s.quantize)
 		} else if err != nil {
 			// embedding failure never blocks a write; backfill catches up
