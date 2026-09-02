@@ -292,6 +292,8 @@ Inside a session the agent can omit `namespace` on every tool: it resolves from 
 
 Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--project`, which also derives the namespace from the git remote.
 
+Every `punk connect <agent>` also installs a `punk-memory` skill where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). It teaches namespaces, read routing, key conventions, claims and the `/tasks` coordination convention, feedback and compact output. A file you edited yourself is never overwritten. `punk skill print --agent <name>` shows the text; `--no-skill` skips it.
+
 Codex asks once to trust the punk hook; with API keys enabled, export `PUNK_API_KEY` in the shell that starts Codex because Codex reads bearer tokens from the environment, not from a file.
 
 | Agent | Wire up | Capture | Context injection |

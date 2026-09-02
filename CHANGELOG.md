@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `punk-memory` skill installed by every `punk connect` target (`punk skill install|print|paths`); MCP instructions are generated from the same text.
+
 ## v1.4.0 (2026-09-03)
 
 ### Fixed
