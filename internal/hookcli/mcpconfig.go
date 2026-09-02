@@ -209,3 +209,39 @@ func ConnectAntigravityMCP(configPath string, o MCPEntryOpts, force bool) (bool,
 	entry := withHeaders(map[string]any{"serverUrl": mcpEndpoint(o.ServerURL)}, o)
 	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force)
 }
+
+// ConnectOpenClawMCP registers punk under mcp.servers.punk in OpenClaw's
+// config.json as a streamable-http remote server.
+func ConnectOpenClawMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
+	settings, existing, err := loadSettings(configPath)
+	if err != nil {
+		return false, err
+	}
+	mcpObj, err := childObject(settings, "mcp", "mcp", configPath)
+	if err != nil {
+		return false, err
+	}
+	servers, err := childObject(mcpObj, "servers", "mcp.servers", configPath)
+	if err != nil {
+		return false, err
+	}
+	if prev, ok := servers["punk"]; ok && !force {
+		m, isMap := prev.(map[string]any)
+		u, _ := m["url"].(string)
+		if !isMap || m["transport"] != "streamable-http" || !strings.Contains(u, "/mcp") {
+			return false, fmt.Errorf("%s already has an mcp.servers.punk entry that punk did not write; rerun with --force to replace it", configPath)
+		}
+	}
+	servers["punk"] = withHeaders(map[string]any{"url": mcpEndpoint(o.ServerURL), "transport": "streamable-http"}, o)
+	out, err := encodeSettings(settings)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil && string(out) == string(existing) {
+		return false, nil
+	}
+	if err := writePreservingSymlinkAndMode(configPath, out, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}

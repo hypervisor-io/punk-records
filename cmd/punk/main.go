@@ -3092,6 +3092,11 @@ func cmdConnectOpenClaw(args []string) error {
 	fs := flag.NewFlagSet("connect openclaw", flag.ContinueOnError)
 	homeFlag := fs.String("home", "", "OpenClaw home directory (default ~/.openclaw)")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire the plugin; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp.servers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3106,7 +3111,7 @@ func cmdConnectOpenClaw(args []string) error {
 	}
 	pluginDir := filepath.Join(root, "plugins", hookcli.OpenClawPluginID)
 	configPath := filepath.Join(root, "config.json")
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	pluginChanged, err := hookcli.WriteOpenClawPlugin(pluginDir, serverURL)
 	if err != nil {
@@ -3134,6 +3139,22 @@ func cmdConnectOpenClaw(args []string) error {
 		fmt.Printf("punk: %s already enables punk's plugin\n", configPath)
 	}
 	fmt.Println("punk: note - restart the OpenClaw gateway (plugins load at startup) to pick this up")
+	if !*noMCP {
+		mcpChanged, err := hookcli.ConnectOpenClawMCP(configPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect openclaw mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", configPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", configPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }

@@ -208,3 +208,26 @@ func TestConnectAntigravityMCP(t *testing.T) {
 		t.Fatal("foreign entry must be refused")
 	}
 }
+
+func TestConnectOpenClawMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"plugins":{"entries":{"punk-memory":{"enabled":true}}},"mcp":{"servers":{"gh":{"command":"gh-mcp"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "prk_o"}
+	if changed, err := ConnectOpenClawMCP(p, o, false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readSettings(t, p)
+	servers := m["mcp"].(map[string]any)["servers"].(map[string]any)
+	punk := servers["punk"].(map[string]any)
+	if punk["url"] != "https://punk.example.com/mcp?toolset=agent" || punk["transport"] != "streamable-http" || servers["gh"] == nil {
+		t.Fatalf("servers = %v", servers)
+	}
+	if m["plugins"] == nil {
+		t.Fatal("plugin config must survive")
+	}
+	if changed, _ := ConnectOpenClawMCP(p, o, false); changed {
+		t.Fatal("idempotent")
+	}
+}
