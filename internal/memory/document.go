@@ -4,18 +4,35 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
-// ponytail: each paragraph is its own chunk — no merging of separate
-// paragraphs into one. Merging would defeat delta-locality, the whole
-// point of per-paragraph chunking: editing one paragraph should rewrite
-// one chunk, not a bundle of unrelated ones. A paragraph is never split,
-// so an oversized (>2000 char) paragraph is simply kept whole as its own
-// larger-than-usual chunk — no special-case code needed for that.
+// DefaultChunkMaxChars bounds one chunk. Paragraphs are still the unit of
+// delta-locality: a paragraph under the bound is one chunk, untouched.
+// Only an oversize paragraph is split, at the best-scoring break point
+// inside the last 30 percent of each window, so an edit in one part of a
+// long paragraph rewrites one or two chunks, not the whole document, and
+// no chunk exceeds what an embedding model can see.
+const DefaultChunkMaxChars = 4000
 
-// chunkText splits text on blank lines into paragraph chunks, never
-// splitting mid-paragraph.
-func chunkText(text string) []string {
+// SetChunkMaxChars overrides DefaultChunkMaxChars; n <= 0 restores it.
+func (s *Store) SetChunkMaxChars(n int) {
+	if n <= 0 {
+		n = DefaultChunkMaxChars
+	}
+	s.chunkMaxChars = n
+}
+
+func (s *Store) chunkMax() int {
+	if s.chunkMaxChars <= 0 {
+		return DefaultChunkMaxChars
+	}
+	return s.chunkMaxChars
+}
+
+// chunkText splits text on blank lines into paragraph chunks; paragraphs
+// above max bytes are further split by splitOversize.
+func chunkText(text string, max int) []string {
 	paras := strings.Split(text, "\n\n")
 	chunks := []string{}
 	for _, p := range paras {
@@ -23,9 +40,71 @@ func chunkText(text string) []string {
 		if p == "" {
 			continue
 		}
-		chunks = append(chunks, p)
+		if len(p) <= max {
+			chunks = append(chunks, p)
+			continue
+		}
+		chunks = append(chunks, splitOversize(p, max)...)
 	}
 	return chunks
+}
+
+// breakScore ranks a cut position just AFTER byte i: sentence end 4,
+// newline 3, clause punctuation 2, space 1, else 0. The cut keeps the
+// separator with the left piece.
+func breakScore(p string, i int) int {
+	c := p[i]
+	next := byte(' ')
+	if i+1 < len(p) {
+		next = p[i+1]
+	}
+	switch {
+	case c == '\n':
+		return 3
+	case (c == '.' || c == '!' || c == '?') && (next == ' ' || next == '\n'):
+		return 4
+	case (c == ';' || c == ':') && next == ' ':
+		return 2
+	case c == ' ':
+		return 1
+	}
+	return 0
+}
+
+// splitOversize cuts p into pieces of at most max bytes. Within each
+// window it scans the last 30 percent for the highest breakScore (latest
+// position wins ties) and cuts after it; with no separator it hard-cuts
+// at the last rune boundary at or before max. Pieces are TrimSpace'd
+// and never empty.
+func splitOversize(p string, max int) []string {
+	var out []string
+	for len(p) > max {
+		start := max * 7 / 10
+		best, bestScore := -1, 0
+		for i := start; i < max; i++ {
+			if sc := breakScore(p, i); sc >= bestScore && sc > 0 {
+				best, bestScore = i, sc
+			}
+		}
+		cut := best + 1
+		if best < 0 {
+			cut = max
+			for cut > 0 && !utf8.RuneStart(p[cut]) {
+				cut--
+			}
+			if cut == 0 {
+				cut = max // degenerate: single rune wider than max cannot happen for max >= 4
+			}
+		}
+		if piece := strings.TrimSpace(p[:cut]); piece != "" {
+			out = append(out, piece)
+		}
+		p = strings.TrimSpace(p[cut:])
+	}
+	if p != "" {
+		out = append(out, p)
+	}
+	return out
 }
 
 // WriteDocument chunks text under prefix (/prefix/chunk-0001, ...) and
@@ -42,7 +121,7 @@ func (s *Store) WriteDocument(ctx context.Context, ns, prefix, text, writer stri
 	if err := ValidateKey(prefix); err != nil {
 		return 0, 0, 0, 0, err
 	}
-	chunks := chunkText(text)
+	chunks := chunkText(text, s.chunkMax())
 	existing, err := s.Recall(ctx, ns, prefix+"/chunk-", 1000)
 	if err != nil {
 		return 0, 0, 0, 0, err

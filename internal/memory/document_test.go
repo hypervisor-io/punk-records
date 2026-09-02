@@ -3,6 +3,7 @@ package memory
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestWriteDocumentDelta(t *testing.T) {
@@ -89,5 +90,77 @@ func TestWriteDocumentBlockMode(t *testing.T) {
 	w, u, r, b, err = s.WriteDocument(ctx, "ns", "/docs/blocked", doc, "test")
 	if err != nil || w != 0 || u != 1 || r != 0 || b != 1 {
 		t.Fatalf("block re-ingest = %d/%d/%d/%d (err %v), want 0/1/0/1", w, u, r, b, err)
+	}
+}
+
+func TestSplitOversizePrefersSentenceBoundary(t *testing.T) {
+	sentence := "This is a sentence about pools. "
+	p := strings.Repeat(sentence, 20) // 640 chars
+	got := splitOversize(p, 300)
+	if len(got) < 3 {
+		t.Fatalf("expected >= 3 pieces, got %d", len(got))
+	}
+	for i, c := range got {
+		if len(c) > 300 {
+			t.Fatalf("piece %d has %d chars > 300", i, len(c))
+		}
+		if !strings.HasSuffix(c, ".") {
+			t.Fatalf("piece %d does not end at a sentence: %q", i, c)
+		}
+	}
+	joined := strings.Join(got, " ")
+	if strings.ReplaceAll(joined, " ", "") != strings.ReplaceAll(p, " ", "") {
+		t.Fatalf("content lost across split")
+	}
+}
+
+func TestSplitOversizeHardCutsWithoutSeparators(t *testing.T) {
+	p := strings.Repeat("é", 1000) // multibyte, no spaces
+	got := splitOversize(p, 400)
+	total := 0
+	for _, c := range got {
+		if len(c) > 400 {
+			t.Fatalf("piece has %d bytes > 400", len(c))
+		}
+		if !utf8.ValidString(c) {
+			t.Fatalf("piece is not valid UTF-8")
+		}
+		total += utf8.RuneCountInString(c)
+	}
+	if total != 1000 {
+		t.Fatalf("rune count = %d, want 1000", total)
+	}
+}
+
+func TestChunkTextSplitsOnlyOversizeParagraphs(t *testing.T) {
+	small := "short paragraph"
+	big := strings.Repeat("word ", 1000) // 5000 chars
+	got := chunkText(small+"\n\n"+big+"\n\n"+small, DefaultChunkMaxChars)
+	if got[0] != small || got[len(got)-1] != small {
+		t.Fatalf("small paragraphs must be untouched: %q ... %q", got[0], got[len(got)-1])
+	}
+	if len(got) != 4 {
+		t.Fatalf("len = %d, want 4 (small, big/2, big/2, small)", len(got))
+	}
+	again := chunkText(small+"\n\n"+big+"\n\n"+small, DefaultChunkMaxChars)
+	if strings.Join(again, "|") != strings.Join(got, "|") {
+		t.Fatalf("chunking must be deterministic")
+	}
+}
+
+func TestWriteDocumentOversizeParagraphYieldsMultipleChunks(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	big := strings.Repeat("alpha beta. ", 500) // 6000 chars
+	w, _, _, _, err := s.WriteDocument(ctx, "ns", "/docs/big", big, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w != 2 {
+		t.Fatalf("written = %d, want 2", w)
+	}
+	w, u, _, _, err := s.WriteDocument(ctx, "ns", "/docs/big", big, "t")
+	if err != nil || w != 0 || u != 2 {
+		t.Fatalf("re-ingest: w=%d u=%d err=%v, want 0/2", w, u, err)
 	}
 }
