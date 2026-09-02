@@ -26,6 +26,7 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `route.fallback` | - | empty | agent for unmatched tasks; empty parks them |
 | `proposals.expire_after_hours` | - | `72` | stale-proposal sweep; 0 disables |
 | `ai.embeddings.model` | - | empty | write-time vectors for hybrid search; empty = FTS only |
+| `ai.embeddings.base_url` | - | `http://localhost:11434` | Ollama-compatible root URL; punk appends `/api/embed` |
 | `budgets.global_daily_usd` | - | `0` | burn-rate projection alerts; 0 disables |
 | `budgets.price_table_path` | - | empty | override the shipped model price table |
 | `mcp_client.servers[]` | - | - | `{name, command+args}` or `{name, url, token_env}` |

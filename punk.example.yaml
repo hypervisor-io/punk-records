@@ -26,7 +26,7 @@ ai:
       api_key_env: PUNK_LLM_KEY      # env var HOLDING the key
       model: llama3.1
   embeddings:              # write-time vectors for hybrid memory search; empty model = FTS only
-    base_url: http://localhost:11434/v1
+    base_url: http://localhost:11434   # Ollama root; punk appends /api/embed itself
     model: ""              # e.g. embeddinggemma or nomic-embed-text
     dims: 768
 
