@@ -95,7 +95,7 @@ Usage:
                       --from antigravity requires --event PostToolUse|PreInvocation|Stop (Antigravity's own hook payloads carry no event name)
                       --from copilot translates GitHub Copilot CLI's native hook payload (self-identifies its event; SessionStart injects via Copilot's own additionalContext shape)
                       --from hermes translates Hermes Agent's native shell-hook payload (self-identifies its event; first-turn pre_llm_call injects via Hermes' own {"context":...} shape)
-  punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw [--project] [--url URL])
+  punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex [--project] [--url URL])
   punk      --version print version
 `
 
@@ -2281,7 +2281,7 @@ func cmdHook(args []string) error {
 // rerun the command with --project inside a repo.
 func cmdConnect(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw [--project] [--url URL]")
+		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex [--project] [--url URL]")
 	}
 	target := args[0]
 	switch target {
@@ -2301,10 +2301,12 @@ func cmdConnect(args []string) error {
 		return cmdConnectHermes(args[1:])
 	case "openclaw":
 		return cmdConnectOpenClaw(args[1:])
+	case "codex":
+		return cmdConnectCodex(args[1:])
 	case "verify":
 		return cmdConnectVerify(args[1:])
 	default:
-		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", and \"openclaw\" are supported", target)
+		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", \"openclaw\", and \"codex\" are supported", target)
 	}
 }
 
@@ -3172,6 +3174,85 @@ func cmdConnectOpenClaw(args []string) error {
 		}
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	return nil
+}
+
+// cmdConnectCodex wires punk into the Codex CLI: capture hooks into
+// hooks.json (a Claude-shaped merge; Codex's payloads share Claude
+// Code's field names so hookcli.Run is a passthrough) and the punk MCP
+// entry plus the hooks feature flag into config.toml (a marker-fenced
+// text block; punk has no TOML dependency). Both default to $CODEX_HOME
+// (~/.codex); --project writes ./.codex/ instead and derives the
+// namespace from the git remote, baked into both the hook command and
+// the MCP entry's X-Punk-Namespace header.
+func cmdConnectCodex(args []string) error {
+	fs := flag.NewFlagSet("connect codex", flag.ContinueOnError)
+	project := fs.Bool("project", false, "write ./.codex/hooks.json and ./.codex/config.toml instead of the global $CODEX_HOME (~/.codex) files; also derives the namespace from the git remote")
+	urlFlag := fs.String("url", "", "punk-records server URL (default: PUNK_URL, then ~/.punk/credentials.json, then http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not write the MCP entry or the hooks feature flag")
+	noHooks := fs.Bool("no-hooks", false, "only write the MCP entry; do not wire capture hooks")
+	force := fs.Bool("force", false, "replace an [mcp_servers.punk] table punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "name of the env var Codex reads the bearer token from (default PUNK_API_KEY when a key is configured)")
+	agent := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	punkPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve punk executable path: %w", err)
+	}
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	dir := codexHome
+	ns := ""
+	if *project {
+		dir = ".codex"
+		var src string
+		ns, src = hookcli.ProjectNamespace(".")
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, src)
+	}
+	hooksPath := filepath.Join(dir, "hooks.json")
+	configPath := filepath.Join(dir, "config.toml")
+
+	if !*noHooks {
+		changed, err := hookcli.ConnectCodexHooks(hooksPath, punkPath, serverURL, ns)
+		if err != nil {
+			return fmt.Errorf("connect codex hooks: %w", err)
+		}
+		fmt.Printf("punk: Codex hooks in %s (%s)\n", hooksPath, changedWord(changed))
+	}
+	if !*noMCP {
+		opts := hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: ns, Agent: *agent}
+		changed, err := hookcli.ConnectCodexConfig(configPath, opts, !*noHooks, *force)
+		if err != nil {
+			return fmt.Errorf("connect codex config: %w", err)
+		}
+		fmt.Printf("punk: MCP entry%s in %s (%s)\n", map[bool]string{true: " and hooks feature flag", false: ""}[!*noHooks], configPath, changedWord(changed))
+		if apiKey != "" || *apiKeyEnv != "" {
+			envName := *apiKeyEnv
+			if envName == "" {
+				envName = "PUNK_API_KEY"
+			}
+			fmt.Printf("punk: note - Codex reads the bearer token from $%s; export it in the shell that starts codex\n", envName)
+		}
+	}
+	if !*noHooks {
+		fmt.Println("punk: note - Codex asks once to trust the punk hook command; accept it, or hooks stay disabled")
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
+	fmt.Println("punk: restart codex to pick up the changes")
 	return nil
 }
 
