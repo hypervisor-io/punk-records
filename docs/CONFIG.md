@@ -26,7 +26,9 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `route.fallback` | - | empty | agent for unmatched tasks; empty parks them |
 | `proposals.expire_after_hours` | - | `72` | stale-proposal sweep; 0 disables |
 | `ai.embeddings.model` | - | empty | write-time vectors for hybrid search; empty = FTS only |
+| `ai.embeddings.provider` | - | `ollama` | `ollama` (or empty): use base_url + model; `local`: in-process static model, no service needed (downloads about 31 MB once from huggingface.co) |
 | `ai.embeddings.base_url` | - | `http://localhost:11434` | Ollama-compatible root URL; punk appends `/api/embed` |
+| `ai.embeddings.model_cache` | - | `~/.punk/models` | local provider only; directory for downloaded static models (or set `PUNK_MODEL_CACHE`) |
 | `ai.embeddings.max_input_tokens` | - | `0` | model input window in tokens; 0 = unknown (diagnose skips oversize accounting) |
 | `budgets.global_daily_usd` | - | `0` | burn-rate projection alerts; 0 disables |
 | `budgets.price_table_path` | - | empty | override the shipped model price table |

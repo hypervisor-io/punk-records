@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"regexp"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/config"
 	"github.com/hypervisor-io/punk-records/internal/cost"
+	"github.com/hypervisor-io/punk-records/internal/embedlocal"
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
 	"github.com/hypervisor-io/punk-records/internal/itbench"
 	"github.com/hypervisor-io/punk-records/internal/llm"
@@ -68,6 +70,7 @@ Usage:
   punk      mcp       serve the MCP interface on stdio
   punk      backup    snapshot the SQLite database (--out file)
   punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
+  punk      models    list | pull <name>: manage local static embedding models
   punk      consolidate  run a consolidation pass now, bypassing the dream triggers (--ns, empty = all)
   punk      card      manage the user's cross-project profile card (add "fact" | list | remove --key)
   punk      replay    re-run a completed task against its frozen snapshots (--task, --k, --mode)
@@ -120,6 +123,8 @@ func run(args []string) error {
 		return cmdBackup(args[1:])
 	case "embed-backfill":
 		return cmdEmbedBackfill(args[1:])
+	case "models":
+		return cmdModels(args[1:])
 	case "consolidate":
 		return cmdConsolidate(args[1:])
 	case "card":
@@ -554,14 +559,13 @@ func cmdServe(args []string) error {
 		mem.SetDefensePolicy(ns, mode)
 	}
 	regionStore := region.New(db, nil)
-	if cfg.AI.Embeddings.Model != "" {
-		mem.SetEmbedder(&memory.OllamaEmbedder{
-			BaseURL: cfg.AI.Embeddings.BaseURL,
-			Model:   cfg.AI.Embeddings.Model,
-			D:       cfg.AI.Embeddings.Dims,
-		})
+	emb, err := newEmbedder(context.Background(), cfg, log)
+	if err != nil {
+		return err
+	}
+	if emb != nil {
+		mem.SetEmbedder(emb)
 		mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
-		log.Info("embeddings enabled", "model", cfg.AI.Embeddings.Model)
 	}
 	if cfg.Memory.RerankerURL != "" {
 		mem.SetReranker(&memory.HTTPReranker{URL: cfg.Memory.RerankerURL})
@@ -1041,6 +1045,97 @@ func openMemory(cfgPath string) (*memory.Store, func(), error) {
 	return mem, func() { _ = db.Close() }, nil
 }
 
+// newEmbedder builds the configured embedder, or nil when embeddings are
+// off. "local" loads a pinned static model from the model cache,
+// downloading it on first use; "ollama" (or empty) keeps today's
+// behaviour and stays off when model is empty.
+func newEmbedder(ctx context.Context, cfg *config.Config, log *slog.Logger) (memory.Embedder, error) {
+	e := cfg.AI.Embeddings
+	switch e.Provider {
+	case "local":
+		name := e.Model
+		if name == "" {
+			name = embedlocal.DefaultModel
+		}
+		cache := e.ModelCache
+		if cache == "" {
+			cache = embedlocal.DefaultCacheDir()
+		}
+		dir, err := embedlocal.Ensure(ctx, cache, name, "", os.Stderr)
+		if err != nil {
+			return nil, err
+		}
+		st, err := embedlocal.Load(dir, e.MaxInputTokens)
+		if err != nil {
+			return nil, err
+		}
+		if log != nil {
+			log.Info("embeddings enabled", "provider", "local", "model", name, "dims", st.Dims())
+		}
+		return st, nil
+	case "", "ollama":
+		if e.Model == "" {
+			return nil, nil
+		}
+		if log != nil {
+			log.Info("embeddings enabled", "provider", "ollama", "model", e.Model)
+		}
+		return &memory.OllamaEmbedder{BaseURL: e.BaseURL, Model: e.Model, D: e.Dims}, nil
+	default:
+		return nil, fmt.Errorf("ai.embeddings.provider %q not supported", e.Provider)
+	}
+}
+
+func cmdModels(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: punk models list | pull <name> [--cache DIR]")
+	}
+	switch args[0] {
+	case "list":
+		names := make([]string, 0, len(embedlocal.Catalog))
+		for n := range embedlocal.Catalog {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			m := embedlocal.Catalog[n]
+			fmt.Printf("%s\t%s@%s\tdims=%d\n", n, m.Repo, m.Revision[:7], m.Dims)
+		}
+		return nil
+	case "pull":
+		// Flags may appear before or after the model name, so parse
+		// manually instead of flag.FlagSet (which stops at the first
+		// positional argument).
+		var cache string
+		var rest []string
+		for i := 1; i < len(args); i++ {
+			switch {
+			case args[i] == "--cache" && i+1 < len(args):
+				cache = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--cache="):
+				cache = strings.TrimPrefix(args[i], "--cache=")
+			default:
+				rest = append(rest, args[i])
+			}
+		}
+		if cache == "" {
+			cache = embedlocal.DefaultCacheDir()
+		}
+		if len(rest) != 1 {
+			return errors.New("usage: punk models pull <name> [--cache DIR]")
+		}
+		dir, err := embedlocal.Ensure(context.Background(), cache, rest[0], "", os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("ready: %s\n", dir)
+		return nil
+	default:
+		return fmt.Errorf("unknown models subcommand %q", args[0])
+	}
+}
+
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
@@ -1475,9 +1570,6 @@ func cmdEmbedBackfill(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.AI.Embeddings.Model == "" {
-		return errors.New("embed-backfill: ai.embeddings.model not configured")
-	}
 	db, err := store.Open(cfg.DB.Driver, cfg.DB.DSN)
 	if err != nil {
 		return err
@@ -1489,11 +1581,14 @@ func cmdEmbedBackfill(args []string) error {
 	for ns, mode := range cfg.Memory.DefensePolicies {
 		mem.SetDefensePolicy(ns, mode)
 	}
-	mem.SetEmbedder(&memory.OllamaEmbedder{
-		BaseURL: cfg.AI.Embeddings.BaseURL,
-		Model:   cfg.AI.Embeddings.Model,
-		D:       cfg.AI.Embeddings.Dims,
-	})
+	emb, err := newEmbedder(context.Background(), cfg, nil)
+	if err != nil {
+		return err
+	}
+	if emb == nil {
+		return errors.New("embed-backfill: embeddings not configured")
+	}
+	mem.SetEmbedder(emb)
 	mem.SetEmbedMaxTokens(cfg.AI.Embeddings.MaxInputTokens)
 	var n int
 	if *force {

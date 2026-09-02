@@ -51,12 +51,14 @@ type AI struct {
 // Embeddings configures write-time vectors (Ollama-compatible /api/embed).
 // Empty model disables; FTS stays the deterministic default.
 type Embeddings struct {
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
-	Dims    int    `yaml:"dims"`
+	Provider string `yaml:"provider"` // "" | ollama | local
+	BaseURL  string `yaml:"base_url"` // ollama only
+	Model    string `yaml:"model"`    // ollama: model name; local: catalog name (default potion-code-16m-v2)
+	Dims     int    `yaml:"dims"`     // ollama only; local models know their width
 	// MaxInputTokens is the model input window in tokens; 0 = unknown
 	// (diagnose skips oversize accounting).
-	MaxInputTokens int `yaml:"max_input_tokens"`
+	MaxInputTokens int    `yaml:"max_input_tokens"`
+	ModelCache     string `yaml:"model_cache"` // local only; default $PUNK_MODEL_CACHE or ~/.punk/models
 }
 
 // AIProfile mirrors llm.Profile; config stays dependency-free.
@@ -292,6 +294,9 @@ func (c *Config) validate() error {
 	}
 	if c.AI.Embeddings.MaxInputTokens < 0 {
 		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))
+	}
+	if p := c.AI.Embeddings.Provider; p != "" && p != "ollama" && p != "local" {
+		errs = append(errs, fmt.Errorf("ai.embeddings.provider: %q, want ollama or local", p))
 	}
 	if c.Memory.IVFNprobe < 0 || c.Memory.IVFMinFacts < 0 {
 		errs = append(errs, errors.New("memory.ivf_nprobe, memory.ivf_min_facts: must be >= 0"))

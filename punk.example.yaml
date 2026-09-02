@@ -26,10 +26,12 @@ ai:
       api_key_env: PUNK_LLM_KEY      # env var HOLDING the key
       model: llama3.1
   embeddings:              # write-time vectors for hybrid memory search; empty model = FTS only
+    provider: ""           # "" or ollama: use base_url + model; local: in-process static model, no service needed
     base_url: http://localhost:11434   # Ollama root; punk appends /api/embed itself
-    model: ""              # e.g. embeddinggemma or nomic-embed-text
-    dims: 768
-    max_input_tokens: 0    # model window; e.g. 2048 for embeddinggemma, 8192 for nomic-embed-text; 0 = unknown
+    model: ""              # ollama: e.g. embeddinggemma; local: potion-code-16m-v2 (default when empty)
+    dims: 768              # ollama only
+    max_input_tokens: 0    # model window; 0 = unknown (diagnose skips oversize accounting)
+    # model_cache: ~/.punk/models   # local only; or set PUNK_MODEL_CACHE
 
 budgets: # per-task defaults; agent specs may lower, never raise
   tokens: 200000

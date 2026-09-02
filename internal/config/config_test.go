@@ -98,3 +98,21 @@ func TestEmbeddingsMaxInputTokensValidation(t *testing.T) {
 		t.Fatalf("MaxInputTokens = %d, want 2048", c.AI.Embeddings.MaxInputTokens)
 	}
 }
+
+func TestEmbeddingsProviderValidation(t *testing.T) {
+	dir := t.TempDir()
+	okPath := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(okPath, []byte("ai:\n  embeddings:\n    provider: local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(okPath); err != nil {
+		t.Fatalf("provider=local should validate: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("ai:\n  embeddings:\n    provider: bogus\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("want error for provider=bogus, got nil")
+	}
+}
