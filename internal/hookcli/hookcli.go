@@ -315,7 +315,7 @@ func fetchContext(baseURL, apiKey string, params url.Values, errw io.Writer) (st
 // or a bad --from flag must never break the user's coding session.
 func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.Writer) error {
 	fromKey := strings.ToLower(from)
-	if fromKey == "" || fromKey == "claude" || fromKey == "claude-code" {
+	if fromKey == "" || fromKey == "claude" || fromKey == "claude-code" || fromKey == "codex" {
 		return Run(stdin, baseURL, apiKey, out, errw)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
