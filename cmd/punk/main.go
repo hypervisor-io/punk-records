@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -71,6 +73,8 @@ Usage:
   punk      backup    snapshot the SQLite database (--out file)
   punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
   punk      models    list | pull <name>: manage local static embedding models
+  punk      login     store the server URL (and optional API key) in ~/.punk/credentials.json
+  punk      logout    remove the stored credentials
   punk      consolidate  run a consolidation pass now, bypassing the dream triggers (--ns, empty = all)
   punk      card      manage the user's cross-project profile card (add "fact" | list | remove --key)
   punk      replay    re-run a completed task against its frozen snapshots (--task, --k, --mode)
@@ -125,6 +129,10 @@ func run(args []string) error {
 		return cmdEmbedBackfill(args[1:])
 	case "models":
 		return cmdModels(args[1:])
+	case "login":
+		return cmdLogin(args[1:])
+	case "logout":
+		return cmdLogout(args[1:])
 	case "consolidate":
 		return cmdConsolidate(args[1:])
 	case "card":
@@ -2194,15 +2202,7 @@ func cmdHook(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	baseURL := *urlFlag
-	if baseURL == "" {
-		baseURL = os.Getenv("PUNK_URL")
-	}
-	if baseURL == "" {
-		baseURL = "http://localhost:9090"
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-	apiKey := os.Getenv("PUNK_API_KEY")
+	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
 	// Antigravity CLI's hook payloads carry no field identifying which
 	// event fired (see hookcli.RunFromAntigravity's doc comment), so
 	// ConnectAntigravity wires a distinct "punk hook --from antigravity
@@ -2306,11 +2306,12 @@ func cmdConnect(args []string) error {
 // --verify flag.
 func cmdConnectVerify(args []string) error {
 	fs := flag.NewFlagSet("connect verify", flag.ContinueOnError)
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return printVerify(context.Background(), strings.TrimRight(*urlFlag, "/"))
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	return printVerify(context.Background(), serverURL)
 }
 
 // printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
@@ -2331,7 +2332,7 @@ func printVerify(ctx context.Context, serverURL string) error {
 func cmdConnectClaudeCode(args []string) error {
 	fs := flag.NewFlagSet("connect claude-code", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.claude/settings.json instead of the global ~/.claude/settings.json")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
@@ -2356,7 +2357,7 @@ func cmdConnectClaudeCode(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(settingsPath)
 	existedBefore := statErr == nil
@@ -2418,7 +2419,7 @@ func changedWord(b bool) string {
 func cmdConnectCursor(args []string) error {
 	fs := flag.NewFlagSet("connect cursor", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.cursor/hooks.json (instead of the global ~/.cursor/hooks.json) and ./.cursor/rules/punk-memory.mdc; the rules file is project-only and is only written with this flag")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
@@ -2442,7 +2443,7 @@ func cmdConnectCursor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	hooksExistedBefore := statErr == nil
@@ -2548,7 +2549,7 @@ punk: once an API key exists (punk apikey create --name ...), add a "headers": {
 func cmdConnectOpenCode(args []string) error {
 	fs := flag.NewFlagSet("connect opencode", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.opencode/plugins/punk-memory.js and ./opencode.json instead of the global ~/.config/opencode equivalents")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
@@ -2574,7 +2575,7 @@ func cmdConnectOpenCode(args []string) error {
 		pluginPath = filepath.Join(base, "opencode", "plugins", "punk-memory.js")
 	}
 
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	changed, err := hookcli.ConnectOpenCode(pluginPath, serverURL)
 	if err != nil {
@@ -2626,7 +2627,7 @@ func cmdConnectOpenCode(args []string) error {
 func cmdConnectPi(args []string) error {
 	fs := flag.NewFlagSet("connect pi", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the extension should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2642,7 +2643,7 @@ func cmdConnectPi(args []string) error {
 		extensionPath = filepath.Join(home, ".pi", "agent", "extensions", "punk-memory.ts")
 	}
 
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	changed, err := hookcli.ConnectPi(extensionPath, serverURL)
 	if err != nil {
@@ -2698,7 +2699,7 @@ func cmdConnectPi(args []string) error {
 func cmdConnectAntigravity(args []string) error {
 	fs := flag.NewFlagSet("connect antigravity", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.agents/hooks.json instead of the global ~/.gemini/config/hooks.json")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2718,7 +2719,7 @@ func cmdConnectAntigravity(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2790,7 +2791,7 @@ func cmdConnectAntigravity(args []string) error {
 func cmdConnectCopilot(args []string) error {
 	fs := flag.NewFlagSet("connect copilot", flag.ContinueOnError)
 	project := fs.Bool("project", false, "write ./.github/hooks/punk.json instead of the global ~/.copilot/hooks/punk.json (or $COPILOT_HOME/hooks/punk.json when COPILOT_HOME is set)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2812,7 +2813,7 @@ func cmdConnectCopilot(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2861,7 +2862,7 @@ func cmdConnectCopilot(args []string) error {
 func cmdConnectHermes(args []string) error {
 	fs := flag.NewFlagSet("connect hermes", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Hermes config.yaml to merge into (default ~/.hermes/config.yaml)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the hooks should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2879,7 +2880,7 @@ func cmdConnectHermes(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
@@ -2925,7 +2926,7 @@ func cmdConnectHermes(args []string) error {
 func cmdConnectOpenClaw(args []string) error {
 	fs := flag.NewFlagSet("connect openclaw", flag.ContinueOnError)
 	homeFlag := fs.String("home", "", "OpenClaw home directory (default ~/.openclaw)")
-	urlFlag := fs.String("url", "http://localhost:9090", "punk-records server URL the plugin should call")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2940,7 +2941,7 @@ func cmdConnectOpenClaw(args []string) error {
 	}
 	pluginDir := filepath.Join(root, "plugins", hookcli.OpenClawPluginID)
 	configPath := filepath.Join(root, "config.json")
-	serverURL := strings.TrimRight(*urlFlag, "/")
+	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 
 	pluginChanged, err := hookcli.WriteOpenClawPlugin(pluginDir, serverURL)
 	if err != nil {
@@ -2978,4 +2979,44 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func cmdLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	urlFlag := fs.String("url", "", "punk-records server URL (required)")
+	key := fs.String("api-key", "", "bearer token from 'punk apikey create' on the server")
+	keyStdin := fs.Bool("api-key-stdin", false, "read the token from stdin (first line)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *urlFlag == "" {
+		return errors.New("login: --url is required")
+	}
+	token := *key
+	if *keyStdin {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		token = strings.TrimSpace(line)
+	}
+	path := hookcli.CredentialsPath()
+	if err := hookcli.SaveCredentials(path, hookcli.Credentials{URL: *urlFlag, APIKey: token}); err != nil {
+		return err
+	}
+	if token == "" {
+		fmt.Printf("punk: saved %s (no API key; fine for an unauthenticated server)\n", path)
+	} else {
+		fmt.Printf("punk: saved %s\n", path)
+	}
+	return nil
+}
+
+func cmdLogout(_ []string) error {
+	path := hookcli.CredentialsPath()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fmt.Printf("punk: removed %s\n", path)
+	return nil
 }
