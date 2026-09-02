@@ -14,6 +14,7 @@ import (
 
 	"github.com/hypervisor-io/punk-records/internal/api"
 	"github.com/hypervisor-io/punk-records/internal/bus"
+	"github.com/hypervisor-io/punk-records/internal/hookcli"
 	"github.com/hypervisor-io/punk-records/internal/llm"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/region"
@@ -1011,5 +1012,16 @@ func TestAgentToolsetIsLean(t *testing.T) {
 	}
 	if len(fres.Tools) <= len(res.Tools) {
 		t.Fatalf("full toolset (%d) must be larger than agent (%d)", len(fres.Tools), len(res.Tools))
+	}
+}
+
+func TestInstructionsShareRoutingWithSkill(t *testing.T) {
+	if !strings.Contains(Instructions, hookcli.RoutingSection()) {
+		t.Fatal("MCP instructions must embed the skill's routing section verbatim so the two cannot drift")
+	}
+	cs := session(t)
+	defer cs.Close()
+	if got := cs.InitializeResult().Instructions; !strings.Contains(got, "unified_search") {
+		t.Fatalf("instructions not served: %s", got)
 	}
 }
