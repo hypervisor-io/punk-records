@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +37,9 @@ type Deps struct {
 	LLM              llm.Client           // nil disables the reflect tool (deterministic-first)
 	Expander         memory.QueryExpander // nil disables search's expand flag (deterministic-first)
 	DefaultBudget    task.Budget
-	NamespaceFor     func(cwd string) string // maps a workspace path to its memory namespace; nil disables root-based resolution
-	DefaultNamespace string                  // used when a call omits namespace and no root is known; empty = agent-default
+	NamespaceFor  func(cwd string) string // maps a workspace path to its memory namespace; nil disables root-based resolution
+	DefaultNamespace string               // used when a call omits namespace and no root is known; empty = agent-default
+	LocalFiles    bool                    // allow remember_document{path}: only for the stdio server, which runs as the user
 }
 
 // A2ARemote is a resolved foreign A2A agent the delegate tool can reach.
@@ -100,10 +103,31 @@ type rememberIn struct {
 	Importance float64 `json:"importance,omitempty" jsonschema:"author-declared weight 0..1"`
 }
 
+type rememberManyFact struct {
+	Key        string         `json:"key"`
+	Body       string         `json:"body"`
+	Importance float64        `json:"importance,omitempty"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+}
+
+type rememberManyIn struct {
+	Namespace string             `json:"namespace,omitempty" jsonschema:"memory namespace; optional, resolved from the client's workspace root when empty"`
+	Author    string             `json:"author,omitempty"`
+	Facts     []rememberManyFact `json:"facts" jsonschema:"1 to 200 facts written in order; each is an independent append (latest wins per key)"`
+}
+
+type rememberManyOut struct {
+	Written int      `json:"written"`
+	IDs     []string `json:"ids"`
+}
+
+const rememberManyMax = 200
+
 type documentIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"memory namespace; optional, resolved from the client's workspace root (see whoami) when empty"`
 	Prefix    string `json:"prefix" jsonschema:"hierarchical key prefix, e.g. /docs/runbook"`
-	Text      string `json:"text" jsonschema:"the document body"`
+	Text      string `json:"text,omitempty" jsonschema:"the document body"`
+	Path      string `json:"path,omitempty" jsonschema:"absolute path of a local file to ingest instead of text; only honoured by the stdio server (punk mcp)"`
 	Author    string `json:"author,omitempty"`
 }
 
@@ -387,11 +411,51 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 		Description: "Chunk and store a document under a key prefix; rewrites only changed chunks and tombstones chunks past the new end (delta ingest)."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in documentIn) (*mcp.CallToolResult, documentOut, error) {
 			ns, _ := nsr.resolve(ctx, req, in.Namespace)
-			w, u, r, b, err := d.Mem.WriteDocument(ctx, ns, in.Prefix, in.Text, in.Author)
+			text := in.Text
+			switch {
+			case in.Path != "" && in.Text != "":
+				return nil, documentOut{}, fmt.Errorf("pass text or path, not both")
+			case in.Path != "":
+				if !d.LocalFiles {
+					return nil, documentOut{}, fmt.Errorf("path ingestion is disabled on this server; pass text, or use the stdio server (punk mcp)")
+				}
+				if !filepath.IsAbs(in.Path) {
+					return nil, documentOut{}, fmt.Errorf("path must be absolute")
+				}
+				raw, err := os.ReadFile(in.Path)
+				if err != nil {
+					return nil, documentOut{}, err
+				}
+				text = string(raw)
+			case in.Text == "":
+				return nil, documentOut{}, fmt.Errorf("text or path is required")
+			}
+			w, u, r, b, err := d.Mem.WriteDocument(ctx, ns, in.Prefix, text, in.Author)
 			if err != nil {
 				return nil, documentOut{}, err
 			}
 			return nil, documentOut{Written: w, Unchanged: u, Removed: r, Blocked: b}, nil
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "remember_many",
+		Description: "Store up to 200 facts in one call (same semantics as remember, one write per fact). Use instead of repeated remember calls."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in rememberManyIn) (*mcp.CallToolResult, rememberManyOut, error) {
+			if len(in.Facts) == 0 || len(in.Facts) > rememberManyMax {
+				return nil, rememberManyOut{}, fmt.Errorf("facts: want 1..%d entries, got %d", rememberManyMax, len(in.Facts))
+			}
+			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			out := rememberManyOut{IDs: make([]string, 0, len(in.Facts))}
+			for i, f := range in.Facts {
+				fact, err := d.Mem.Write(ctx, memory.WriteInput{
+					Namespace: ns, Key: f.Key, Body: f.Body, Attributes: f.Attributes,
+					Author: in.Author, Writer: in.Author, Importance: f.Importance,
+				})
+				if err != nil {
+					return nil, out, fmt.Errorf("facts[%d] %s: %w", i, f.Key, err)
+				}
+				out.Written++
+				out.IDs = append(out.IDs, fact.ID)
+			}
+			return nil, out, nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "search",
 		Description: "Search a region's facts by full text, or hybrid vector+FTS when embeddings are enabled."},

@@ -42,15 +42,16 @@ func session(t *testing.T) *mcp.ClientSession {
 }
 
 // sessionOpts is session with a hook to configure the MCP client (for
-// example to advertise roots) before it connects.
-func sessionOpts(t *testing.T, configure func(*mcp.Client)) *mcp.ClientSession {
-	cs, _ := sessionWithStore(t, configure)
+// example to advertise roots) before it connects, plus optional Deps
+// tweaks applied before the server is built.
+func sessionOpts(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps)) *mcp.ClientSession {
+	cs, _ := sessionWithStore(t, configure, tweaks...)
 	return cs
 }
 
 // sessionWithStore is session plus the memory.Store the server was built
 // with, for tests that need to seed data the MCP surface has no tool for.
-func sessionWithStore(t *testing.T, configure func(*mcp.Client)) (*mcp.ClientSession, *memory.Store) {
+func sessionWithStore(t *testing.T, configure func(*mcp.Client), tweaks ...func(*Deps)) (*mcp.ClientSession, *memory.Store) {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "mcps.db"))
 	if err != nil {
@@ -77,7 +78,7 @@ func sessionWithStore(t *testing.T, configure func(*mcp.Client)) (*mcp.ClientSes
 	ledger := task.NewLedger(db, now)
 	memStore := memory.New(db, now)
 
-	srv := New(Deps{
+	deps := Deps{
 		Ledger:           ledger,
 		Router:           route.New(db, reg, ledger, nil, now),
 		Reg:              reg,
@@ -85,7 +86,13 @@ func sessionWithStore(t *testing.T, configure func(*mcp.Client)) (*mcp.ClientSes
 		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: "agent-default",
-	})
+	}
+	for _, tweak := range tweaks {
+		if tweak != nil {
+			tweak(&deps)
+		}
+	}
+	srv := New(deps)
 
 	st, ct := mcp.NewInMemoryTransports()
 	if _, err := srv.Connect(ctx, st, nil); err != nil {
@@ -129,8 +136,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 22 {
-		t.Fatalf("tools = %d, want 22 (21 plus whoami)", len(tools.Tools))
+	if len(tools.Tools) != 23 {
+		t.Fatalf("tools = %d, want 23 (21 plus whoami, remember_many)", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -431,8 +438,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 22 {
-		t.Fatalf("tools = %d, want 22 (reflect must stay off without an LLM)", len(tools.Tools))
+	if len(tools.Tools) != 23 {
+		t.Fatalf("tools = %d, want 23 (reflect must stay off without an LLM)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -823,5 +830,58 @@ func TestSearchRepoRevisionFlagsStaleCodeMap(t *testing.T) {
 	}
 	if len(out.Hits) != 1 || strings.Join(out.Hits[0].Flags, ",") != "stale" {
 		t.Fatalf("hits = %+v, want one stale code-map hit", out.Hits)
+	}
+}
+
+func TestRememberManyWritesAll(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember_many", Arguments: map[string]any{
+		"namespace": "ns", "author": "t",
+		"facts": []map[string]any{
+			{"key": "/a", "body": "one", "importance": 0.4},
+			{"key": "/b", "body": "two", "attributes": map[string]any{"tag": "x"}},
+		}}})
+	if err != nil || res.IsError {
+		t.Fatalf("remember_many: %v %s", err, text(t, res))
+	}
+	var out struct {
+		Written int      `json:"written"`
+		IDs     []string `json:"ids"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Written != 2 || len(out.IDs) != 2 {
+		t.Fatalf("out = %+v", out)
+	}
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_keys", Arguments: map[string]any{"namespace": "ns"}})
+	if err != nil || !strings.Contains(text(t, res), "/a") || !strings.Contains(text(t, res), "/b") {
+		t.Fatalf("keys: %s %v", text(t, res), err)
+	}
+	if res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember_many", Arguments: map[string]any{"namespace": "ns", "facts": []map[string]any{}}}); err == nil && !res.IsError {
+		t.Fatal("empty facts must error")
+	}
+}
+
+func TestRememberDocumentFromPathOnlyWhenLocalFiles(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(p, []byte("para one\n\npara two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// default session: LocalFiles false -> refused
+	cs := session(t)
+	if res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "remember_document",
+		Arguments: map[string]any{"namespace": "ns", "prefix": "/docs/x", "path": p}}); err == nil && !res.IsError {
+		t.Fatal("path must be refused when LocalFiles is off")
+	}
+	cs = sessionOpts(t, nil, func(d *Deps) { d.LocalFiles = true })
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "remember_document",
+		Arguments: map[string]any{"namespace": "ns", "prefix": "/docs/x", "path": p}})
+	if err != nil || res.IsError {
+		t.Fatalf("remember_document path: %v %s", err, text(t, res))
+	}
+	if !strings.Contains(text(t, res), `"written":2`) {
+		t.Fatalf("document from path: %s", text(t, res))
 	}
 }

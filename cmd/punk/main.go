@@ -1344,6 +1344,7 @@ func cmdMCP(args []string) error {
 		A2ARemotes:       a2aRemotes(cfg),
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
+		LocalFiles:       true,
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
