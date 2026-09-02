@@ -12,6 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/hypervisor-io/punk-records/internal/api"
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/llm"
 	"github.com/hypervisor-io/punk-records/internal/memory"
@@ -36,13 +37,20 @@ prompt
 // session connects a real in-memory client to the real server, so tests
 // exercise the actual protocol (Susanoo's pattern).
 func session(t *testing.T) *mcp.ClientSession {
-	cs, _ := sessionWithStore(t)
+	cs, _ := sessionWithStore(t, nil)
+	return cs
+}
+
+// sessionOpts is session with a hook to configure the MCP client (for
+// example to advertise roots) before it connects.
+func sessionOpts(t *testing.T, configure func(*mcp.Client)) *mcp.ClientSession {
+	cs, _ := sessionWithStore(t, configure)
 	return cs
 }
 
 // sessionWithStore is session plus the memory.Store the server was built
 // with, for tests that need to seed data the MCP surface has no tool for.
-func sessionWithStore(t *testing.T) (*mcp.ClientSession, *memory.Store) {
+func sessionWithStore(t *testing.T, configure func(*mcp.Client)) (*mcp.ClientSession, *memory.Store) {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "mcps.db"))
 	if err != nil {
@@ -70,11 +78,13 @@ func sessionWithStore(t *testing.T) (*mcp.ClientSession, *memory.Store) {
 	memStore := memory.New(db, now)
 
 	srv := New(Deps{
-		Ledger:        ledger,
-		Router:        route.New(db, reg, ledger, nil, now),
-		Reg:           reg,
-		Mem:           memStore,
-		DefaultBudget: task.Budget{Tokens: 1000, ToolCalls: 10},
+		Ledger:           ledger,
+		Router:           route.New(db, reg, ledger, nil, now),
+		Reg:              reg,
+		Mem:              memStore,
+		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: "agent-default",
 	})
 
 	st, ct := mcp.NewInMemoryTransports()
@@ -82,6 +92,9 @@ func sessionWithStore(t *testing.T) (*mcp.ClientSession, *memory.Store) {
 		t.Fatal(err)
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	if configure != nil {
+		configure(client)
+	}
 	cs, err := client.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -116,8 +129,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21", len(tools.Tools))
+	if len(tools.Tools) != 22 {
+		t.Fatalf("tools = %d, want 22 (21 plus whoami)", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -418,8 +431,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("tools = %d, want 21 (reflect must stay off without an LLM)", len(tools.Tools))
+	if len(tools.Tools) != 22 {
+		t.Fatalf("tools = %d, want 22 (reflect must stay off without an LLM)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -787,7 +800,7 @@ func TestSearchAnchorsInput(t *testing.T) {
 }
 
 func TestSearchRepoRevisionFlagsStaleCodeMap(t *testing.T) {
-	cs, st := sessionWithStore(t)
+	cs, st := sessionWithStore(t, nil)
 	ctx := context.Background()
 	// Seed through the store directly: the MCP surface has no seed tool.
 	if _, err := st.SeedCodeMapWith(ctx, "ns", strings.NewReader(`{"domains":[{"name":"memory","label":"internal/memory","files":["a.go"],"entrypoints":["a.go"],"topSymbols":[]}],"edges":[]}`), memory.SeedCodeMapOpts{Revision: "aaa"}); err != nil {

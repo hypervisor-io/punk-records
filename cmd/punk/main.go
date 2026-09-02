@@ -662,6 +662,8 @@ func cmdServe(args []string) error {
 	mcpSrv := mcpserver.New(mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem, Region: regionStore, Bus: eventBus,
 		A2ARemotes: a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
@@ -1339,7 +1341,9 @@ func cmdMCP(args []string) error {
 	}
 	srv := mcpserver.New(mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem,
-		A2ARemotes: a2aRemotes(cfg),
+		A2ARemotes:       a2aRemotes(cfg),
+		NamespaceFor:     api.AgentNamespace,
+		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
