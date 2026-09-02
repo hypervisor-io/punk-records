@@ -200,17 +200,52 @@ func New(d Deps) *mcp.Server {
 				URI: req.Params.URI, MIMEType: "application/json", Text: string(raw),
 			}}}, nil
 		})
+
+		s.AddResourceTemplate(&mcp.ResourceTemplate{
+			Name:        "memory",
+			URITemplate: "punk://memory/{namespace}{+prefix}",
+			Description: "Live facts under a key prefix; subscribable. Notifies on any write, tombstone or link change under the prefix.",
+			MIMEType:    "application/json",
+		}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			ns, prefix, ok := parseMemoryURI(req.Params.URI)
+			if !ok {
+				return nil, fmt.Errorf("bad memory resource uri %q", req.Params.URI)
+			}
+			facts, err := d.Mem.Recall(ctx, ns, prefix, 200)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := json.Marshal(map[string]any{"namespace": ns, "prefix": prefix, "facts": facts})
+			if err != nil {
+				return nil, err
+			}
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "application/json", Text: string(raw),
+			}}}, nil
+		})
 		events, cancel := d.Bus.Subscribe()
 		go func() {
 			defer cancel()
 			for e := range events {
-				if e.Kind != "task_status" {
-					continue
-				}
-				uri := "punk://tasks/" + e.Key
-				if subs.get(uri) {
-					_ = s.ResourceUpdated(context.Background(),
-						&mcp.ResourceUpdatedNotificationParams{URI: uri})
+				switch e.Kind {
+				case "task_status":
+					uri := "punk://tasks/" + e.Key
+					if subs.get(uri) {
+						_ = s.ResourceUpdated(context.Background(),
+							&mcp.ResourceUpdatedNotificationParams{URI: uri})
+					}
+				case "memory":
+					ns, key, found := strings.Cut(e.Key, ":")
+					if !found {
+						continue
+					}
+					for _, uri := range subs.matching(func(u string) bool {
+						uns, uprefix, ok := parseMemoryURI(u)
+						return ok && uns == ns && strings.HasPrefix(key, uprefix)
+					}) {
+						_ = s.ResourceUpdated(context.Background(),
+							&mcp.ResourceUpdatedNotificationParams{URI: uri})
+					}
 				}
 			}
 		}()
@@ -876,4 +911,31 @@ func (s *subscriptions) get(uri string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.uris[uri]
+}
+
+// matching returns the subscribed URIs accepted by keep.
+func (s *subscriptions) matching(keep func(uri string) bool) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for uri := range s.uris {
+		if keep(uri) {
+			out = append(out, uri)
+		}
+	}
+	return out
+}
+
+// parseMemoryURI splits punk://memory/<ns><prefix> into namespace and
+// key prefix ("/" + rest). punk://memory/ns/tasks -> ("ns", "/tasks").
+func parseMemoryURI(uri string) (ns, prefix string, ok bool) {
+	rest, found := strings.CutPrefix(uri, "punk://memory/")
+	if !found || rest == "" {
+		return "", "", false
+	}
+	ns, tail, _ := strings.Cut(rest, "/")
+	if ns == "" {
+		return "", "", false
+	}
+	return ns, "/" + tail, true
 }

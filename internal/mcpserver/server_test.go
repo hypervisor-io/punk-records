@@ -885,3 +885,85 @@ func TestRememberDocumentFromPathOnlyWhenLocalFiles(t *testing.T) {
 		t.Fatalf("document from path: %s", text(t, res))
 	}
 }
+
+func TestMemoryResourceSubscription(t *testing.T) {
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "memsub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if _, err := db.MigrateUp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	specDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(specDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "agents", "database.md"), []byte(agentSpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(specDir, db, slog.New(slog.DiscardHandler))
+	if err := reg.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ledger := task.NewLedger(db, nil)
+	b := bus.New()
+	mem := memory.New(db, nil)
+	srv := New(Deps{
+		Ledger: ledger, Router: route.New(db, reg, ledger, nil, nil),
+		Reg: reg, Mem: mem, Bus: b,
+		DefaultBudget: task.Budget{Tokens: 100, ToolCalls: 5},
+	})
+
+	updated := make(chan string, 8)
+	st, ct := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(_ context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	uri := "punk://memory/ns/tasks"
+	if err := cs.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+		t.Fatal(err)
+	}
+	// The in-memory transport processes the subscribe request on the
+	// server's connection goroutine; give it a moment so the events
+	// published below observe the subscription.
+	time.Sleep(200 * time.Millisecond)
+	b.Publish(bus.Event{Kind: "memory", Key: "other:/tasks/x", Data: map[string]string{"action": "add"}})
+	b.Publish(bus.Event{Kind: "memory", Key: "ns:/unrelated", Data: map[string]string{"action": "add"}})
+	b.Publish(bus.Event{Kind: "memory", Key: "ns:/tasks/T1/status", Data: map[string]string{"action": "add"}})
+	select {
+	case got := <-updated:
+		if got != uri {
+			t.Fatalf("updated uri = %s, want %s", got, uri)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no resources/updated notification for a matching memory event")
+	}
+	select {
+	case extra := <-updated:
+		t.Fatalf("unexpected second notification %s (non-matching events must not fire)", extra)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := mem.Write(ctx, memory.WriteInput{Namespace: "ns", Key: "/tasks/T1", Body: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, `"key":"/tasks/T1"`) {
+		t.Fatalf("read memory resource: %+v", res.Contents)
+	}
+}
