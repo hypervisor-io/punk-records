@@ -2324,9 +2324,12 @@ func cmdConnectVerify(args []string) error {
 }
 
 // printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
-// prints a one-line summary.
+// prints a one-line summary. The process working directory is advertised
+// as the client root so whoami reports the namespace a session started
+// here would use, not the server default.
 func printVerify(ctx context.Context, serverURL, apiKey string) error {
-	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent", apiKey)
+	cwd, _ := os.Getwd()
+	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent", apiKey, cwd)
 	if err != nil {
 		return err
 	}
@@ -2334,7 +2337,7 @@ func printVerify(ctx context.Context, serverURL, apiKey string) error {
 	if rep.Instructions {
 		instructions = "yes"
 	}
-	fmt.Printf("punk: verified: %d tools, namespace %s, instructions %s\n", len(rep.Tools), rep.Namespace, instructions)
+	fmt.Printf("punk: verified: %d tools, namespace %s (%s), instructions %s\n", len(rep.Tools), rep.Namespace, rep.Source, instructions)
 	return nil
 }
 

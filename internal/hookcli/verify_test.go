@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,23 +14,36 @@ func TestVerifyMCPAgainstInMemoryServer(t *testing.T) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "punk-records", Version: "test"}, &mcp.ServerOptions{Instructions: "use it"})
 	type out struct {
 		Namespace string `json:"namespace"`
+		Source    string `json:"source"`
 	}
 	mcp.AddTool(srv, &mcp.Tool{Name: "whoami", Description: "who"},
 		func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, out, error) {
-			return nil, out{Namespace: "agent-test"}, nil
+			// Mirror the real server: the namespace resolves from the
+			// client's advertised roots when present, else the default.
+			roots, err := req.Session.ListRoots(ctx, nil)
+			if err != nil {
+				return nil, out{}, err
+			}
+			if len(roots.Roots) > 0 {
+				return nil, out{Namespace: "agent-" + filepath.Base(roots.Roots[0].URI), Source: "roots"}, nil
+			}
+			return nil, out{Namespace: "agent-default", Source: "default"}, nil
 		})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	rep, err := VerifyMCP(context.Background(), ts.URL, "")
+	rep, err := VerifyMCP(context.Background(), ts.URL, "", "/srv/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Namespace != "agent-test" || !rep.Instructions || len(rep.Tools) != 1 || rep.Tools[0] != "whoami" {
+	if rep.Namespace != "agent-demo" || rep.Source != "roots" || !rep.Instructions || len(rep.Tools) != 1 || rep.Tools[0] != "whoami" {
 		t.Fatalf("report = %+v", rep)
 	}
-	if _, err := VerifyMCP(context.Background(), "http://127.0.0.1:1", ""); err == nil {
+	if rep, err := VerifyMCP(context.Background(), ts.URL, "", ""); err != nil || rep.Namespace != "agent-default" || rep.Source != "default" {
+		t.Fatalf("no cwd must fall back to the default namespace: %+v err=%v", rep, err)
+	}
+	if _, err := VerifyMCP(context.Background(), "http://127.0.0.1:1", "", ""); err == nil {
 		t.Fatal("unreachable endpoint must error")
 	}
 }

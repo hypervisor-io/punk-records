@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 type VerifyReport struct {
 	Tools        []string
 	Namespace    string
+	Source       string
 	Instructions bool
 }
 
@@ -33,10 +35,16 @@ func (t bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // whoami. An agent whose first punk call fails tends to abandon the tool
 // for the rest of the session, so connect ends by proving the round trip.
 // When apiKey is non-empty every request carries it as a bearer token.
-func VerifyMCP(ctx context.Context, endpoint, apiKey string) (VerifyReport, error) {
+// When cwd is non-empty it is advertised as the client's only root, so
+// whoami resolves the namespace the way a real editor session does
+// instead of falling back to the server default.
+func VerifyMCP(ctx context.Context, endpoint, apiKey, cwd string) (VerifyReport, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "punk-connect-verify", Version: "1"}, nil)
+	if cwd != "" {
+		client.AddRoots(&mcp.Root{URI: "file://" + filepath.ToSlash(cwd), Name: filepath.Base(cwd)})
+	}
 	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
 	if apiKey != "" {
 		transport.HTTPClient = &http.Client{Transport: bearerTransport{key: apiKey}}
@@ -64,6 +72,7 @@ func VerifyMCP(ctx context.Context, endpoint, apiKey string) (VerifyReport, erro
 	}
 	var out struct {
 		Namespace string `json:"namespace"`
+		Source    string `json:"source"`
 	}
 	for _, c := range res.Content {
 		if tc, ok := c.(*mcp.TextContent); ok {
@@ -76,6 +85,7 @@ func VerifyMCP(ctx context.Context, endpoint, apiKey string) (VerifyReport, erro
 		}
 	}
 	rep.Namespace = out.Namespace
+	rep.Source = out.Source
 	return rep, nil
 }
 
