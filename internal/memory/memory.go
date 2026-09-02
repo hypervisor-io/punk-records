@@ -713,6 +713,50 @@ func (s *Store) Search(ctx context.Context, ns, query string, limit int) ([]Fact
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("memory: empty search query")
 	}
+	var match, pgFn string
+	switch s.db.Driver {
+	case "sqlite":
+		match, pgFn = SanitizeFTS(query), ""
+	case "postgres":
+		match, pgFn = SanitizeTSQuery(query), "to_tsquery"
+	default:
+		return nil, fmt.Errorf("memory: no FTS for driver %q", s.db.Driver)
+	}
+	return s.searchMatch(ctx, ns, match, pgFn, limit)
+}
+
+// SearchPhrase ranks live facts whose body contains phrase as adjacent
+// tokens in order (FTS5 phrase syntax on sqlite, phraseto_tsquery on
+// postgres). Blank phrase returns no rows, no error. Used by the anchor
+// arm, where an exact identifier or error string must not be loosened
+// into OR-of-tokens.
+func (s *Store) SearchPhrase(ctx context.Context, ns, phrase string, limit int) ([]Fact, error) {
+	phrase = strings.TrimSpace(phrase)
+	if phrase == "" {
+		return []Fact{}, nil
+	}
+	switch s.db.Driver {
+	case "sqlite":
+		// FTS5 phrase: double-quoted, inner quotes doubled. The default
+		// unicode61 tokenizer splits on punctuation, so "ERR_POOL_EXHAUSTED"
+		// becomes the adjacent tokens err pool exhausted, which is exactly
+		// the phrase we want.
+		return s.searchMatch(ctx, ns, `"`+strings.ReplaceAll(phrase, `"`, `""`)+`"`, "", limit)
+	case "postgres":
+		return s.searchMatch(ctx, ns, phrase, "phraseto_tsquery", limit)
+	default:
+		return nil, fmt.Errorf("memory: no FTS for driver %q", s.db.Driver)
+	}
+}
+
+// searchMatch runs the latest-live-revision FTS query. match is the
+// driver-specific query text; pgFn is the postgres tsquery constructor
+// (to_tsquery or phraseto_tsquery) and is ignored on sqlite. Empty match
+// short-circuits to no rows.
+func (s *Store) searchMatch(ctx context.Context, ns, match, pgFn string, limit int) ([]Fact, error) {
+	if match == "" {
+		return []Fact{}, nil
+	}
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -723,17 +767,6 @@ func (s *Store) Search(ctx context.Context, ns, query string, limit int) ([]Fact
 	if !ok {
 		return []Fact{}, nil
 	}
-
-	switch s.db.Driver {
-	case "sqlite":
-		query = SanitizeFTS(query)
-	case "postgres":
-		query = SanitizeTSQuery(query)
-	}
-	if query == "" {
-		return []Fact{}, nil
-	}
-
 	var q string
 	switch s.db.Driver {
 	case "sqlite":
@@ -748,25 +781,23 @@ WHERE memories_fts MATCH $2 AND m.namespace_id = $1 AND m.action <> 'tombstone'
 ORDER BY rank
 LIMIT $3`
 	case "postgres":
-		// to_tsquery over the sanitized OR-joined tokens (SanitizeTSQuery),
-		// mirroring sqlite's OR-of-content-tokens semantics. ORDER BY is
-		// load-bearing: downstream RRF fusion uses slice position as rank,
-		// and without it Postgres returns rows in arbitrary order. ts_rank
-		// is the bm25 analogue; key ASC is the deterministic tie-break.
+		// pgFn is only ever one of two literals set inside this package,
+		// never caller input, so concatenating it into the SQL is safe.
+		// ORDER BY is load-bearing: downstream RRF fusion uses slice
+		// position as rank. ts_rank is the bm25 analogue; key ASC is the
+		// deterministic tie-break.
 		q = `
 SELECT ` + factCols + `
 FROM memories m
-WHERE m.body_tsv @@ to_tsquery('english', $2)
+WHERE m.body_tsv @@ ` + pgFn + `('english', $2)
   AND m.namespace_id = $1 AND m.action <> 'tombstone'
   AND m.created_at = (SELECT MAX(created_at) FROM memories
                       WHERE namespace_id = m.namespace_id AND key = m.key)
   AND (m.expiration_date IS NULL OR m.expiration_date > $4)
-ORDER BY ts_rank(m.body_tsv, to_tsquery('english', $2)) DESC, m.key ASC
+ORDER BY ts_rank(m.body_tsv, ` + pgFn + `('english', $2)) DESC, m.key ASC
 LIMIT $3`
-	default:
-		return nil, fmt.Errorf("memory: no FTS for driver %q", s.db.Driver)
 	}
-	rows, err := s.db.QueryContext(ctx, s.db.Rebind(q), nsID, query, limit, store.TimeToDB(s.now()))
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(q), nsID, match, limit, store.TimeToDB(s.now()))
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}
