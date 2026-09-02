@@ -192,3 +192,20 @@ func ConnectCopilotMCP(configPath string, o MCPEntryOpts, force bool) (bool, err
 	entry := withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL), "tools": []any{"*"}}, o)
 	return upsertServerEntry(configPath, "mcpServers", entry, isPunkMCPEntry, nil, force)
 }
+
+// ConnectAntigravityMCP registers punk in an Antigravity mcp_config.json.
+// Antigravity's remote entries use "serverUrl" (its docs state the legacy
+// "url" and "httpUrl" keys are not supported), so that is the only URL
+// key written.
+func ConnectAntigravityMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
+	ours := func(e any) bool {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return false
+		}
+		u, _ := m["serverUrl"].(string)
+		return strings.Contains(u, "/mcp")
+	}
+	entry := withHeaders(map[string]any{"serverUrl": mcpEndpoint(o.ServerURL)}, o)
+	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force)
+}

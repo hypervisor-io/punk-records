@@ -2771,8 +2771,13 @@ func cmdConnectPi(args []string) error {
 // gap.
 func cmdConnectAntigravity(args []string) error {
 	fs := flag.NewFlagSet("connect antigravity", flag.ContinueOnError)
-	project := fs.Bool("project", false, "write ./.agents/hooks.json instead of the global ~/.gemini/config/hooks.json")
+	project := fs.Bool("project", false, "write ./.agents/hooks.json and ./.agents/mcp_config.json instead of the global ~/.gemini/config equivalents")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2792,7 +2797,14 @@ func cmdConnectAntigravity(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+
+	var projNS string
+	if *project {
+		ns, nsrc := hookcli.ProjectNamespace(".")
+		projNS = ns
+		fmt.Printf("punk: namespace %s (from %s)\n", ns, nsrc)
+	}
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -2811,6 +2823,32 @@ func cmdConnectAntigravity(args []string) error {
 	}
 	fmt.Println("punk: note - PreToolUse (permission gating) and PostInvocation are deliberately not wired; punk only observes PostToolUse, PreInvocation (session start + once-per-conversation context injection), and Stop")
 	fmt.Println("punk: note - Antigravity's own hook payloads carry no prompt text, so there is no UserPromptSubmit capture for Antigravity")
+	if !*noMCP {
+		mcpPath := ""
+		if *project {
+			mcpPath = filepath.Join(".agents", "mcp_config.json")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home directory: %w", err)
+			}
+			mcpPath = filepath.Join(home, ".gemini", "config", "mcp_config.json")
+		}
+		mcpChanged, err := hookcli.ConnectAntigravityMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect antigravity mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }

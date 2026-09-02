@@ -183,3 +183,28 @@ func TestConnectCopilotMCP(t *testing.T) {
 		t.Fatal("idempotent")
 	}
 }
+
+func TestConnectAntigravityMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mcp_config.json")
+	o := MCPEntryOpts{ServerURL: "http://punk.lan:9090", APIKey: "prk_a", Namespace: "agent-x-abcdef"}
+	if changed, err := ConnectAntigravityMCP(p, o, false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	punk := readSettings(t, p)["mcpServers"].(map[string]any)["punk"].(map[string]any)
+	if punk["serverUrl"] != "http://punk.lan:9090/mcp?toolset=agent" {
+		t.Fatalf("entry = %v", punk)
+	}
+	if _, hasURL := punk["url"]; hasURL {
+		t.Fatal("antigravity rejects the legacy url key; only serverUrl may be written")
+	}
+	h := punk["headers"].(map[string]any)
+	if h["Authorization"] != "Bearer prk_a" || h["X-Punk-Namespace"] != "agent-x-abcdef" {
+		t.Fatalf("headers = %v", h)
+	}
+	if err := os.WriteFile(p, []byte(`{"mcpServers":{"punk":{"command":"other"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectAntigravityMCP(p, o, false); err == nil {
+		t.Fatal("foreign entry must be refused")
+	}
+}
