@@ -84,13 +84,29 @@ type whoamiOut struct {
 	Namespace string `json:"namespace"`
 	Source    string `json:"source"` // explicit | header | roots | default
 	Root      string `json:"root,omitempty"`
+	Agent     string `json:"agent"`
 }
 
 func registerWhoami(s *mcp.Server, r *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "whoami",
-		Description: "Return the namespace this session's tool calls use when namespace is omitted, how it was resolved (roots | default), and the workspace root it came from. Call once at session start."},
+		Description: "Return the namespace this session's tool calls use when namespace is omitted, how it was resolved (header | roots | default), the workspace root it came from, and the identity claims default to. Call once at session start."},
 		func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, whoamiOut, error) {
 			ns, src := r.resolve(ctx, req, "")
-			return nil, whoamiOut{Namespace: ns, Source: src, Root: r.rootPath(ctx, req.Session)}, nil
+			return nil, whoamiOut{Namespace: ns, Source: src, Root: r.rootPath(ctx, req.Session), Agent: r.identity(req)}, nil
 		})
+}
+
+// identity names the caller for claims and registration: the agent name
+// punk connect wrote into the MCP entry, else the API key subject the
+// auth middleware verified, else "mcp".
+func (r *nsResolver) identity(req *mcp.CallToolRequest) string {
+	if req != nil && req.Extra != nil && req.Extra.Header != nil {
+		if a := strings.TrimSpace(req.Extra.Header.Get("X-Punk-Agent")); a != "" {
+			return a
+		}
+		if s := strings.TrimSpace(req.Extra.Header.Get("X-Punk-Subject")); s != "" {
+			return s
+		}
+	}
+	return "mcp"
 }

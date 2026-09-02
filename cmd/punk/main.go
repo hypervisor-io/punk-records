@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"regexp"
 	"path/filepath"
 	"sort"
@@ -2343,6 +2344,7 @@ func cmdConnectClaudeCode(args []string) error {
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2407,7 +2409,7 @@ func cmdConnectClaudeCode(args []string) error {
 			mcpPath = filepath.Join(home, ".claude.json")
 		}
 		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
 		if err != nil {
 			return fmt.Errorf("connect claude-code mcp: %w", err)
 		}
@@ -2429,6 +2431,19 @@ func cmdConnectClaudeCode(args []string) error {
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
+}
+
+// defaultAgentName is user@host, the identity claims default to when
+// the operator does not name the machine's agent explicitly.
+func defaultAgentName() string {
+	u, host := "user", "host"
+	if cu, err := user.Current(); err == nil && cu.Username != "" {
+		u = cu.Username
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		host = h
+	}
+	return u + "@" + host
 }
 
 // changedWord renders a change flag for connect summaries.
@@ -2455,6 +2470,7 @@ func cmdConnectCursor(args []string) error {
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2535,7 +2551,7 @@ func cmdConnectCursor(args []string) error {
 	if !*noMCP {
 		mcpPath := filepath.Join(cursorDir, "mcp.json")
 		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
 		if err != nil {
 			return fmt.Errorf("connect cursor mcp: %w", err)
 		}
@@ -2605,6 +2621,7 @@ func cmdConnectOpenCode(args []string) error {
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2644,7 +2661,7 @@ func cmdConnectOpenCode(args []string) error {
 			mcpPath = filepath.Join("opencode.json")
 		}
 		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
 		if err != nil {
 			return fmt.Errorf("connect opencode mcp: %w", err)
 		}

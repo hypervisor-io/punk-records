@@ -98,6 +98,9 @@ func (k *Keys) Check(ctx context.Context, token string) (bool, string, error) {
 // moment a key exists, every request needs one.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A client-supplied subject is never trusted; the middleware
+		// replaces it with the one the key check verifies below.
+		r.Header.Del("X-Punk-Subject")
 		if s.keys == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -117,7 +120,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
 			return
 		}
-		valid, _, err := s.keys.Check(r.Context(), token)
+		valid, subject, err := s.keys.Check(r.Context(), token)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -127,6 +130,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 			return
 		}
+		r.Header.Set("X-Punk-Subject", subject)
 		next.ServeHTTP(w, r)
 	})
 }

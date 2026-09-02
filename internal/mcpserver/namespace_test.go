@@ -76,7 +76,7 @@ func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
 	client.AddRoots(&mcp.Root{URI: "file:///tmp/other"})
 	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint:   ts.URL,
-		HTTPClient: &http.Client{Transport: headerRT{h: http.Header{"X-Punk-Namespace": {"agent-billing-1a2b3c"}}}},
+		HTTPClient: &http.Client{Transport: headerRT{h: http.Header{"X-Punk-Namespace": {"agent-billing-1a2b3c"}, "X-Punk-Agent": {"alice@laptop"}}}},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +86,37 @@ func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := text(t, res); !strings.Contains(got, `"namespace":"agent-billing-1a2b3c"`) || !strings.Contains(got, `"source":"header"`) {
+	got := text(t, res)
+	if !strings.Contains(got, `"namespace":"agent-billing-1a2b3c"`) || !strings.Contains(got, `"source":"header"`) {
 		t.Fatalf("whoami = %s", got)
+	}
+	if !strings.Contains(got, `"agent":"alice@laptop"`) {
+		t.Fatalf("whoami agent = %s", got)
+	}
+}
+
+func TestClaimWorkDefaultsHolderToIdentity(t *testing.T) {
+	srv := newTestServerForHTTP(t)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL,
+		HTTPClient: &http.Client{Transport: headerRT{h: http.Header{"X-Punk-Agent": {"bob@ci"}}}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	ctx := context.Background()
+	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "claim_work",
+		Arguments: map[string]any{"namespace": "ns", "key": "/tasks/T1"}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_claims", Arguments: map[string]any{"namespace": "ns"}})
+	if err != nil || !strings.Contains(text(t, res), `"holder":"bob@ci"`) {
+		t.Fatalf("claims = %s %v", text(t, res), err)
 	}
 }
 

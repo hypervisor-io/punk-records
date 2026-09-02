@@ -793,7 +793,7 @@ type neighborsOut struct {
 
 type registerIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"brain region to join; optional, resolved from the client's workspace root (see whoami) when empty"`
-	Agent     string `json:"agent" jsonschema:"agent/consumer name"`
+	Agent     string `json:"agent,omitempty" jsonschema:"optional; defaults to this session's identity (see whoami)"`
 	Role      string `json:"role,omitempty" jsonschema:"this satellite's role in the region"`
 }
 
@@ -812,7 +812,7 @@ type membersOut struct {
 type claimIn struct {
 	Namespace  string `json:"namespace"`
 	Key        string `json:"key" jsonschema:"sub-key to claim, e.g. a file path"`
-	Holder     string `json:"holder" jsonschema:"claiming agent"`
+	Holder     string `json:"holder,omitempty" jsonschema:"optional; defaults to this session's identity (see whoami)"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 }
 
@@ -825,6 +825,9 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 		Description: "Claim a sub-key in a region so no other satellite works it (conflict-free work partitioning). Fails if a live claim already holds it."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in claimIn) (*mcp.CallToolResult, *region.Claim, error) {
 			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			if in.Holder == "" {
+				in.Holder = nsr.identity(req)
+			}
 			ttl := time.Duration(in.TTLSeconds) * time.Second
 			if ttl <= 0 {
 				ttl = 5 * time.Minute
@@ -843,6 +846,9 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 		Description: "Release a work claim so other satellites can take the sub-key."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in claimIn) (*mcp.CallToolResult, map[string]string, error) {
 			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			if in.Holder == "" {
+				in.Holder = nsr.identity(req)
+			}
 			if err := d.Region.ReleaseWork(ctx, ns, in.Key, in.Holder); err != nil {
 				return nil, nil, err
 			}
@@ -867,6 +873,9 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 		Description: "Register an agent/consumer as a satellite of a brain region (namespace). Satellites coordinate through the region's shared memory."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in registerIn) (*mcp.CallToolResult, map[string]string, error) {
 			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			if in.Agent == "" {
+				in.Agent = nsr.identity(req)
+			}
 			if err := d.Region.Register(ctx, ns, in.Agent, in.Role); err != nil {
 				return nil, nil, err
 			}
