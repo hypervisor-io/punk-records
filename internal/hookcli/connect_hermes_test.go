@@ -359,3 +359,33 @@ func TestConnectHermesPreservesFileMode(t *testing.T) {
 		t.Fatalf("mode = %v, want the original 0600", info.Mode().Perm())
 	}
 }
+
+func TestConnectHermesMCP(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("model: sonnet\nmcp_servers:\n  github:\n    command: gh-mcp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "prk_h"}
+	if changed, err := ConnectHermesMCP(p, o, false); err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	raw, _ := os.ReadFile(p)
+	var m map[string]any
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["model"] != "sonnet" {
+		t.Fatal("unrelated keys must survive")
+	}
+	servers := m["mcp_servers"].(map[string]any)
+	punk := servers["punk"].(map[string]any)
+	if punk["url"] != "https://punk.example.com/mcp?toolset=agent" || servers["github"] == nil {
+		t.Fatalf("servers = %v", servers)
+	}
+	if punk["headers"].(map[string]any)["Authorization"] != "Bearer prk_h" {
+		t.Fatalf("headers = %v", punk["headers"])
+	}
+	if changed, _ := ConnectHermesMCP(p, o, false); changed {
+		t.Fatal("idempotent")
+	}
+}

@@ -3007,6 +3007,11 @@ func cmdConnectHermes(args []string) error {
 	fs := flag.NewFlagSet("connect hermes", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Hermes config.yaml to merge into (default ~/.hermes/config.yaml)")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
+	force := fs.Bool("force", false, "replace an mcp_servers.punk entry punk did not write")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3024,7 +3029,7 @@ func cmdConnectHermes(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
@@ -3046,6 +3051,22 @@ func cmdConnectHermes(args []string) error {
 	// command is not punk's call to make.
 	fmt.Println("punk: note - Hermes prompts for consent the first time a shell hook runs, unless hooks_auto_accept is true in the same config")
 	fmt.Println("punk: note - restart Hermes (hooks are registered at CLI and gateway startup) to pick up these entries")
+	if !*noMCP {
+		mcpChanged, err := hookcli.ConnectHermesMCP(path,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+		if err != nil {
+			return fmt.Errorf("connect hermes mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", path)
+		}
+		fmt.Printf("punk: MCP server entry in %s (%s)\n", path, changedWord(mcpChanged))
+	}
+	if *verify {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
 }
