@@ -178,7 +178,16 @@ func quotePunkPath(punkPath string) string {
 // punkHookCommand builds the shell command punk's managed hook group
 // invokes.
 func punkHookCommand(punkPath, serverURL, ns string) string {
+	return punkHookCommandFrom(punkPath, serverURL, ns, "")
+}
+
+// punkHookCommandFrom is punkHookCommand with an explicit --from for
+// agents whose payload needs a named entry point (see RunFrom).
+func punkHookCommandFrom(punkPath, serverURL, ns, from string) string {
 	cmd := fmt.Sprintf("%s hook --url %s", quotePunkPath(punkPath), serverURL)
+	if from != "" {
+		cmd += " --from " + from
+	}
 	if ns != "" {
 		cmd += " --ns " + ns
 	}

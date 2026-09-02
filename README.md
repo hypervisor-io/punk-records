@@ -287,9 +287,12 @@ Inside a session the agent can omit `namespace` on every tool: it resolves from 
 | antigravity | hooks.json | MCP | `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json` |
 | hermes | config.yaml hooks | MCP | `~/.hermes/config.yaml` `mcp_servers.punk` |
 | openclaw | plugin | MCP | `config.json` `mcp.servers.punk` |
+| codex | hooks.json (`[features] hooks = true`) | MCP | `$CODEX_HOME/config.toml` `[mcp_servers.punk]` inside a punk-managed block |
 | pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
 
 Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--project`, which also derives the namespace from the git remote.
+
+Codex asks once to trust the punk hook; with API keys enabled, export `PUNK_API_KEY` in the shell that starts Codex because Codex reads bearer tokens from the environment, not from a file.
 
 | Agent | Wire up | Capture | Context injection |
 |---|---|---|---|

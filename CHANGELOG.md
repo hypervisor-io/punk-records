@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.0 (2026-09-03)
+
+### Fixed
+- `punk connect opencode` wrote the MCP entry to `~/.config/opencode.json`; it now goes to `~/.config/opencode/opencode.json` where OpenCode reads it.
+- `punk connect verify` advertises the working directory as a root, so the namespace it reports is the one a session gets.
+- Codex `config.toml` files with CRLF line endings keep them.
+
+### Added
+- `punk connect codex`: capture hooks (`hooks.json`, passthrough payload) and the punk MCP entry in `config.toml`; `--project` derives the namespace from the git remote.
+
 ## v1.3.1 (2026-09-03)
 
 ### Fixed
