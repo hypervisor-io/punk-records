@@ -98,7 +98,20 @@ type SeedCodeMapStats struct {
 // The body is plain prose rather than JSON on purpose: it is retrieved by
 // full-text and vector search and then read by a model, so it has to
 // tokenize like documentation, not like a serialized struct.
+// SeedCodeMapOpts carries optional seed metadata.
+type SeedCodeMapOpts struct {
+	// Revision is the repository revision the map was produced from
+	// (git HEAD). Stored as the "revision" attribute so a later search
+	// can flag a code-map fact as possibly stale when the caller's
+	// revision differs.
+	Revision string
+}
+
 func (s *Store) SeedCodeMap(ctx context.Context, ns string, r io.Reader) (SeedCodeMapStats, error) {
+	return s.SeedCodeMapWith(ctx, ns, r, SeedCodeMapOpts{})
+}
+
+func (s *Store) SeedCodeMapWith(ctx context.Context, ns string, r io.Reader, o SeedCodeMapOpts) (SeedCodeMapStats, error) {
 	var stats SeedCodeMapStats
 
 	var m RinneganMap
@@ -127,12 +140,14 @@ func (s *Store) SeedCodeMap(ctx context.Context, ns string, r io.Reader) (SeedCo
 		return stats, err
 	}
 	type priorFact struct {
-		body   string
-		writer string
+		body     string
+		writer   string
+		revision string
 	}
 	prior := make(map[string]priorFact, len(existing))
 	for _, f := range existing {
-		prior[f.Key] = priorFact{body: f.Body, writer: f.Writer}
+		rev, _ := f.Attributes["revision"].(string)
+		prior[f.Key] = priorFact{body: f.Body, writer: f.Writer, revision: rev}
 	}
 
 	seen := map[string]bool{}
@@ -147,9 +162,17 @@ func (s *Store) SeedCodeMap(ctx context.Context, ns string, r io.Reader) (SeedCo
 		seen[key] = true
 
 		body := renderDomain(d, dependsOn[d.Name], dependedBy[d.Name])
-		if p, ok := prior[key]; ok && p.body == body {
+		if p, ok := prior[key]; ok && p.body == body && p.revision == o.Revision {
 			stats.Unchanged++
 			continue
+		}
+		attrs := map[string]any{
+			"domain":      d.Name,
+			"files":       len(d.Files),
+			"entrypoints": len(d.Entrypoints),
+		}
+		if o.Revision != "" {
+			attrs["revision"] = o.Revision
 		}
 		if _, err := s.Write(ctx, WriteInput{
 			Namespace: ns,
@@ -163,11 +186,7 @@ func (s *Store) SeedCodeMap(ctx context.Context, ns string, r io.Reader) (SeedCo
 			// curated mental model: this is derived, and derived data
 			// should never win against something a human wrote.
 			Importance: 0.6,
-			Attributes: map[string]any{
-				"domain":      d.Name,
-				"files":       len(d.Files),
-				"entrypoints": len(d.Entrypoints),
-			},
+			Attributes: attrs,
 		}); err != nil {
 			return stats, err
 		}

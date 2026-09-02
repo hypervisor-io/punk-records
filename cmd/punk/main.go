@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"regexp"
 	"path/filepath"
@@ -1115,6 +1116,7 @@ func cmdSeed(args []string) error {
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
 	ns := fs.String("ns", "", "namespace to seed (default: the agent namespace for --dir)")
 	dir := fs.String("dir", ".", "repository the map describes; picks the default namespace")
+	revision := fs.String("revision", "", "repository revision the map describes (default: git rev-parse HEAD in --dir)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1138,12 +1140,26 @@ func cmdSeed(args []string) error {
 	}
 	defer closeDB()
 
-	stats, err := mem.SeedCodeMap(context.Background(), namespace, os.Stdin)
+	rev := *revision
+	if rev == "" {
+		out, err := exec.Command("git", "-C", *dir, "rev-parse", "HEAD").Output()
+		if err == nil {
+			rev = strings.TrimSpace(string(out))
+		}
+	}
+
+	stats, err := mem.SeedCodeMapWith(context.Background(), namespace, os.Stdin, memory.SeedCodeMapOpts{Revision: rev})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("seeded %s: %d written, %d unchanged, %d removed\n",
-		namespace, stats.Written, stats.Unchanged, stats.Removed)
+	summary := ""
+	if len(rev) >= 7 {
+		summary = " at " + rev[:7]
+	} else if rev != "" {
+		summary = " at " + rev
+	}
+	fmt.Printf("seeded %s%s: %d written, %d unchanged, %d removed\n",
+		namespace, summary, stats.Written, stats.Unchanged, stats.Removed)
 	return nil
 }
 
