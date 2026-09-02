@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 
@@ -17,14 +18,28 @@ type VerifyReport struct {
 	Instructions bool
 }
 
+// bearerTransport sets Authorization: Bearer <key> on every request.
+type bearerTransport struct{ key string }
+
+func (t bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+t.key)
+	return http.DefaultTransport.RoundTrip(clone)
+}
+
 // VerifyMCP connects to endpoint as an MCP client, lists tools and calls
 // whoami. An agent whose first punk call fails tends to abandon the tool
 // for the rest of the session, so connect ends by proving the round trip.
-func VerifyMCP(ctx context.Context, endpoint string) (VerifyReport, error) {
+// When apiKey is non-empty every request carries it as a bearer token.
+func VerifyMCP(ctx context.Context, endpoint, apiKey string) (VerifyReport, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "punk-connect-verify", Version: "1"}, nil)
-	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint}, nil)
+	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
+	if apiKey != "" {
+		transport.HTTPClient = &http.Client{Transport: bearerTransport{key: apiKey}}
+	}
+	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return VerifyReport{}, fmt.Errorf("connect %s: %w", endpoint, err)
 	}

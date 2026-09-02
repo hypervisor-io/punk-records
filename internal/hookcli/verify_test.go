@@ -22,14 +22,14 @@ func TestVerifyMCPAgainstInMemoryServer(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	rep, err := VerifyMCP(context.Background(), ts.URL)
+	rep, err := VerifyMCP(context.Background(), ts.URL, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rep.Namespace != "agent-test" || !rep.Instructions || len(rep.Tools) != 1 || rep.Tools[0] != "whoami" {
 		t.Fatalf("report = %+v", rep)
 	}
-	if _, err := VerifyMCP(context.Background(), "http://127.0.0.1:1"); err == nil {
+	if _, err := VerifyMCP(context.Background(), "http://127.0.0.1:1", ""); err == nil {
 		t.Fatal("unreachable endpoint must error")
 	}
 }

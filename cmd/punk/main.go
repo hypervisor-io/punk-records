@@ -2310,14 +2310,14 @@ func cmdConnectVerify(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
-	return printVerify(context.Background(), serverURL)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	return printVerify(context.Background(), serverURL, apiKey)
 }
 
 // printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
 // prints a one-line summary.
-func printVerify(ctx context.Context, serverURL string) error {
-	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent")
+func printVerify(ctx context.Context, serverURL, apiKey string) error {
+	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent", apiKey)
 	if err != nil {
 		return err
 	}
@@ -2336,6 +2336,7 @@ func cmdConnectClaudeCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2357,7 +2358,7 @@ func cmdConnectClaudeCode(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(settingsPath)
 	existedBefore := statErr == nil
@@ -2379,9 +2380,13 @@ func cmdConnectClaudeCode(args []string) error {
 		if !*project {
 			mcpPath = filepath.Join(home, ".claude.json")
 		}
-		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath, serverURL, *force)
+		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
 		if err != nil {
 			return fmt.Errorf("connect claude-code mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
 		}
 		permChanged, err := hookcli.EnsureClaudePermission(settingsPath, hookcli.ClaudeMCPRule)
 		if err != nil {
@@ -2392,7 +2397,7 @@ func cmdConnectClaudeCode(args []string) error {
 		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
 			return err
 		}
 	}
@@ -2423,6 +2428,7 @@ func cmdConnectCursor(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2443,7 +2449,7 @@ func cmdConnectCursor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	_, statErr := os.Stat(hooksPath)
 	hooksExistedBefore := statErr == nil
@@ -2487,21 +2493,25 @@ func cmdConnectCursor(args []string) error {
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	if !*noMCP {
 		mcpPath := filepath.Join(cursorDir, "mcp.json")
-		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath, serverURL, *force)
+		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
 		if err != nil {
 			return fmt.Errorf("connect cursor mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
 		if *verify {
-			if err := printVerify(context.Background(), serverURL); err != nil {
+			if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
 			return err
 		}
 	}
@@ -2553,6 +2563,7 @@ func cmdConnectOpenCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2575,7 +2586,7 @@ func cmdConnectOpenCode(args []string) error {
 		pluginPath = filepath.Join(base, "opencode", "plugins", "punk-memory.js")
 	}
 
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 
 	changed, err := hookcli.ConnectOpenCode(pluginPath, serverURL)
 	if err != nil {
@@ -2591,15 +2602,19 @@ func cmdConnectOpenCode(args []string) error {
 		if *project {
 			mcpPath = filepath.Join("opencode.json")
 		}
-		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath, serverURL, *force)
+		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath,
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv}, *force)
 		if err != nil {
 			return fmt.Errorf("connect opencode mcp: %w", err)
+		}
+		if *apiKeyEnv == "" && apiKey != "" {
+			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
 			return err
 		}
 	}
