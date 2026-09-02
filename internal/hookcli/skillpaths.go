@@ -26,7 +26,10 @@ func SkillTargets(agent string, project bool, home string, env func(string) stri
 	}
 	agents := filepath.Join(home, ".agents", "skills")
 	projAgents := filepath.Join(".agents", "skills")
-	one := func(p string, o SkillOpts) []SkillTarget { o.Agent = agent; return []SkillTarget{{Path: skillFile(p), Opts: o}} }
+	one := func(p string, o SkillOpts) []SkillTarget {
+		o.Agent = agent
+		return []SkillTarget{{Path: skillFile(p), Opts: o}}
+	}
 	switch agent {
 	case "claude-code":
 		o := SkillOpts{ToolPrefix: "mcp__punk__"}
