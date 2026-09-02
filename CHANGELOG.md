@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.1 (2026-09-03)
+
+### Fixed
+- MCP server crashed on any method called without params (for example `tools/list` from a real client): the trace middleware dereferenced a typed-nil params pointer. Regression test added over HTTP.
+
 ## v1.3.0 (2026-09-03)
 
 ### Added
