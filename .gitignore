@@ -1,4 +1,5 @@
 bin/
+/punk
 *.db
 
 # Internal working material: planning, research, gap analysis, evaluation
