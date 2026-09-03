@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.1 (2026-09-04)
+
+### Fixed
+- MCP read tools (`recall`, `recall_as_of`, `search`) cap their payload at 16000 tokens when `max_tokens` is unset and report `truncated`, `total` and a `note` when the cap cuts the result; pass `max_tokens: -1` for the old unbounded behaviour. An uncapped recall of a busy prefix (254 task bodies, 1 MB) exceeded OpenCode's 50 KB tool-output limit and reached the model as an empty truncation notice.
+- `list_keys` no longer advertises a `max_tokens` argument it ignored.
+- `punk-memory` skill: poll `/tasks` with `list_keys` and recall single keys instead of recalling the whole prefix.
+
 ## v1.5.0 (2026-09-03)
 
 ### Added

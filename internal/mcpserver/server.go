@@ -142,11 +142,59 @@ type documentOut struct {
 type recallIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
 	Prefix    string `json:"prefix,omitempty" jsonschema:"key prefix filter"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
 }
 
+type listKeysIn struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
+	Prefix    string `json:"prefix,omitempty" jsonschema:"key prefix filter"`
+}
+
+// recallOut carries the budgeted facts plus, when the budget cut the
+// result, how many facts matched and what to do about it.
 type recallOut struct {
-	Facts []memory.Fact `json:"facts"`
+	Facts     []memory.Fact `json:"facts"`
+	Truncated bool          `json:"truncated,omitempty"`
+	Total     int           `json:"total,omitempty"`
+	Note      string        `json:"note,omitempty"`
+}
+
+// defaultMaxTokens caps a read tool's payload when the caller passes no
+// max_tokens. Agent harnesses drop or spill tool results above a few
+// tens of KB (OpenCode keeps nothing past 50 KB), so an uncapped recall
+// of a busy prefix reaches the model as an empty truncation notice. A
+// caller that really wants everything passes max_tokens: -1.
+const defaultMaxTokens = 16000
+
+// effectiveMaxTokens maps the wire value to the budget TokenBudget
+// expects: 0 (unset) becomes the default, negative means no cap.
+func effectiveMaxTokens(maxTokens int) int {
+	switch {
+	case maxTokens == 0:
+		return defaultMaxTokens
+	case maxTokens < 0:
+		return 0
+	}
+	return maxTokens
+}
+
+// truncationNote tells the model how to get the rest without re-reading
+// what it already has.
+func truncationNote(got, total int) string {
+	return fmt.Sprintf("%d of %d facts returned within the token budget; narrow the prefix, raise max_tokens (-1 for no cap), or use list_keys and recall single keys", got, total)
+}
+
+// budgetRecall applies the effective budget to facts and fills the
+// truncation fields when it cut anything.
+func budgetRecall(facts []memory.Fact, maxTokens int) recallOut {
+	kept := memory.TokenBudget(facts, effectiveMaxTokens(maxTokens))
+	out := recallOut{Facts: kept}
+	if len(kept) < len(facts) {
+		out.Truncated = true
+		out.Total = len(facts)
+		out.Note = truncationNote(len(kept), len(facts))
+	}
+	return out
 }
 
 type listKeysOut struct {
@@ -333,12 +381,12 @@ func New(d Deps) *mcp.Server {
 			if err != nil {
 				return nil, recallOut{}, err
 			}
-			return nil, recallOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}, nil
+			return nil, budgetRecall(facts, in.MaxTokens), nil
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "list_keys",
-		Description: "List live memory keys under a prefix. Discover keys, never invent them."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in recallIn) (*mcp.CallToolResult, listKeysOut, error) {
+		Description: "List live memory keys under a prefix. Discover keys, never invent them. Cheap: keys only, no bodies, no budget; use it to enumerate a busy prefix such as /tasks before recalling single keys."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in listKeysIn) (*mcp.CallToolResult, listKeysOut, error) {
 			ns, _ := nsr.resolve(ctx, req, in.Namespace)
 			keys, err := d.Mem.ListKeys(ctx, ns, in.Prefix)
 			if err != nil {
@@ -396,7 +444,7 @@ type searchIn struct {
 	Temporal     bool     `json:"temporal,omitempty" jsonschema:"parse a time window from the query text (e.g. 'errors last month') and search within it"`
 	Expand       bool     `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
 	Limit        int      `json:"limit,omitempty"`
-	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
+	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
 	Format       string   `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
 	Anchors      []string `json:"anchors,omitempty" jsonschema:"exact identifiers, error strings, flags or file names; each is an extra phrase-match retrieval route fused by rank, not a filter (hybrid+scored only)"`
 	RepoRevision string   `json:"repo_revision,omitempty" jsonschema:"current git revision of the workspace; code-map hits seeded from another revision are flagged stale"`
@@ -406,16 +454,30 @@ type searchIn struct {
 // facts plus the score breakdown that explains why each one ranked where it did.
 // With Format=compact, Hits carries the token-lean projection instead.
 type searchOut struct {
-	Facts   []memory.Fact       `json:"facts,omitempty"`
-	Results []memory.ScoredFact `json:"results,omitempty"`
-	Hits    []memory.CompactHit `json:"hits,omitempty"`
+	Facts     []memory.Fact       `json:"facts,omitempty"`
+	Results   []memory.ScoredFact `json:"results,omitempty"`
+	Hits      []memory.CompactHit `json:"hits,omitempty"`
+	Truncated bool                `json:"truncated,omitempty"`
+	Total     int                 `json:"total,omitempty"`
+	Note      string              `json:"note,omitempty"`
+}
+
+// markTruncated fills the truncation fields when the budget kept fewer
+// than total entries.
+func (o searchOut) markTruncated(kept, total int) searchOut {
+	if kept < total {
+		o.Truncated = true
+		o.Total = total
+		o.Note = truncationNote(kept, total)
+	}
+	return o
 }
 
 type asOfIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
 	Prefix    string `json:"prefix,omitempty"`
 	AsOf      string `json:"as_of" jsonschema:"RFC3339 instant to read the region as of"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens"`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
 }
 
 type forgetIn struct {
@@ -428,6 +490,7 @@ type forgetIn struct {
 // compact projection. Compaction runs before budgeting so the budget is
 // spent on clipped bodies, which is the point of asking for compact.
 func finishSearch(in searchIn, facts []memory.Fact, scored []memory.ScoredFact) searchOut {
+	budget := effectiveMaxTokens(in.MaxTokens)
 	if in.Format == "compact" {
 		var hits []memory.CompactHit
 		if scored != nil {
@@ -435,12 +498,15 @@ func finishSearch(in searchIn, facts []memory.Fact, scored []memory.ScoredFact) 
 		} else {
 			hits = memory.CompactFacts(facts, 0)
 		}
-		return searchOut{Hits: memory.TokenBudgetCompact(hits, in.MaxTokens)}
+		kept := memory.TokenBudgetCompact(hits, budget)
+		return searchOut{Hits: kept}.markTruncated(len(kept), len(hits))
 	}
 	if scored != nil {
-		return searchOut{Results: memory.TokenBudgetScored(scored, in.MaxTokens)}
+		kept := memory.TokenBudgetScored(scored, budget)
+		return searchOut{Results: kept}.markTruncated(len(kept), len(scored))
 	}
-	return searchOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}
+	kept := memory.TokenBudget(facts, budget)
+	return searchOut{Facts: kept}.markTruncated(len(kept), len(facts))
 }
 
 func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
@@ -560,7 +626,7 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, recallOut{}, err
 			}
-			return nil, recallOut{Facts: memory.TokenBudget(facts, in.MaxTokens)}, nil
+			return nil, budgetRecall(facts, in.MaxTokens), nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "forget",
 		Description: "Tombstone a key (closes its validity window); history is preserved."},

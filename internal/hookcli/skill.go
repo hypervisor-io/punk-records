@@ -88,7 +88,7 @@ The pi tools cover reading and writing. Coordination tools are available through
 {{end}}
 - Tasks are facts. A planner writes one fact per task at ` + "`/tasks/<id>`" + ` (title, files, depends). A worker claims ` + "`/tasks/<id>`" + `, does the work, then writes ` + "`/tasks/<id>/status`" + ` with ` + "`done: <commit> <summary>; tests: <command>`" + ` or ` + "`blocked: <reason>`" + `. Absent status means pending.
 - Blocked: write the question to ` + "`/questions/<id>`" + ` and move on; check ` + "`/answers/<id>`" + ` before retrying.
-- Polling: recall the ` + "`/tasks`" + ` prefix. Clients that support MCP resources can subscribe to ` + "`punk://memory/<namespace>/tasks`" + ` and get a notification on every change instead of polling. From a shell, ` + "`GET /v1/namespaces/<ns>/events?prefix=/tasks`" + ` is a server-sent event stream.
+- Polling: {{if .Opts.Pi}}recall the ` + "`/tasks`" + ` prefix with a max_tokens that fits your context{{else}}{{tool .Opts "list_keys"}} with prefix ` + "`/tasks`" + `, then recall only the ids you need (` + "`/tasks/<id>`" + `, ` + "`/tasks/<id>/status`" + `). Do not recall the whole ` + "`/tasks`" + ` prefix: every task body comes back and the read tool budget (16000 tokens by default) cuts the list short{{end}}. Clients that support MCP resources can subscribe to ` + "`punk://memory/<namespace>/tasks`" + ` and get a notification on every change instead of polling. From a shell, ` + "`GET /v1/namespaces/<ns>/events?prefix=/tasks`" + ` is a server-sent event stream.
 - Completion: the planner reads statuses; the last worker writes ` + "`/plan/status`" + `.
 - Domain investigations (database, SRE, memory-ops) are a different system: ` + "`submit_task`" + ` and ` + "`get_task`" + ` in the full toolset route an incident to a domain agent. Do not use them for coding work.
 
@@ -113,7 +113,7 @@ The pi tools cover reading and writing. Coordination tools are available through
 
 // routingBody is shared with the MCP server's initialize instructions so
 // the two never drift. Plain prose, no markdown headers.
-const routingBody = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked.
+const routingBody = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked. Read tools return at most about 16000 tokens unless max_tokens is set (-1 for no cap); a truncated: true result names how many facts matched. Enumerate a big prefix with list_keys instead of recalling it.
 - search: you know words or identifiers. Set hybrid and scored for ranked fusion. Put exact identifiers, error strings, flags or file names in anchors; they are extra retrieval routes, not filters. Pass format: compact unless you need attributes or timestamps.
 - unified_search: wording unknown, or the answer spans facts and relations (architecture, causality, history, "why" questions). Prefer it first; pass format: compact.
 - triplet_search and neighbors: follow relations from a known key.
@@ -129,7 +129,7 @@ func RoutingSection() string { return routingBody }
 // routingBodyPi is the reading and writing guidance for pi, whose four
 // extension tools call the HTTP API: no relation tools, no batch write,
 // no feedback.
-const routingBodyPi = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked.
+const routingBodyPi = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked. Pass max_tokens on a busy prefix; the HTTP API has no default cap.
 - search: ranked hybrid search, compact hits (key, clipped body, score, flags). Put exact identifiers, error strings, flags or file names in anchors; they are extra retrieval routes, not filters.
 - Flags on hits: stale means newer raw facts exist since this synthesis; invalidated means a later fact superseded it (demoted, not hidden); model means a curated mental model.
 - A compact hit is already-read evidence. recall its key only when the clipped body is insufficient.
