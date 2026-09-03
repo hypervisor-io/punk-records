@@ -45,7 +45,7 @@ func TestReadToolsDefaultBudget(t *testing.T) {
 	}
 
 	call(map[string]any{"namespace": "ns", "prefix": "/tasks"})
-	if len(out.Facts) != 4 || !out.Truncated || out.Total != 8 || !strings.Contains(out.Note, "4 of 8") {
+	if len(out.Facts) != 2 || !out.Truncated || out.Total != 8 || !strings.Contains(out.Note, "2 of 8") {
 		t.Fatalf("default budget: facts=%d truncated=%v total=%d note=%q", len(out.Facts), out.Truncated, out.Total, out.Note)
 	}
 
@@ -101,7 +101,7 @@ func TestReadToolsDefaultBudget(t *testing.T) {
 	if err := json.Unmarshal([]byte(text(t, res)), &sout); err != nil {
 		t.Fatal(err)
 	}
-	if len(sout.Results) > 0 && (len(sout.Results) > 4 || (sout.Total > 4 && !sout.Truncated)) {
+	if len(sout.Results) > 0 && (len(sout.Results) > 2 || (sout.Total > 2 && !sout.Truncated)) {
 		t.Fatalf("search budget: results=%d truncated=%v total=%d", len(sout.Results), sout.Truncated, sout.Total)
 	}
 }

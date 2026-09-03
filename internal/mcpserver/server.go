@@ -142,7 +142,7 @@ type documentOut struct {
 type recallIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
 	Prefix    string `json:"prefix,omitempty" jsonschema:"key prefix filter"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 8000; -1 for no cap)"`
 }
 
 type listKeysIn struct {
@@ -161,10 +161,11 @@ type recallOut struct {
 
 // defaultMaxTokens caps a read tool's payload when the caller passes no
 // max_tokens. Agent harnesses drop or spill tool results above a few
-// tens of KB (OpenCode keeps nothing past 50 KB), so an uncapped recall
+// tens of KB (OpenCode keeps nothing past 50 KB; 8000 body tokens plus
+// JSON overhead stays under that), so an uncapped recall
 // of a busy prefix reaches the model as an empty truncation notice. A
 // caller that really wants everything passes max_tokens: -1.
-const defaultMaxTokens = 16000
+const defaultMaxTokens = 8000
 
 // effectiveMaxTokens maps the wire value to the budget TokenBudget
 // expects: 0 (unset) becomes the default, negative means no cap.
@@ -444,7 +445,7 @@ type searchIn struct {
 	Temporal     bool     `json:"temporal,omitempty" jsonschema:"parse a time window from the query text (e.g. 'errors last month') and search within it"`
 	Expand       bool     `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
 	Limit        int      `json:"limit,omitempty"`
-	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
+	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 8000; -1 for no cap)"`
 	Format       string   `json:"format,omitempty" jsonschema:"'' (full facts) or 'compact': key, clipped body, score, flags only; use compact unless attributes or timestamps are needed"`
 	Anchors      []string `json:"anchors,omitempty" jsonschema:"exact identifiers, error strings, flags or file names; each is an extra phrase-match retrieval route fused by rank, not a filter (hybrid+scored only)"`
 	RepoRevision string   `json:"repo_revision,omitempty" jsonschema:"current git revision of the workspace; code-map hits seeded from another revision are flagged stale"`
@@ -477,7 +478,7 @@ type asOfIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
 	Prefix    string `json:"prefix,omitempty"`
 	AsOf      string `json:"as_of" jsonschema:"RFC3339 instant to read the region as of"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 16000; -1 for no cap)"`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 8000; -1 for no cap)"`
 }
 
 type forgetIn struct {

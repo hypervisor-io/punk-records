@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.2 (2026-09-04)
+
+### Fixed
+- Default read-tool budget lowered from 16000 to 8000 tokens: 16000 body tokens plus JSON overhead was 76 KB, still past OpenCode's 50 KB tool-output limit.
+
 ## v1.5.1 (2026-09-04)
 
 ### Fixed
