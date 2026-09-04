@@ -5,49 +5,58 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Punk Records - brain</title>
 <style>
-:root{--bg:#05060f;--panel:rgba(14,18,38,.82);--line:#1b2142;--amber:#ffb64d;--cyan:#3fe0ff;
---magenta:#ff4fd8;--green:#57ffa0;--ink:#e8ecff;--dim:#8b93b8;
---mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+:root{--ink:#050507;--panel:#0b0c11;--line:#1a1c26;--glass:#ff2d55;--rim:#ffb3c1;--fire:#ffc470;--ember:#ffb070;--text:#e9e6ee;--dim:#6f7284;
+--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box;margin:0}
-html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,sans-serif}
+html,body{height:100%;background:var(--ink);color:var(--text);font:13px/1.45 var(--sans);overflow:hidden}
 #scene{position:fixed;inset:0;width:100%;height:100%;display:block}
-.hud{position:fixed;pointer-events:none}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;backdrop-filter:blur(6px);pointer-events:auto}
-#top{top:16px;left:16px;padding:12px 16px;min-width:260px}
-#top h1{font-size:14px;letter-spacing:.22em}
-#top h1 b{color:var(--amber)}
-#top .kv{display:flex;gap:14px;margin-top:8px;font:11px var(--mono);color:var(--dim)}
-#top .kv b{color:var(--cyan);font-weight:500}
-#log{top:16px;right:16px;bottom:16px;width:380px;display:flex;flex-direction:column}
-#log h2,#legend h2{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);padding:10px 14px;border-bottom:1px solid var(--line)}
-#log ol{list-style:none;overflow:auto;padding:6px 0;flex:1;font:11.5px/1.4 var(--mono)}
-#log li{padding:4px 14px;border-bottom:1px dashed var(--line);display:grid;grid-template-columns:52px 1fr;gap:8px;animation:in .35s ease-out}
+#labels{position:fixed;inset:0;pointer-events:none}
+.label{position:absolute;font:11px var(--mono);color:var(--rim);white-space:nowrap;transform:translate(0,-50%);padding-left:28px}
+.label::before{content:"";position:absolute;left:0;top:50%;width:24px;height:1px;background:var(--rim);opacity:.6}
+.wordmark{position:fixed;left:28px;top:24px;font:600 13px/1 var(--sans);letter-spacing:.02em;color:var(--text)}
+.wordmark small{display:block;margin-top:6px;font:11px/1 var(--mono);color:var(--dim)}
+.wordmark small a{color:var(--dim)}
+.wordmark b{color:var(--glass);font-weight:600}
+.panel{background:linear-gradient(180deg,rgba(11,12,17,.92),rgba(11,12,17,.78));border:1px solid var(--line);border-radius:8px;backdrop-filter:blur(8px)}
+#log{position:fixed;right:24px;top:24px;bottom:24px;width:360px;display:flex;flex-direction:column}
+#log header,#legend header{padding:12px 16px 10px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:baseline}
+#log header span,#legend header span{font:12px var(--sans);color:var(--text)}
+#log header em{font:11px var(--mono);color:var(--dim);font-style:normal}
+#log header em.warn{color:var(--ember)}
+#log ol,#legend ul{list-style:none;padding:6px 0;overflow-y:auto;overflow-x:hidden;flex:1;scrollbar-width:thin;scrollbar-color:#2a2d3a transparent}
+#log ol::-webkit-scrollbar,#legend ul::-webkit-scrollbar{width:6px}
+#log ol::-webkit-scrollbar-track,#legend ul::-webkit-scrollbar-track{background:transparent}
+#log ol::-webkit-scrollbar-thumb,#legend ul::-webkit-scrollbar-thumb{background:#2a2d3a;border-radius:3px}
+#log li{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:10px;padding:7px 16px;font:11.5px/1.4 var(--mono);border-left:2px solid transparent}
+#log li.hot{border-left-color:var(--fire)}
+#log li.empty{grid-template-columns:1fr;color:var(--dim);font-family:var(--sans)}
 #log li .t{color:var(--dim)}
-#log li .k{color:var(--dim);font-size:10px}
-.k-memory{color:var(--cyan)}.k-claim{color:var(--amber)}.k-task{color:var(--green)}.k-defense,.k-cost_alert{color:var(--magenta)}.k-task_status{color:var(--green)}
-@keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
-#legend{left:16px;bottom:16px;width:420px;max-height:46vh;display:flex;flex-direction:column}
-#legend ul{list-style:none;overflow:auto;padding:4px 0}
-#legend li{display:grid;grid-template-columns:10px 1fr 90px 70px;gap:10px;align-items:center;padding:5px 14px;font:11.5px var(--mono);cursor:default}
-#legend li:hover{background:rgba(63,224,255,.08)}
-#legend .sw{width:10px;height:10px;border-radius:50%;box-shadow:0 0 8px currentColor}
-#legend .bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
-#legend .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--amber),var(--magenta))}
-#legend .meta{color:var(--dim);font-size:10.5px;text-align:right}
-#status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);font:11px var(--mono);color:var(--dim)}
-#status.err{color:var(--magenta)}
-@media (max-width:900px){#log{display:none}#legend{width:calc(100% - 32px)}}
+#log li .who{color:var(--text)}
+#log li .what{color:var(--dim)}
+#log li .count{color:var(--ember)}
+#log li .ns{color:var(--fire);font-size:10.5px;padding:1px 6px;border:1px solid rgba(255,196,112,.35);border-radius:4px;align-self:start;white-space:nowrap}
+#legend{position:fixed;left:24px;bottom:24px;width:320px;max-height:42vh;display:flex;flex-direction:column}
+#legend li{display:grid;grid-template-columns:10px minmax(0,1fr) 80px auto;gap:10px;align-items:center;padding:6px 16px;font:11.5px var(--mono);outline:none}
+#legend li:hover,#legend li:focus-visible{background:rgba(255,45,85,.07)}
+#legend li .sw{width:10px;height:10px;border-radius:50%;background:var(--fire);opacity:.15;box-shadow:0 0 8px var(--fire)}
+#legend li .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+#legend li .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+#legend li .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--glass),var(--fire))}
+#legend li .meta{color:var(--dim);font-size:10.5px;white-space:nowrap}
+.tip{position:fixed;width:260px;padding:10px 12px;font:11.5px/1.5 var(--mono);color:var(--dim);pointer-events:none;z-index:2}
+.tip header{color:var(--text);font:600 12px/1.2 var(--sans);margin-bottom:6px;padding:0;border:0;display:block}
+.tip b{color:var(--glass);font-weight:500}
+@media (prefers-reduced-motion: reduce){.label{transition:none}}
+@media (max-width:1000px){#log{display:none}}
 </style>
 </head>
 <body>
 <canvas id="scene"></canvas>
-<div id="top" class="hud panel">
-  <h1><b>PUNK RECORDS</b> BRAIN</h1>
-  <div class="kv"><span>server <b id="ver">-</b></span><span>regions <b id="nsCount">0</b></span><span>events/min <b id="epm">0</b></span></div>
-</div>
-<div id="log" class="hud panel"><h2>Activity</h2><ol id="logList"></ol></div>
-<div id="legend" class="hud panel"><h2>Regions</h2><ul id="legendList"></ul></div>
-<div id="status">connecting</div>
+<div id="labels"></div>
+<div class="wordmark">Punk Records <b>brain</b><small id="meta">connecting</small></div>
+<aside id="legend" class="panel"><header><span>Regions</span></header><ul id="legendList"></ul></aside>
+<aside id="log" class="panel"><header><span>Activity</span><em id="logState">connecting</em></header><ol id="rows"></ol></aside>
+<aside id="tip" class="panel tip" hidden><header id="tipName"></header><div id="tipBody"></div></aside>
 <script type="module" src="/brain/brain.js"></script>
 </body>
 </html>
