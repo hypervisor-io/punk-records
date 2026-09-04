@@ -1,6 +1,7 @@
 import * as THREE from './vendor/three.module.min.js';
 import {
   MAX_REGIONS, decay, glow, sampleBrain, foldValue, regionSeeds, nearestSeed, mulberry32,
+  assignSlots, eventWeight, seedActivity, parseSSE, describe,
 } from './brain-core.js';
 
 const POINTS = 30000;
@@ -202,7 +203,155 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 
-// Debug: space pulses a random region until B7 wires real data.
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') pulse(Math.floor(Math.random() * 12), 1.5);
-});
+// ---- data: snapshot + event stream --------------------------------------
+const token = () => localStorage.getItem('amk') || '';
+const headers = () => (token() ? { Authorization: 'Bearer ' + token() } : {});
+const $ = (s) => document.querySelector(s);
+const statusEl = $('#status');
+const setStatus = (text, err = false) => { statusEl.textContent = text; statusEl.classList.toggle('err', err); };
+
+let slots = new Map();          // namespace -> region slot
+let snapshot = { namespaces: [] };
+const eventTimes = [];          // for events/min
+
+async function loadSnapshot() {
+  const r = await fetch('/v1/brain/snapshot', { headers: headers() });
+  if (!r.ok) throw new Error('snapshot ' + r.status);
+  snapshot = await r.json();
+  slots = assignSlots(snapshot.namespaces.map((n) => n.name));
+  snapshot.namespaces.forEach((n) => {
+    const slot = slots.get(n.name);
+    // Seed only if the region is colder than the snapshot says it should be.
+    const want = seedActivity(n.writes_5m);
+    if (glowFromActivity(slot) < want) setActivity(slot, want);
+  });
+  $('#ver').textContent = snapshot.version || '-';
+  $('#nsCount').textContent = String(snapshot.namespaces.length);
+  renderLegend();
+}
+function glowFromActivity(slot) { return -Math.log(1 - Math.min(0.999, getGlow(slot))); }
+
+function slotFor(ns) {
+  if (!ns) return -1;
+  if (!slots.has(ns)) {
+    // A namespace born after the snapshot: give it the next slot and
+    // refresh the snapshot soon so the legend fills in.
+    slots.set(ns, Math.min(slots.size, MAX_REGIONS - 1));
+    snapshot.namespaces.push({ name: ns, facts: 0, members: [], claims: [], tasks: { total: 0, done: 0, blocked: 0, pending: 0 }, writes_5m: 0, last_write_at: '' });
+    scheduleSnapshot(2000);
+  }
+  return slots.get(ns);
+}
+
+function onEvent(ev) {
+  eventTimes.push(performance.now());
+  const w = eventWeight(ev);
+  if (ev.kind === 'cost_alert') {
+    for (const [, slot] of slots) pulse(slot, w);
+  } else {
+    pulse(slotFor(ev.namespace), w);
+  }
+  if (ev.kind === 'claim' || (ev.kind === 'memory' && /^\/tasks\//.test(ev.key || ''))) scheduleSnapshot(1500);
+  addLog(ev);
+}
+
+let snapshotTimer = null;
+function scheduleSnapshot(ms) {
+  clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => loadSnapshot().catch((e) => setStatus(e.message, true)), ms);
+}
+
+async function streamEvents() {
+  let backoff = 1000;
+  for (;;) {
+    try {
+      setStatus('connecting');
+      const r = await fetch('/v1/brain/events', { headers: { ...headers(), Accept: 'text/event-stream' } });
+      if (!r.ok || !r.body) throw new Error('events ' + r.status);
+      backoff = 1000;
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const { frames, rest } = parseSSE(buf);
+        buf = rest;
+        for (const f of frames) {
+          if (f.event === 'hello') { setStatus('live'); continue; }
+          try { onEvent(JSON.parse(f.data)); } catch { /* skip malformed frame */ }
+        }
+      }
+      throw new Error('stream closed');
+    } catch (e) {
+      setStatus(`${e.message}; retrying in ${backoff / 1000}s`, true);
+      await new Promise((res) => setTimeout(res, backoff));
+      backoff = Math.min(15000, backoff * 2);
+    }
+  }
+}
+
+// ---- HUD: log ------------------------------------------------------------
+const logList = $('#logList');
+const LOG_MAX = 200;
+function addLog(ev) {
+  const li = document.createElement('li');
+  const kindClass = ev.kind === 'memory' && /^\/tasks\/[^/]+\/status$/.test(ev.key || '') ? 'k-task' : 'k-' + ev.kind;
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = (ev.ts || '').slice(11, 19);
+  const m = document.createElement('span');
+  m.className = kindClass;
+  m.textContent = describe(ev);
+  li.append(t, m);
+  logList.prepend(li);
+  while (logList.children.length > LOG_MAX) logList.lastChild.remove();
+}
+
+// ---- HUD: legend --------------------------------------------------------
+const legendList = $('#legendList');
+const swatchFor = (g) => (g > 0.6 ? '#ff4fd8' : g > 0.25 ? '#ffb64d' : '#3fe0ff');
+function renderLegend() {
+  legendList.replaceChildren();
+  for (const n of snapshot.namespaces) {
+    const slot = slots.get(n.name);
+    const li = document.createElement('li');
+    li.dataset.slot = String(slot);
+    li.innerHTML = '<span class="sw"></span><span class="name"></span><span class="bar"><i></i></span><span class="meta"></span>';
+    li.querySelector('.name').textContent = n.name;
+    li.querySelector('.meta').textContent = `${n.members.length}p ${n.claims.length}c ${n.tasks.done}/${n.tasks.total}t`;
+    li.title = [
+      `${n.facts} facts, ${n.writes_5m} writes in 5 min`,
+      n.members.length ? 'members: ' + n.members.map((m) => m.agent).join(', ') : 'no members registered',
+      n.claims.length ? 'claims: ' + n.claims.map((c) => `${c.key} (${c.holder})`).join(', ') : 'no live claims',
+      `tasks: ${n.tasks.done} done, ${n.tasks.blocked} blocked, ${n.tasks.pending} pending`,
+    ].join('\n');
+    li.addEventListener('pointerenter', () => setFocus(slot));
+    li.addEventListener('pointerleave', () => setFocus(-1));
+    legendList.append(li);
+  }
+}
+function updateLegend() {
+  for (const li of legendList.children) {
+    const g = getGlow(Number(li.dataset.slot));
+    li.querySelector('.bar i').style.width = (g * 100).toFixed(0) + '%';
+    li.querySelector('.sw').style.color = swatchFor(g);
+    li.querySelector('.sw').style.background = swatchFor(g);
+  }
+}
+
+// ---- per-frame HUD refresh (cheap: throttled to 4 Hz) ----------------------
+let hudAcc = 0;
+hooks.onFrame = (dt) => {
+  hudAcc += dt;
+  if (hudAcc < 0.25) return;
+  hudAcc = 0;
+  updateLegend();
+  const cutoff = performance.now() - 60000;
+  while (eventTimes.length && eventTimes[0] < cutoff) eventTimes.shift();
+  $('#epm').textContent = String(eventTimes.length);
+};
+
+loadSnapshot().then(() => setInterval(() => loadSnapshot().catch(() => {}), 30000)).catch((e) => setStatus(e.message, true));
+streamEvents();
