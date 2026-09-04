@@ -25,7 +25,7 @@ let focus = -1;
 export function setFocus(slot) { focus = slot; }
 
 const fresnel = (side, rim) => new THREE.ShaderMaterial({
-  uniforms: { uColor: { value: new THREE.Color(0x4fd8ff) }, uRim: { value: new THREE.Color(rim) } },
+  uniforms: { uColor: { value: new THREE.Color(0xff2d55) }, uRim: { value: new THREE.Color(rim) } },
   vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0); vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }`,
   fragmentShader: `uniform vec3 uColor; uniform vec3 uRim; varying vec3 vN; varying vec3 vV;
     void main(){ float f = pow(1.0 - max(dot(normalize(vN), normalize(vV)), 0.0), 2.6); vec3 c = uColor*0.05 + uRim*f*1.1; gl_FragColor = vec4(c, 0.06 + f*0.9); }`,
@@ -34,7 +34,7 @@ const fresnel = (side, rim) => new THREE.ShaderMaterial({
 
 let anchors = [];            // neuron indices (12)
 let anchorPos = [];          // THREE.Vector3 in rig space
-let neuronPos, adjacency, hazeSprites = [], fireLayers = [], nodeEls;
+let neuronPos, adjacency, hazeSprites = [], fireLayers = [];
 const signals = [];          // { path: number[], t: 0..1, opacity }
 let signalPoints;
 
@@ -46,11 +46,11 @@ export const ready = (async () => {
   geo.setIndex(new THREE.BufferAttribute(mesh.index, 1));
   geo.computeVertexNormals();
 
-  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x07101c, transparent: true, opacity: 0.45, depthWrite: true }));
-  const back = new THREE.Mesh(geo, fresnel(THREE.BackSide, 0x3a8fb0));
-  const front = new THREE.Mesh(geo, fresnel(THREE.FrontSide, 0xbfefff));
+  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x14060a, transparent: true, opacity: 0.45, depthWrite: true }));
+  const back = new THREE.Mesh(geo, fresnel(THREE.BackSide, 0x7a1a2e));
+  const front = new THREE.Mesh(geo, fresnel(THREE.FrontSide, 0xffb3c1));
   body.renderOrder = 0; back.renderOrder = 1; front.renderOrder = 2;
-  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 38), new THREE.LineBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 38), new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
   edges.renderOrder = 3;
   rig.add(body, back, front, edges);
 
@@ -61,10 +61,10 @@ export const ready = (async () => {
   const axonPos = new Float32Array(pairs.length * 3);
   for (let p = 0; p < pairs.length; p++) axonPos.set(neuronPos.subarray(pairs[p] * 3, pairs[p] * 3 + 3), p * 3);
   const axons = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(axonPos, 3)),
-    new THREE.LineBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.10, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.10, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
   axons.renderOrder = 3;
   const neurons = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(neuronPos, 3)),
-    new THREE.PointsMaterial({ color: 0xbfefff, size: 0.02, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    new THREE.PointsMaterial({ color: 0xffb3c1, size: 0.02, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
   neurons.renderOrder = 4;
   rig.add(axons, neurons);
 
@@ -78,7 +78,7 @@ export const ready = (async () => {
       if (dx * dx + dy * dy + dz * dz < 0.09) near.push(neuronPos[k * 3], neuronPos[k * 3 + 1], neuronPos[k * 3 + 2]);
     }
     const fire = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(near), 3)),
-      new THREE.PointsMaterial({ color: 0xff4fd8, size: 0.03, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+      new THREE.PointsMaterial({ color: 0xffe3a3, size: 0.03, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
     fire.renderOrder = 5;
     const haze = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
     haze.position.copy(anchorPos[a]); haze.scale.set(0.9, 0.9, 1); haze.renderOrder = 6;
@@ -88,8 +88,18 @@ export const ready = (async () => {
   });
 
   const sp = new Float32Array(96 * 3);
-  signalPoints = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(sp, 3)),
-    new THREE.PointsMaterial({ color: 0xffffff, size: 0.035, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+  const sa = new Float32Array(96);
+  const sgeo = new THREE.BufferGeometry();
+  sgeo.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+  sgeo.setAttribute('alpha', new THREE.BufferAttribute(sa, 1));
+  // signals fade individually, so they need a per-point alpha attribute
+  signalPoints = new THREE.Points(sgeo, new THREE.ShaderMaterial({
+    uniforms: { uPixelRatio: { value: renderer.getPixelRatio() } },
+    vertexShader: `attribute float alpha; varying float vA; uniform float uPixelRatio;
+      void main(){ vA = alpha; vec4 mv = modelViewMatrix*vec4(position,1.0); gl_PointSize = 0.035 * uPixelRatio * (300.0 / -mv.z) * 3.6; gl_Position = projectionMatrix*mv; }`,
+    fragmentShader: `varying float vA; void main(){ vec2 c = gl_PointCoord - 0.5; float d = dot(c, c); if (d > 0.25) discard; float soft = smoothstep(0.25, 0.0, d); gl_FragColor = vec4(vec3(1.0), soft * vA); }`,
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+  }));
   signalPoints.renderOrder = 7;
   rig.add(signalPoints);
 })();
@@ -97,7 +107,7 @@ export const ready = (async () => {
 function hazeTexture() {
   const c = document.createElement('canvas'); c.width = c.height = 128;
   const g = c.getContext('2d'); const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-  grad.addColorStop(0, 'rgba(255,79,216,0.9)'); grad.addColorStop(0.4, 'rgba(255,79,216,0.25)'); grad.addColorStop(1, 'rgba(255,79,216,0)');
+  grad.addColorStop(0, 'rgba(255,196,112,0.9)'); grad.addColorStop(0.4, 'rgba(255,196,112,0.25)'); grad.addColorStop(1, 'rgba(255,196,112,0)');
   g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
   return new THREE.CanvasTexture(c);
 }
@@ -146,7 +156,8 @@ function frame(now) {
   if (!reduced && adjacency) { ambientAcc += dt; if (ambientAcc > 1) { ambientAcc = 0; spawnSignal(Math.floor(signalRng() * 12), 0.35); } }
   if (signalPoints) {
     const pos = signalPoints.geometry.attributes.position.array;
-    pos.fill(0);
+    const alpha = signalPoints.geometry.attributes.alpha.array;
+    pos.fill(0); alpha.fill(0);
     for (let i = signals.length - 1; i >= 0; i--) {
       const s = signals[i]; s.t += dt / 0.9;
       if (s.t >= 1) { signals.splice(i, 1); continue; }
@@ -156,7 +167,9 @@ function frame(now) {
       pos[i * 3] = neuronPos[a] + (neuronPos[b] - neuronPos[a]) * f;
       pos[i * 3 + 1] = neuronPos[a + 1] + (neuronPos[b + 1] - neuronPos[a + 1]) * f;
       pos[i * 3 + 2] = neuronPos[a + 2] + (neuronPos[b + 2] - neuronPos[a + 2]) * f;
+      alpha[i] = s.opacity * (1 - s.t);
     }
+    signalPoints.geometry.attributes.alpha.needsUpdate = true;
     signalPoints.geometry.setDrawRange(0, signals.length);
     signalPoints.geometry.attributes.position.needsUpdate = true;
   }
