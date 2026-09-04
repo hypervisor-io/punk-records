@@ -450,7 +450,9 @@ With `ai.embeddings.provider: local`, punk embeds in-process with a pinned stati
 
 ## Brain view
 
-Open the server in a browser and you get the brain: a live visualization of every memory namespace, served from `/` (alias `/brain`). Each region is one namespace; a region glows with write, claim and task activity in it, a spark marks each event, and a side log narrates who is doing what where. Every asset ships inside the binary (embedded Three.js), so the page needs no network; on an authenticated server it reads the bearer token from the `amk` localStorage key, same as the operator console at `/ui`.
+Open the server in a browser and you get the brain: an anatomical brain rendered as dark glass with a neuron lattice inside, served from `/` (alias `/brain`). Each region is one namespace; regions light up and signals run along axons as agents write, claim and finish tasks, and a side log narrates events in plain language, coalescing bursts into a single row. Every asset ships inside the binary (embedded Three.js and mesh), so the page needs no network; on an authenticated server it reads the bearer token from the `amk` localStorage key, same as the operator console at `/ui`.
+
+Mesh attribution: the brain mesh is derived from BodyParts3D (CC BY-SA 2.1 JP). The attribution text lives at `internal/api/ui/mesh/NOTICE` and is served at `/brain/mesh/NOTICE`; the mesh is rebuilt by `scripts/brain-mesh/build.py`.
 
 ```sh
 punk brain            # print the brain URL of a running server
