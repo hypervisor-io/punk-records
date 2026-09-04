@@ -87,7 +87,7 @@ func (s *Server) MountUI() {
 	})
 }
 
-//go:embed ui/brain.html ui/brain.js ui/brain-core.js ui/vendor/*
+//go:embed ui/brain.html ui/brain.js ui/brain-core.js ui/vendor/* ui/mesh/*
 var brainFS embed.FS
 
 // MountBrain serves the brain view at the server root (and /brain), its
@@ -112,6 +112,18 @@ func (s *Server) MountBrain() {
 	s.mux.Get("/brain", page) // stable alias for links and docs
 	s.mux.Get("/brain/brain.js", serve("ui/brain.js", "text/javascript; charset=utf-8"))
 	s.mux.Get("/brain/brain-core.js", serve("ui/brain-core.js", "text/javascript; charset=utf-8"))
+	s.mux.Get("/brain/mesh/NOTICE", serve("ui/mesh/NOTICE", "text/plain; charset=utf-8"))
+	s.mux.Get("/brain/mesh/brain.bin", func(w http.ResponseWriter, r *http.Request) {
+		b, err := brainFS.ReadFile("ui/mesh/brain.bin.gz")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(b)
+	})
 	vendor, _ := fs.Sub(brainFS, "ui/vendor")
 	s.mux.Get("/brain/vendor/{file}", func(w http.ResponseWriter, r *http.Request) {
 		name := path.Base(chi.URLParam(r, "file"))
