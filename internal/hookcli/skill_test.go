@@ -12,12 +12,12 @@ func TestRenderSkillPerAgent(t *testing.T) {
 		not  []string
 	}{
 		{SkillOpts{Agent: "claude-code", ToolPrefix: "mcp__punk__", ServerURL: "http://localhost:9090"},
-			[]string{"name: punk-memory", "description:", SkillMarker, "`mcp__punk__whoami`", "`mcp__punk__unified_search`", "format: compact", "/tasks/<id>/status", "claim_work", "punk://memory/", "Never invent a key"},
+			[]string{"name: punk-memory", "description:", SkillMarker, "`mcp__punk__whoami`", "`mcp__punk__unified_search`", "format: compact", "/tasks/<id>/status", "claim_work", "punk://memory/", "Never invent a key", "`mcp__punk__list_tasks`", "`mcp__punk__await_tasks`", "`mcp__punk__set_task_status`", "timeout_seconds"},
 			[]string{"version:", "metadata:"}},
 		{SkillOpts{Agent: "opencode", ToolPrefix: "punk_"},
 			[]string{"`punk_search`", "`punk_remember_many`"}, nil},
 		{SkillOpts{Agent: "pi", ToolPrefix: "punk_", Pi: true},
-			[]string{"`punk_whoami`", "`punk_recall`", "`punk_search`", "`punk_remember`", "HTTP API"},
+			[]string{"`punk_whoami`", "`punk_recall`", "`punk_search`", "`punk_remember`", "HTTP API", "/tasks?wait=", "/status"},
 			[]string{"`punk_unified_search`", "`punk_claim_work`", "unified_search", "remember_many", "remember_document", "feedback", "list_keys", "triplet_search", "prefixed ``"}},
 		{SkillOpts{Agent: "hermes", Hermes: true},
 			[]string{"version: 1.0.0", "metadata:", "hermes:", "category: memory", "`recall`", "plain names"}, []string{"prefixed ``"}},
@@ -64,5 +64,19 @@ func TestSkillDescriptionLengthAndRouting(t *testing.T) {
 	}
 	if strings.Contains(r, "\n#") {
 		t.Fatal("routing section must be plain prose without markdown headers")
+	}
+}
+
+func TestSkillNoLongerTellsAgentsToPoll(t *testing.T) {
+	s := RenderSkill(SkillOpts{Agent: "claude", ToolPrefix: "mcp__punk__"})
+	for _, banned := range []string{"Do not recall the whole", "recall only the ids you need"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("skill still carries the polling text %q", banned)
+		}
+	}
+	for _, want := range []string{"list_tasks", "await_tasks", "set_task_status", "next", "in_progress"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("skill must mention %q", want)
+		}
 	}
 }

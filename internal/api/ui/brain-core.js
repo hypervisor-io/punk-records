@@ -112,7 +112,7 @@ export function describe2(ev, count = 1) {
     prompt: count > 1 ? `asked ${count} prompts` : 'asked a prompt',
     session_start: 'session started',
     session_end: 'session ended',
-    task_done: `finished ${id}`,
+    task_done: ({ blocked: `blocked on ${id}`, review: `sent ${id} to review`, in_progress: `started ${id}`, pending: `reset ${id}` })[d.state] || `finished ${id}`,
     task_planned: count > 1 ? `planned ${count} tasks` : `planned ${id}`,
     claimed: `claimed ${id}`,
     released: `released ${id}`,
@@ -122,21 +122,23 @@ export function describe2(ev, count = 1) {
     cost_alert: `cost alert level ${ev.key}`,
     other: `${ev.kind} ${shortKey(ev.key)}`,
   };
-  return { who, what: table[c], hot: ['task_done', 'task_planned', 'claimed', 'released', 'cost_alert'].includes(c) };
+  const hot = c === 'task_done' ? !d.state || d.state === 'done' : ['task_planned', 'claimed', 'released', 'cost_alert'].includes(c);
+  return { who, what: table[c], hot };
 }
 
 export function coalesce(rows, ev, nowMs, windowMs = 5000) {
   const c = category(ev);
   const first = describe2(ev);
   const ns = ev.namespace || (c === 'cost_alert' ? 'all' : '');
+  const state = (ev.data && ev.data.state) || '';
   const top = rows[0];
-  if (top && top.who === first.who && top.ns === ns && top.category === c && nowMs - top.ts <= windowMs) {
+  if (top && top.who === first.who && top.ns === ns && top.category === c && top.state === state && nowMs - top.ts <= windowMs) {
     top.count += 1;
     top.what = describe2(ev, top.count).what;
     top.ts = nowMs;
     return rows;
   }
-  rows.unshift({ who: first.who, ns, category: c, what: first.what, count: 1, hot: first.hot, ts: nowMs, firstTs: nowMs });
+  rows.unshift({ who: first.who, ns, category: c, state, what: first.what, count: 1, hot: first.hot, ts: nowMs, firstTs: nowMs });
   if (rows.length > 200) rows.length = 200;
   return rows;
 }
