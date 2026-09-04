@@ -13,6 +13,10 @@ version:
 test:
 	go test ./...
 
+test-ui:
+	node --test internal/api/ui/brain-core.test.mjs
+	node --check internal/api/ui/brain.js
+
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo "golangci-lint not installed; skipping"
 
