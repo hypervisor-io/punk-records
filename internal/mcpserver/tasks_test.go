@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/bus"
+	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -67,4 +70,73 @@ func TestSetTaskStatusWritesCanonicalFactAndReleasesClaim(t *testing.T) {
 	if res == nil || !res.IsError || !strings.Contains(text(t, res), "state must be one of") {
 		t.Fatalf("bad state must error: %s", text(t, res))
 	}
+}
+
+func TestListTasksBoard(t *testing.T) {
+	cs := session(t)
+	callJSON(t, cs, "remember_many", map[string]any{"namespace": "ns", "facts": []map[string]any{
+		{"key": "/tasks/A", "body": "first"},
+		{"key": "/tasks/B", "body": "second\ndepends_on: A"},
+	}}, nil)
+	var board struct {
+		Next  string `json:"next"`
+		Tasks []struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+			Ready bool   `json:"ready"`
+		} `json:"tasks"`
+		Counts struct{ Pending, Done int } `json:"counts"`
+	}
+	callJSON(t, cs, "list_tasks", map[string]any{"namespace": "ns"}, &board)
+	if board.Next != "A" || len(board.Tasks) != 2 || !board.Tasks[0].Ready || board.Tasks[1].Ready || board.Counts.Pending != 2 {
+		t.Fatalf("board = %+v", board)
+	}
+	callJSON(t, cs, "set_task_status", map[string]any{"namespace": "ns", "id": "A", "state": "done", "summary": "ok", "sha": "abc"}, nil)
+	callJSON(t, cs, "list_tasks", map[string]any{"namespace": "ns", "state": "pending"}, &board)
+	if board.Next != "B" || len(board.Tasks) != 1 || board.Tasks[0].ID != "B" || !board.Tasks[0].Ready || board.Counts.Done != 1 {
+		t.Fatalf("filtered board = %+v", board)
+	}
+}
+
+func TestAwaitTasksWakesOnStatusWrite(t *testing.T) {
+	b := bus.New()
+	cs, mem := sessionWithStore(t, nil, func(d *Deps) { d.Bus = b })
+	ctx := context.Background()
+	callJSON(t, cs, "remember", map[string]any{"namespace": "ns", "key": "/tasks/A", "body": "first"}, nil)
+
+	type awaitOut struct {
+		Changed bool     `json:"changed"`
+		Changes []string `json:"changes"`
+		Next    string   `json:"next"`
+	}
+	var out awaitOut
+	callJSON(t, cs, "await_tasks", map[string]any{"namespace": "ns", "timeout_seconds": 1}, &out)
+	if out.Changed || len(out.Changes) != 0 || out.Next != "A" {
+		t.Fatalf("quiet wait = %+v", out)
+	}
+
+	res := make(chan awaitOut, 1)
+	go func() {
+		var o awaitOut
+		callJSON(t, cs, "await_tasks", map[string]any{"namespace": "ns", "timeout_seconds": 10}, &o)
+		res <- o
+	}()
+	time.Sleep(50 * time.Millisecond)
+	// The test server has no outbox tailer, so drive the bus the way the tailer would.
+	if _, err := mem.Write(ctx, memoryWriteForTest("ns", "/tasks/A/status", "done: x")); err != nil {
+		t.Fatal(err)
+	}
+	b.Publish(bus.Event{Kind: "memory", Key: "ns:/tasks/A/status", Data: map[string]string{"state": "done"}})
+	select {
+	case o := <-res:
+		if !o.Changed || len(o.Changes) != 1 || o.Changes[0] != "/tasks/A/status" || o.Next != "" {
+			t.Fatalf("woken = %+v", o)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("await_tasks did not wake")
+	}
+}
+
+func memoryWriteForTest(ns, key, body string) memory.WriteInput {
+	return memory.WriteInput{Namespace: ns, Key: key, Body: body, Writer: "test"}
 }

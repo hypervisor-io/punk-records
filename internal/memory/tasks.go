@@ -205,3 +205,33 @@ func parseDepends(body string, attrs map[string]any) []string {
 	}
 	return nil
 }
+
+// RenderTaskStatus builds the canonical status body that ParseTaskState
+// and TaskCounts read back: "done: <sha> <summary>; tests: <tests>",
+// "in_progress: <phase> <summary>", "<state>: <summary>", plus a
+// "deviation: ..." second line when given.
+func RenderTaskStatus(state, summary, sha, tests, phase, deviation string) string {
+	var b strings.Builder
+	b.WriteString(state + ":")
+	switch state {
+	case "done":
+		if sha != "" {
+			b.WriteString(" " + sha)
+		}
+		b.WriteString(" " + summary)
+		if tests != "" {
+			b.WriteString("; tests: " + tests)
+		}
+	case "in_progress":
+		if phase != "" {
+			b.WriteString(" " + phase)
+		}
+		b.WriteString(" " + summary)
+	default:
+		b.WriteString(" " + summary)
+	}
+	if deviation != "" {
+		b.WriteString("\ndeviation: " + deviation)
+	}
+	return b.String()
+}

@@ -6,8 +6,10 @@ package taskboard
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/region"
 )
@@ -101,4 +103,44 @@ func Build(ctx context.Context, mem *memory.Store, reg *region.Store, ns string)
 		b.Tasks = append(b.Tasks, t)
 	}
 	return b, nil
+}
+
+// WaitForChange blocks until a memory event under <ns>:/tasks/ or a claim
+// event on such a key arrives, or timeout or ctx ends. It returns the
+// keys that fired (after a short settle window so a burst comes back as
+// one wake), or nil on timeout, cancellation, or a nil bus. Events can be
+// dropped by the bus when a subscriber lags; callers rebuild the board on
+// every return rather than trusting the list to be complete.
+func WaitForChange(ctx context.Context, b *bus.Bus, ns string, timeout time.Duration) []string {
+	if b == nil || timeout <= 0 {
+		return nil
+	}
+	events, cancel := b.Subscribe()
+	defer cancel()
+	prefix := ns + ":/tasks/"
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	var keys []string
+	var settle <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return keys
+		case <-deadline.C:
+			return keys
+		case <-settle:
+			return keys
+		case e, open := <-events:
+			if !open {
+				return keys
+			}
+			if (e.Kind != "memory" && e.Kind != "claim") || !strings.HasPrefix(e.Key, prefix) {
+				continue
+			}
+			keys = append(keys, strings.TrimPrefix(e.Key, ns+":"))
+			if settle == nil {
+				settle = time.After(150 * time.Millisecond)
+			}
+		}
+	}
 }
