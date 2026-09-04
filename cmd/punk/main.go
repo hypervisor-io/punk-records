@@ -699,6 +699,7 @@ func cmdServe(args []string) error {
 		Bus:               eventBus,
 		DB:                db,
 		Reg:               reg,
+		Region:            regionStore,
 		Expander:          expander,
 		TurnContextTokens: cfg.Memory.TurnContextTokens,
 		Inject:            cfg.Memory.Inject,
