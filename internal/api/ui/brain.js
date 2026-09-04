@@ -1,358 +1,170 @@
 import * as THREE from './vendor/three.module.min.js';
 import {
-  MAX_REGIONS, decay, glow, sampleBrain, foldValue, regionSeeds, nearestSeed, slotSeed, mulberry32,
-  assignSlots, eventWeight, seedActivity, parseSSE, describe,
+  MAX_REGIONS, decay, glow, lcg, decodeMesh, triangleAreas, sampleSurface, nearestNeighbours,
+  buildAdjacency, topIndex, farthestPoints, slotAnchor, signalPath,
 } from './brain-core.js';
 
-const POINTS = 36000;
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-// ---- renderer, scene, camera ------------------------------------------
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setClearColor(0x05060f, 1);
+renderer.setClearColor(0x050507, 1);
+renderer.toneMapping = THREE.NoToneMapping;
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 50);
-camera.position.set(0, 0.2, 3.6);
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 50);
 const rig = new THREE.Group();
+rig.rotation.x = -Math.PI / 2; // mesh is z-up
 scene.add(rig);
+function resize() { renderer.setSize(window.innerWidth, window.innerHeight, false); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); }
+window.addEventListener('resize', resize); resize();
 
-function resize() {
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
-window.addEventListener('resize', resize);
-resize();
+export const activity = new Float32Array(MAX_REGIONS);
+export const hooks = { onFrame: null };
+let focus = -1;
+export function setFocus(slot) { focus = slot; }
 
-// ---- point cloud --------------------------------------------------------
-const positions = sampleBrain(POINTS, mulberry32(20260904));
-const seeds = regionSeeds(MAX_REGIONS);
-const region = new Float32Array(POINTS);
-const fold = new Float32Array(POINTS);
-for (let i = 0; i < POINTS; i++) {
-  const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-  region[i] = nearestSeed(x, y, z, seeds);
-  fold[i] = foldValue(x, y, z);
-}
-const geo = new THREE.BufferGeometry();
-geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-geo.setAttribute('region', new THREE.BufferAttribute(region, 1));
-geo.setAttribute('fold', new THREE.BufferAttribute(fold, 1));
-
-const activity = new Float32Array(MAX_REGIONS); // raw scores, decayed each frame
-const uniforms = {
-  uGlow: { value: new Float32Array(MAX_REGIONS) },
-  uFocus: { value: -1 },
-  uTime: { value: 0 },
-  uPixelRatio: { value: renderer.getPixelRatio() },
-  uPulse: { value: reduced ? 0 : 1 },
-  uCold: { value: new THREE.Color(0x3fe0ff) },
-  uWarm: { value: new THREE.Color(0xffb64d) },
-  uHot: { value: new THREE.Color(0xff4fd8) },
-};
-
-const vertex = `
-attribute float region;
-attribute float fold;
-uniform float uGlow[${MAX_REGIONS}];
-uniform float uFocus;
-uniform float uTime;
-uniform float uPixelRatio;
-uniform float uPulse;
-varying float vGlow;
-varying float vFold;
-varying float vDim;
-void main() {
-  int r = int(region + 0.5);
-  vGlow = uGlow[r];
-  vFold = fold;
-  vDim = (uFocus >= 0.0 && abs(uFocus - region) > 0.5) ? 0.25 : 1.0;
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  float pulse = 1.0 + uPulse * 0.18 * vGlow * sin(uTime * 6.0 + position.y * 9.0 + position.x * 5.0);
-  gl_PointSize = (2.8 + 4.0 * vGlow) * pulse * uPixelRatio * (3.6 / -mv.z);
-  gl_Position = projectionMatrix * mv;
-}`;
-
-const fragment = `
-precision highp float;
-uniform vec3 uCold;
-uniform vec3 uWarm;
-uniform vec3 uHot;
-varying float vGlow;
-varying float vFold;
-varying float vDim;
-void main() {
-  vec2 c = gl_PointCoord - 0.5;
-  float d = dot(c, c);
-  if (d > 0.25) discard;
-  float soft = smoothstep(0.25, 0.0, d);
-  vec3 col = mix(uCold, uWarm, smoothstep(0.0, 0.6, vGlow));
-  col = mix(col, uHot, smoothstep(0.6, 1.0, vGlow));
-  float a = soft * (0.07 + 0.26 * vFold * vFold + 0.6 * vGlow) * vDim;
-  gl_FragColor = vec4(col * (0.7 + 1.3 * vGlow), a);
-}`;
-
-const material = new THREE.ShaderMaterial({
-  uniforms, vertexShader: vertex, fragmentShader: fragment,
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+const fresnel = (side, rim) => new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(0x4fd8ff) }, uRim: { value: new THREE.Color(rim) } },
+  vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0); vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }`,
+  fragmentShader: `uniform vec3 uColor; uniform vec3 uRim; varying vec3 vN; varying vec3 vV;
+    void main(){ float f = pow(1.0 - max(dot(normalize(vN), normalize(vV)), 0.0), 2.6); vec3 c = uColor*0.05 + uRim*f*1.1; gl_FragColor = vec4(c, 0.06 + f*0.9); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side,
 });
-const cloud = new THREE.Points(geo, material);
-rig.add(cloud);
 
-// ---- sparks: one bright expanding point per event -------------------------
-const MAX_SPARKS = 96;
-const SPARK_LIFE = 0.9; // seconds
-const sparkPos = new Float32Array(MAX_SPARKS * 3);
-const sparkAge = new Float32Array(MAX_SPARKS).fill(99);
-const sparkGeo = new THREE.BufferGeometry();
-sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
-sparkGeo.setAttribute('age', new THREE.BufferAttribute(sparkAge, 1));
-const sparkMat = new THREE.ShaderMaterial({
-  uniforms: { uPixelRatio: uniforms.uPixelRatio, uLife: { value: SPARK_LIFE }, uHot: uniforms.uHot, uCold: uniforms.uCold },
-  vertexShader: `
-attribute float age;
-uniform float uPixelRatio;
-uniform float uLife;
-varying float vT;
-void main() {
-  vT = clamp(age / uLife, 0.0, 1.0);
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  float size = mix(5.0, 56.0, vT) * uPixelRatio * (3.6 / -mv.z);
-  gl_PointSize = (vT >= 1.0) ? 0.0 : size;
-  gl_Position = projectionMatrix * mv;
-}`,
-  fragmentShader: `
-precision highp float;
-uniform vec3 uHot;
-uniform vec3 uCold;
-varying float vT;
-void main() {
-  vec2 c = gl_PointCoord - 0.5;
-  float r = length(c) * 2.0;
-  float ring = smoothstep(0.55, 0.85, r) * (1.0 - smoothstep(0.85, 1.0, r));
-  float core = 1.0 - smoothstep(0.0, 0.35, r);
-  float a = (ring * 0.9 + core) * (1.0 - vT);
-  gl_FragColor = vec4(mix(uHot, uCold, vT), a);
-}`,
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-});
-const sparks = new THREE.Points(sparkGeo, sparkMat);
-rig.add(sparks);
-let nextSpark = 0;
+let anchors = [];            // neuron indices (12)
+let anchorPos = [];          // THREE.Vector3 in rig space
+let neuronPos, adjacency, hazeSprites = [], fireLayers = [], nodeEls;
+const signals = [];          // { path: number[], t: 0..1, opacity }
+let signalPoints;
 
-export function spark(slot) {
-  const i = nextSpark++ % MAX_SPARKS;
-  const seed = slotSeed(slot);
-  sparkPos[i * 3] = seeds[seed * 3];
-  sparkPos[i * 3 + 1] = seeds[seed * 3 + 1];
-  sparkPos[i * 3 + 2] = seeds[seed * 3 + 2];
-  sparkAge[i] = 0;
-  sparkGeo.attributes.position.needsUpdate = true;
-  sparkGeo.attributes.age.needsUpdate = true;
+export const ready = (async () => {
+  const buf = await (await fetch('/brain/mesh/brain.bin')).arrayBuffer();
+  const mesh = decodeMesh(buf);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(mesh.index, 1));
+  geo.computeVertexNormals();
+
+  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x07101c, transparent: true, opacity: 0.45, depthWrite: true }));
+  const back = new THREE.Mesh(geo, fresnel(THREE.BackSide, 0x3a8fb0));
+  const front = new THREE.Mesh(geo, fresnel(THREE.FrontSide, 0xbfefff));
+  body.renderOrder = 0; back.renderOrder = 1; front.renderOrder = 2;
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 38), new THREE.LineBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+  edges.renderOrder = 3;
+  rig.add(body, back, front, edges);
+
+  const { cdf } = triangleAreas(mesh.positions, mesh.index);
+  neuronPos = sampleSurface(mesh.positions, mesh.index, cdf, 1800, lcg(7));
+  const pairs = nearestNeighbours(neuronPos, 2, 0.02);
+  adjacency = buildAdjacency(pairs);
+  const axonPos = new Float32Array(pairs.length * 3);
+  for (let p = 0; p < pairs.length; p++) axonPos.set(neuronPos.subarray(pairs[p] * 3, pairs[p] * 3 + 3), p * 3);
+  const axons = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(axonPos, 3)),
+    new THREE.LineBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.10, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+  axons.renderOrder = 3;
+  const neurons = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(neuronPos, 3)),
+    new THREE.PointsMaterial({ color: 0xbfefff, size: 0.02, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+  neurons.renderOrder = 4;
+  rig.add(axons, neurons);
+
+  anchors = farthestPoints(neuronPos, 12, topIndex(neuronPos));
+  anchorPos = anchors.map((i) => new THREE.Vector3(neuronPos[i * 3], neuronPos[i * 3 + 1], neuronPos[i * 3 + 2]));
+  const tex = hazeTexture();
+  anchors.forEach((ai, a) => {
+    const near = [];
+    for (let k = 0; k < 1800; k++) {
+      const dx = neuronPos[k * 3] - anchorPos[a].x, dy = neuronPos[k * 3 + 1] - anchorPos[a].y, dz = neuronPos[k * 3 + 2] - anchorPos[a].z;
+      if (dx * dx + dy * dy + dz * dz < 0.09) near.push(neuronPos[k * 3], neuronPos[k * 3 + 1], neuronPos[k * 3 + 2]);
+    }
+    const fire = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(near), 3)),
+      new THREE.PointsMaterial({ color: 0xff4fd8, size: 0.03, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    fire.renderOrder = 5;
+    const haze = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    haze.position.copy(anchorPos[a]); haze.scale.set(0.9, 0.9, 1); haze.renderOrder = 6;
+    fire.userData.indices = near.length / 3;
+    fireLayers.push(fire); hazeSprites.push(haze);
+    rig.add(fire, haze);
+  });
+
+  const sp = new Float32Array(96 * 3);
+  signalPoints = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(sp, 3)),
+    new THREE.PointsMaterial({ color: 0xffffff, size: 0.035, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+  signalPoints.renderOrder = 7;
+  rig.add(signalPoints);
+})();
+
+function hazeTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'); const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,79,216,0.9)'); grad.addColorStop(0.4, 'rgba(255,79,216,0.25)'); grad.addColorStop(1, 'rgba(255,79,216,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
 }
 
-// pulse adds weight to a region's activity and fires a spark there.
+const signalRng = lcg(99);
+function spawnSignal(anchorIndex, opacity) {
+  if (!adjacency) return;
+  const start = anchors[anchorIndex];
+  const path = signalPath(adjacency, start, 3, signalRng);
+  if (path.length < 2) return;
+  signals.push({ path, t: 0, opacity });
+  if (signals.length > 96) signals.shift();
+}
+
 export function pulse(slot, weight) {
   if (slot < 0 || slot >= MAX_REGIONS) return;
-  activity[slotSeed(slot)] += weight;
-  spark(slot);
+  activity[slot] += weight;
+  const a = slotAnchor(slot);
+  for (let i = 0; i < 6; i++) spawnSignal(a, 0.9);
 }
 
-export function setActivity(slot, value) { activity[slotSeed(slot)] = value; }
-export function getGlow(slot) { return uniforms.uGlow.value[slotSeed(slot)]; }
-export function setFocus(slot) { uniforms.uFocus.value = slot < 0 ? -1 : slotSeed(slot); }
+export function anchorScreen(a) {
+  if (!anchorPos[a]) return { x: 0, y: 0, visible: false };
+  const v = anchorPos[a].clone().applyMatrix4(rig.matrixWorld).project(camera);
+  return { x: (v.x + 1) / 2 * window.innerWidth, y: (1 - v.y) / 2 * window.innerHeight, visible: v.z < 1 };
+}
 
-// ---- camera interaction ---------------------------------------------------
-let dragging = false, lastX = 0, lastY = 0, idleSince = performance.now();
-let yaw = 0.7, pitch = 0.45, dist = 3.4;
+// camera and input
+let yaw = Math.PI / 2, pitch = 0.17, dist = 3.6, dragging = false, lastX = 0, lastY = 0, idleSince = performance.now();
 canvas.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
 canvas.addEventListener('pointerup', () => { dragging = false; idleSince = performance.now(); });
-canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
-  yaw += (e.clientX - lastX) * 0.006;
-  pitch = Math.max(-1.2, Math.min(1.2, pitch + (e.clientY - lastY) * 0.006));
-  lastX = e.clientX; lastY = e.clientY; idleSince = performance.now();
-});
-canvas.addEventListener('wheel', (e) => {
-  dist = Math.max(2.4, Math.min(6, dist + e.deltaY * 0.002));
-  idleSince = performance.now();
-}, { passive: true });
+canvas.addEventListener('pointermove', (e) => { if (!dragging) return; yaw += (e.clientX - lastX) * 0.006; pitch = Math.max(-0.9, Math.min(0.9, pitch + (e.clientY - lastY) * 0.006)); lastX = e.clientX; lastY = e.clientY; idleSince = performance.now(); });
+canvas.addEventListener('wheel', (e) => { dist = Math.max(2.6, Math.min(5, dist + e.deltaY * 0.002)); idleSince = performance.now(); }, { passive: true });
 
-// ---- frame loop -------------------------------------------------------
-let last = performance.now();
-export const hooks = { onFrame: null }; // B7 sets onFrame(dt) for HUD updates
+let last = performance.now(), ambientAcc = 0;
 function frame(now) {
-  const dt = Math.min(0.1, (now - last) / 1000);
-  last = now;
-  uniforms.uTime.value = now / 1000;
-  for (let i = 0; i < MAX_REGIONS; i++) {
-    activity[i] = decay(activity[i], dt);
-    uniforms.uGlow.value[i] = glow(activity[i]);
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  const anchorGlow = new Float32Array(12);
+  for (let s = 0; s < MAX_REGIONS; s++) { activity[s] = decay(activity[s], dt); anchorGlow[slotAnchor(s)] = Math.max(anchorGlow[slotAnchor(s)], glow(activity[s])); }
+  const focusAnchor = focus >= 0 ? slotAnchor(focus) : -1;
+  for (let a = 0; a < hazeSprites.length; a++) {
+    const dim = focusAnchor >= 0 && focusAnchor !== a ? 0.35 : 1;
+    hazeSprites[a].material.opacity = anchorGlow[a] * dim;
+    fireLayers[a].material.opacity = anchorGlow[a] * dim;
   }
-  for (let i = 0; i < MAX_SPARKS; i++) if (sparkAge[i] < 99) sparkAge[i] += dt;
-  sparkGeo.attributes.age.needsUpdate = true;
-  if (!reduced && !dragging && now - idleSince > 3000) yaw += dt * 0.15;
-  rig.rotation.set(pitch, yaw, 0);
-  camera.position.set(0, 0.2, dist);
+  if (!reduced && adjacency) { ambientAcc += dt; if (ambientAcc > 1) { ambientAcc = 0; spawnSignal(Math.floor(signalRng() * 12), 0.35); } }
+  if (signalPoints) {
+    const pos = signalPoints.geometry.attributes.position.array;
+    pos.fill(0);
+    for (let i = signals.length - 1; i >= 0; i--) {
+      const s = signals[i]; s.t += dt / 0.9;
+      if (s.t >= 1) { signals.splice(i, 1); continue; }
+      const seg = Math.min(s.path.length - 2, Math.floor(s.t * (s.path.length - 1)));
+      const f = s.t * (s.path.length - 1) - seg;
+      const a = s.path[seg] * 3, b = s.path[seg + 1] * 3;
+      pos[i * 3] = neuronPos[a] + (neuronPos[b] - neuronPos[a]) * f;
+      pos[i * 3 + 1] = neuronPos[a + 1] + (neuronPos[b + 1] - neuronPos[a + 1]) * f;
+      pos[i * 3 + 2] = neuronPos[a + 2] + (neuronPos[b + 2] - neuronPos[a + 2]) * f;
+    }
+    signalPoints.geometry.setDrawRange(0, signals.length);
+    signalPoints.geometry.attributes.position.needsUpdate = true;
+  }
+  if (!reduced && !dragging && now - idleSince > 4000) yaw += dt * 0.08;
+  camera.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, Math.sin(pitch) * dist + 0.2, Math.cos(yaw) * Math.cos(pitch) * dist);
   camera.lookAt(0, 0, 0);
+  rig.updateMatrixWorld();
   if (hooks.onFrame) hooks.onFrame(dt);
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-
-// ---- data: snapshot + event stream --------------------------------------
-const token = () => localStorage.getItem('amk') || '';
-const headers = () => (token() ? { Authorization: 'Bearer ' + token() } : {});
-const $ = (s) => document.querySelector(s);
-const statusEl = $('#status');
-const setStatus = (text, err = false) => { statusEl.textContent = text; statusEl.classList.toggle('err', err); };
-
-let slots = new Map();          // namespace -> region slot
-let snapshot = { namespaces: [] };
-const eventTimes = [];          // for events/min
-
-async function loadSnapshot() {
-  const r = await fetch('/v1/brain/snapshot', { headers: headers() });
-  if (!r.ok) throw new Error('snapshot ' + r.status);
-  snapshot = await r.json();
-  slots = assignSlots(snapshot.namespaces.map((n) => n.name));
-  snapshot.namespaces.forEach((n) => {
-    const slot = slots.get(n.name);
-    // Seed only if the region is colder than the snapshot says it should be.
-    const want = seedActivity(n.writes_5m);
-    if (glowFromActivity(slot) < want) setActivity(slot, want);
-  });
-  $('#ver').textContent = snapshot.version || '-';
-  $('#nsCount').textContent = String(snapshot.namespaces.length);
-  renderLegend();
-}
-function glowFromActivity(slot) { return -Math.log(1 - Math.min(0.999, getGlow(slot))); }
-
-function slotFor(ns) {
-  if (!ns) return -1;
-  if (!slots.has(ns)) {
-    // A namespace born after the snapshot: give it the next slot and
-    // refresh the snapshot soon so the legend fills in.
-    slots.set(ns, Math.min(slots.size, MAX_REGIONS - 1));
-    snapshot.namespaces.push({ name: ns, facts: 0, members: [], claims: [], tasks: { total: 0, done: 0, blocked: 0, pending: 0 }, writes_5m: 0, last_write_at: '' });
-    scheduleSnapshot(2000);
-  }
-  return slots.get(ns);
-}
-
-function onEvent(ev) {
-  eventTimes.push(performance.now());
-  const w = eventWeight(ev);
-  if (ev.kind === 'cost_alert') {
-    for (const [, slot] of slots) pulse(slot, w);
-  } else {
-    pulse(slotFor(ev.namespace), w);
-  }
-  if (ev.kind === 'claim' || (ev.kind === 'memory' && /^\/tasks\//.test(ev.key || ''))) scheduleSnapshot(1500);
-  addLog(ev);
-}
-
-let snapshotTimer = null;
-function scheduleSnapshot(ms) {
-  clearTimeout(snapshotTimer);
-  snapshotTimer = setTimeout(() => loadSnapshot().catch((e) => setStatus(e.message, true)), ms);
-}
-
-async function streamEvents() {
-  let backoff = 1000;
-  for (;;) {
-    try {
-      setStatus('connecting');
-      const r = await fetch('/v1/brain/events', { headers: { ...headers(), Accept: 'text/event-stream' } });
-      if (!r.ok || !r.body) throw new Error('events ' + r.status);
-      backoff = 1000;
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const { frames, rest } = parseSSE(buf);
-        buf = rest;
-        for (const f of frames) {
-          if (f.event === 'hello') { setStatus('live'); continue; }
-          try { onEvent(JSON.parse(f.data)); } catch { /* skip malformed frame */ }
-        }
-      }
-      throw new Error('stream closed');
-    } catch (e) {
-      setStatus(`${e.message}; retrying in ${backoff / 1000}s`, true);
-      await new Promise((res) => setTimeout(res, backoff));
-      backoff = Math.min(15000, backoff * 2);
-    }
-  }
-}
-
-// ---- HUD: log ------------------------------------------------------------
-const logList = $('#logList');
-const LOG_MAX = 200;
-function addLog(ev) {
-  const li = document.createElement('li');
-  const kindClass = ev.kind === 'memory' && /^\/tasks\/[^/]+\/status$/.test(ev.key || '') ? 'k-task' : 'k-' + ev.kind;
-  const t = document.createElement('span');
-  t.className = 't';
-  t.textContent = (ev.ts || '').slice(11, 19);
-  const m = document.createElement('span');
-  m.className = kindClass;
-  m.textContent = describe(ev);
-  li.append(t, m);
-  logList.prepend(li);
-  while (logList.children.length > LOG_MAX) logList.lastChild.remove();
-}
-
-// ---- HUD: legend --------------------------------------------------------
-const legendList = $('#legendList');
-const swatchFor = (g) => (g > 0.6 ? '#ff4fd8' : g > 0.25 ? '#ffb64d' : '#3fe0ff');
-function renderLegend() {
-  legendList.replaceChildren();
-  for (const n of snapshot.namespaces) {
-    const slot = slots.get(n.name);
-    const li = document.createElement('li');
-    li.dataset.slot = String(slot);
-    li.innerHTML = '<span class="sw"></span><span class="name"></span><span class="bar"><i></i></span><span class="meta"></span>';
-    li.querySelector('.name').textContent = n.name;
-    li.querySelector('.meta').textContent = `${n.members.length}p ${n.claims.length}c ${n.tasks.done}/${n.tasks.total}t`;
-    li.title = [
-      `${n.facts} facts, ${n.writes_5m} writes in 5 min`,
-      n.members.length ? 'members: ' + n.members.map((m) => m.agent).join(', ') : 'no members registered',
-      n.claims.length ? 'claims: ' + n.claims.map((c) => `${c.key} (${c.holder})`).join(', ') : 'no live claims',
-      `tasks: ${n.tasks.done} done, ${n.tasks.blocked} blocked, ${n.tasks.pending} pending`,
-    ].join('\n');
-    li.addEventListener('pointerenter', () => setFocus(slot));
-    li.addEventListener('pointerleave', () => setFocus(-1));
-    legendList.append(li);
-  }
-}
-function updateLegend() {
-  for (const li of legendList.children) {
-    const g = getGlow(Number(li.dataset.slot));
-    li.querySelector('.bar i').style.width = (g * 100).toFixed(0) + '%';
-    li.querySelector('.sw').style.color = swatchFor(g);
-    li.querySelector('.sw').style.background = swatchFor(g);
-  }
-}
-
-// ---- per-frame HUD refresh (cheap: throttled to 4 Hz) ----------------------
-let hudAcc = 0;
-hooks.onFrame = (dt) => {
-  hudAcc += dt;
-  if (hudAcc < 0.25) return;
-  hudAcc = 0;
-  updateLegend();
-  const cutoff = performance.now() - 60000;
-  while (eventTimes.length && eventTimes[0] < cutoff) eventTimes.shift();
-  $('#epm').textContent = String(eventTimes.length);
-};
-
-loadSnapshot().then(() => setInterval(() => loadSnapshot().catch(() => {}), 30000)).catch((e) => setStatus(e.message, true));
-streamEvents();
