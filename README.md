@@ -448,6 +448,45 @@ Agents should ask for `format: compact` (MCP) or `?format=compact` (HTTP): each 
 
 With `ai.embeddings.provider: local`, punk embeds in-process with a pinned static model (about 31 MB, downloaded once from huggingface.co) and needs no Ollama. Run `punk embed-backfill --ns <ns> --force` after switching providers or upgrading past a release that changed the embedding input.
 
+## Brain view
+
+Open the server in a browser and you get the brain: a live visualization of every memory namespace, served from `/` (alias `/brain`). Each region is one namespace; a region glows with write, claim and task activity in it, a spark marks each event, and a side log narrates who is doing what where. Every asset ships inside the binary (embedded Three.js), so the page needs no network; on an authenticated server it reads the bearer token from the `amk` localStorage key, same as the operator console at `/ui`.
+
+```sh
+punk brain            # print the brain URL of a running server
+punk brain --open     # ...and open it in the default browser
+punk brain serve      # start the server and print the brain URL first
+```
+
+The page loads one snapshot and then follows the event stream.
+
+`GET /v1/brain/snapshot`: per-namespace counts, members, claims, task tallies and the 5-minute write rate, sorted by most recent write:
+
+```json
+{
+  "version": "v1.6.0",
+  "now": "2026-09-04T03:20:11Z",
+  "namespaces": [
+    {
+      "name": "agent-codehamsa",
+      "facts": 412, "observations": 3, "models": 0,
+      "members": [{"namespace":"agent-codehamsa","agent":"worker-2","role":"worker","joined_at":"..."}],
+      "claims":  [{"namespace":"agent-codehamsa","key":"/tasks/S1A-4","holder":"worker-2","claimed_at":"...","expires_at":"..."}],
+      "tasks": {"total": 261, "done": 12, "blocked": 1, "pending": 248},
+      "writes_5m": 17,
+      "last_write_at": "2026-09-04T03:19:58Z"
+    }
+  ]
+}
+```
+
+`GET /v1/brain/events`: server-wide SSE of bus events, one JSON envelope per event; a `hello` frame comes first and `: ping` keepalives run every 15 seconds:
+
+```
+event: memory
+data: {"ts":"2026-09-04T03:20:12Z","kind":"memory","namespace":"agent-codehamsa","key":"/tasks/S1A-4/status","data":{"action":"add","writer":"worker-2","namespace":"agent-codehamsa","key":"/tasks/S1A-4/status"}}
+```
+
 ## Repo map
 
 ```
