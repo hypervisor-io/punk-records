@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.3 (2026-09-04)
+
+### Fixed
+- MCP read tools always return at least the first matching fact, so a single document larger than the token budget is readable instead of coming back as an empty, truncated result.
+
 ## v1.5.2 (2026-09-04)
 
 ### Fixed

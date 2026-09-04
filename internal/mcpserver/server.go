@@ -189,6 +189,9 @@ func truncationNote(got, total int) string {
 // truncation fields when it cut anything.
 func budgetRecall(facts []memory.Fact, maxTokens int) recallOut {
 	kept := memory.TokenBudget(facts, effectiveMaxTokens(maxTokens))
+	if len(kept) == 0 && len(facts) > 0 {
+		kept = facts[:1] // one oversized document beats an empty answer
+	}
 	out := recallOut{Facts: kept}
 	if len(kept) < len(facts) {
 		out.Truncated = true
@@ -500,13 +503,22 @@ func finishSearch(in searchIn, facts []memory.Fact, scored []memory.ScoredFact) 
 			hits = memory.CompactFacts(facts, 0)
 		}
 		kept := memory.TokenBudgetCompact(hits, budget)
+		if len(kept) == 0 && len(hits) > 0 {
+			kept = hits[:1]
+		}
 		return searchOut{Hits: kept}.markTruncated(len(kept), len(hits))
 	}
 	if scored != nil {
 		kept := memory.TokenBudgetScored(scored, budget)
+		if len(kept) == 0 && len(scored) > 0 {
+			kept = scored[:1]
+		}
 		return searchOut{Results: kept}.markTruncated(len(kept), len(scored))
 	}
 	kept := memory.TokenBudget(facts, budget)
+	if len(kept) == 0 && len(facts) > 0 {
+		kept = facts[:1]
+	}
 	return searchOut{Facts: kept}.markTruncated(len(kept), len(facts))
 }
 

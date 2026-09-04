@@ -59,6 +59,20 @@ func TestReadToolsDefaultBudget(t *testing.T) {
 		t.Fatalf("explicit cap: facts=%d truncated=%v total=%d", len(out.Facts), out.Truncated, out.Total)
 	}
 
+	// A single document larger than the budget is still returned, with
+	// the truncation fields set when siblings were cut.
+	huge := strings.Repeat("y", 4*20000)
+	res0, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember", Arguments: map[string]any{
+		"namespace": "ns", "key": "/docs/big", "body": huge,
+	}})
+	if err != nil || res0.IsError {
+		t.Fatalf("remember big: %v %s", err, text(t, res0))
+	}
+	call(map[string]any{"namespace": "ns", "prefix": "/docs/big"})
+	if len(out.Facts) != 1 || out.Truncated {
+		t.Fatalf("oversized single doc: facts=%d truncated=%v", len(out.Facts), out.Truncated)
+	}
+
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_keys", Arguments: map[string]any{"namespace": "ns", "prefix": "/tasks"}})
 	if err != nil || res.IsError {
 		t.Fatalf("list_keys: %v %s", err, text(t, res))
