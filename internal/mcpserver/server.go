@@ -400,6 +400,7 @@ func New(d Deps) *mcp.Server {
 		})
 
 	registerMemoryV2Tools(s, d, nsr)
+	registerTaskTools(s, d, nsr)
 
 	if d.Region != nil {
 		registerRegionTools(s, d, nsr)
@@ -915,6 +916,7 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, nil, err
 			}
+			touch(ctx, d, nsr, req, ns, in.Holder)
 			if d.Bus != nil {
 				d.Bus.Publish(bus.Event{Kind: "claim", Key: ns + ":" + in.Key,
 					Data: map[string]string{"holder": in.Holder, "action": "claimed"}})
@@ -931,6 +933,7 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err := d.Region.ReleaseWork(ctx, ns, in.Key, in.Holder); err != nil {
 				return nil, nil, err
 			}
+			touch(ctx, d, nsr, req, ns, in.Holder)
 			if d.Bus != nil {
 				d.Bus.Publish(bus.Event{Kind: "claim", Key: ns + ":" + in.Key,
 					Data: map[string]string{"holder": in.Holder, "action": "released"}})

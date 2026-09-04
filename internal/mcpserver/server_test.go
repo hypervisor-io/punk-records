@@ -153,8 +153,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 29 {
-		t.Fatalf("tools = %d, want 29 (21 plus whoami, remember_many, 6 region tools)", len(tools.Tools))
+	if len(tools.Tools) != 32 {
+		t.Fatalf("tools = %d, want 32 (22 plus whoami, remember_many, 6 region tools)", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -455,8 +455,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 29 {
-		t.Fatalf("tools = %d, want 29 (reflect must stay off without an LLM)", len(tools.Tools))
+	if len(tools.Tools) != 32 {
+		t.Fatalf("tools = %d, want 32 (reflect must stay off without an LLM)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -1000,7 +1000,7 @@ func TestAgentToolsetIsLean(t *testing.T) {
 			t.Fatalf("agent toolset missing %s; have %v", want, got)
 		}
 	}
-	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "register", "list_region_members", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
+	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "list_region_members", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
 		if got[name] {
 			t.Fatalf("agent toolset must not expose %s", name)
 		}
@@ -1012,6 +1012,21 @@ func TestAgentToolsetIsLean(t *testing.T) {
 	}
 	if len(fres.Tools) <= len(res.Tools) {
 		t.Fatalf("full toolset (%d) must be larger than agent (%d)", len(fres.Tools), len(res.Tools))
+	}
+}
+
+func TestAgentToolsetCanRegister(t *testing.T) {
+	cs := sessionOpts(t, nil, func(d *Deps) { d.Toolset = "agent" })
+	callJSON(t, cs, "register", map[string]any{"namespace": "ns", "agent": "w1", "role": "worker"}, nil)
+	var out struct {
+		Members []struct {
+			Agent      string `json:"agent"`
+			LastSeenAt string `json:"last_seen_at"`
+		} `json:"members"`
+	}
+	callJSON(t, cs, "list_tasks", map[string]any{"namespace": "ns"}, &out)
+	if len(out.Members) != 1 || out.Members[0].Agent != "w1" || out.Members[0].LastSeenAt == "" {
+		t.Fatalf("members = %+v", out.Members)
 	}
 }
 

@@ -437,7 +437,7 @@ on the version they started with). Skills are
 | Surface | What |
 |---|---|
 | REST `/v1` | tasks, proposals, memory, webhook intake, agent hooks - bearer-keyed (`punk apikey create`) |
-| MCP | `punk mcp` (stdio) or `/mcp` (HTTP): `submit_task`, `get_task`, `list_agents`, `remember`, `remember_document`, `remember_model`, `recall`, `recall_as_of`, `forget`, `search` (hybrid / scored / interleave / temporal / reranked / `max_tokens` / `expand`), `unified_search`, `triplet_search`, `reflect` (when a model is configured), `list_keys`, `list_models`, `list_entities`, `feedback`, `profile`, `diagnose`, `link` / `unlink` / `neighbors` |
+| MCP | `punk mcp` (stdio) or `/mcp` (HTTP): `submit_task`, `get_task`, `list_agents`, `remember`, `remember_document`, `remember_model`, `recall`, `recall_as_of`, `forget`, `search` (hybrid / scored / interleave / temporal / reranked / `max_tokens` / `expand`), `unified_search`, `triplet_search`, `reflect` (when a model is configured), `list_keys`, `list_tasks`, `await_tasks`, `set_task_status`, `register`, `list_models`, `list_entities`, `feedback`, `profile`, `diagnose`, `link` / `unlink` / `neighbors` |
 | A2A (in) | `POST /v1/a2a` (Agent2Agent v0.3 JSON-RPC + SSE): `message/send`, `message/stream`, `tasks/{get,cancel,resubscribe}`, push configs; card at `/.well-known/agent-card.json` |
 | A2A (out) | delegate to foreign agents: `punk a2a card\|send` (CLI) or the `delegate` MCP tool over `a2a.remotes` |
 | CLI | `serve` / `migrate` / `validate` / `apikey` / `export` + `import` (memory JSONL) / `a2a` / `itbench` / `membench` / `hook` / `connect` / `skills` |
@@ -447,6 +447,27 @@ on the version they started with). Skills are
 Agents should ask for `format: compact` (MCP) or `?format=compact` (HTTP): each hit becomes key, clipped body, score and flags, which is what an agent needs to judge relevance and roughly a third of the tokens of a full fact. Put exact identifiers, error strings or file names in `anchors`; each becomes an extra phrase-match route in the fusion rather than a filter. Pass `repo_revision` to have code-map facts seeded from another revision flagged `stale`.
 
 With `ai.embeddings.provider: local`, punk embeds in-process with a pinned static model (about 31 MB, downloaded once from huggingface.co) and needs no Ollama. Run `punk embed-backfill --ns <ns> --force` after switching providers or upgrading past a release that changed the embedding input.
+
+## Task board
+
+Agents coordinate through `/tasks/<id>` facts; the task board reads them back as data. `list_tasks` (MCP) or `GET /v1/namespaces/<ns>/tasks` returns one row per task with its parsed state (`pending`, `in_progress`, `review`, `blocked`, `done`), the first line of its status, `depends_on`, the live claim holder and lease, whether it is `ready` (pending, unclaimed, dependencies done), plus `next`, per-state counts and the region's members with `last_seen_at`.
+
+`await_tasks` (MCP) or `GET /v1/namespaces/<ns>/tasks?wait=55` blocks until a task, status or claim changes in the namespace, then returns the board with `changed` and the keys that fired. `set_task_status` (MCP) or `POST /v1/namespaces/<ns>/tasks/<id>/status` writes the status fact in the canonical shape with structured attributes; `done` and `blocked` release the caller's claim on the task.
+
+```json
+{
+  "namespace": "punk-task-board",
+  "next": "D3",
+  "counts": {"total": 6, "pending": 3, "in_progress": 1, "review": 0, "blocked": 0, "done": 2},
+  "tasks": [
+    {"id": "D1", "title": "memory.ListTasks and taskboard.Build", "state": "done", "status": "done: 1a2b3c board added; tests: go test ./internal/taskboard/", "updated_at": "2026-09-05T10:02:11Z", "by": "worker-1", "ready": false},
+    {"id": "D3", "title": "list_tasks, await_tasks, HTTP board", "state": "pending", "depends_on": ["D1", "D2"], "ready": true}
+  ],
+  "members": [{"namespace": "punk-task-board", "agent": "worker-1", "role": "worker", "joined_at": "...", "last_seen_at": "..."}]
+}
+```
+
+Every coordination call by a registered agent updates its `last_seen_at`, so a quiet region can be told apart from a dead one. A holder re-claiming its own key extends the lease.
 
 ## Brain view
 

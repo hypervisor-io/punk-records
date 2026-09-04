@@ -147,3 +147,29 @@ test('nearestNeighbours, adjacency, farthestPoints, topIndex, slotAnchor, signal
   assert.ok(path.length >= 2 && path.length <= 4);
   for (let i = 1; i < path.length; i++) assert.ok(adj.get(path[i - 1]).includes(path[i]));
 });
+
+test('describe2 words a status write by its state', () => {
+  const ev = (state) => ({ kind: 'memory', key: '/tasks/T1/status', data: { writer: 'w1', action: 'add', state } });
+  assert.equal(describe2(ev('done')).what, 'finished T1');
+  assert.equal(describe2(ev('blocked')).what, 'blocked on T1');
+  assert.equal(describe2(ev('review')).what, 'sent T1 to review');
+  assert.equal(describe2(ev('in_progress')).what, 'started T1');
+  assert.equal(describe2(ev(undefined)).what, 'finished T1');
+  assert.equal(describe2(ev('in_progress')).hot, false);
+  assert.equal(describe2(ev('done')).hot, true);
+});
+
+test('coalesce folds status writes only when the state matches', () => {
+  const ev = (state) => ({ kind: 'memory', namespace: 'ns', key: '/tasks/T1/status', data: { writer: 'w1', action: 'add', state } });
+  let rows = [];
+  rows = coalesce(rows, ev('in_progress'), 1000);
+  rows = coalesce(rows, ev('done'), 2000);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].what, 'finished T1');
+  assert.equal(rows[1].what, 'started T1');
+  rows = [];
+  rows = coalesce(rows, ev('in_progress'), 1000);
+  rows = coalesce(rows, ev('in_progress'), 2000);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].count, 2);
+});

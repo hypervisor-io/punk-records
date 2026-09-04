@@ -89,6 +89,8 @@ func New(log *slog.Logger, d Deps) *Server {
 				r.Get("/memories/search", s.handleSearch)
 				r.Get("/keys", s.handleListKeys)
 				r.Get("/events", s.handleMemoryEvents)
+				r.Get("/tasks", s.handleTaskBoard)
+				r.Post("/tasks/{id}/status", s.handleTaskStatus)
 				r.Get("/profile", s.handleProfile)
 				r.Get("/diagnose", s.handleDiagnose)
 			})
