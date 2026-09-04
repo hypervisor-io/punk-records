@@ -3,10 +3,12 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -128,4 +130,58 @@ func (r headerRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		c.Header[k] = v
 	}
 	return http.DefaultTransport.RoundTrip(c)
+}
+
+func TestClientSupportsRoots(t *testing.T) {
+	if clientSupportsRoots(nil) {
+		t.Fatal("nil params must not support roots")
+	}
+	if clientSupportsRoots(&mcp.InitializeParams{}) {
+		t.Fatal("nil capabilities must not support roots")
+	}
+	if clientSupportsRoots(&mcp.InitializeParams{Capabilities: &mcp.ClientCapabilities{}}) {
+		t.Fatal("capabilities without roots must not support roots")
+	}
+	if !clientSupportsRoots(&mcp.InitializeParams{Capabilities: &mcp.ClientCapabilities{RootsV2: &mcp.RootCapabilities{}}}) {
+		t.Fatal("roots capability must be detected")
+	}
+}
+
+// TestRawHTTPClientWithoutRootsIsNotAskedForRoots drives the server the way
+// scripts/punk.sh does: plain JSON-RPC over HTTP with no roots capability.
+// The tool call must return the result directly instead of emitting a
+// roots/list request the client can never answer.
+func TestRawHTTPClientWithoutRootsIsNotAskedForRoots(t *testing.T) {
+	srv := newTestServerForHTTP(t)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	post := func(sid, body string) (*http.Response, string) {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
+		}
+		res, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("post: %v (a hang here means the server waited on roots/list)", err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res, string(b)
+	}
+	res, _ := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}`)
+	sid := res.Header.Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("no session id from initialize")
+	}
+	post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	_, body := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami","arguments":{}}}`)
+	if strings.Contains(body, `"method":"roots/list"`) {
+		t.Fatalf("server asked a roots-less client for roots:\n%s", body)
+	}
+	if !strings.Contains(body, `"source":"default"`) {
+		t.Fatalf("whoami over raw HTTP = %s", body)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -24,6 +25,17 @@ type nsResolver struct {
 
 // maxCachedSessions bounds the roots cache; see rootPath.
 const maxCachedSessions = 1024
+
+// rootsTimeout caps the roots/list round trip so a client that advertised
+// roots but never answers cannot hold a tool call open.
+const rootsTimeout = 5 * time.Second
+
+// clientSupportsRoots reports whether the initialize handshake carried the
+// roots capability. The SDK sets RootsV2 exactly when the wire capabilities
+// object had a "roots" key.
+func clientSupportsRoots(p *mcp.InitializeParams) bool {
+	return p != nil && p.Capabilities != nil && p.Capabilities.RootsV2 != nil
+}
 
 type rootInfo struct {
 	path string // "" when the client advertised no usable root
@@ -48,11 +60,18 @@ func (r *nsResolver) rootPath(ctx context.Context, ss *mcp.ServerSession) string
 		return info.path
 	}
 	path := ""
-	if res, err := ss.ListRoots(ctx, nil); err == nil {
-		for _, root := range res.Roots {
-			if u, perr := url.Parse(root.URI); perr == nil && u.Scheme == "file" && u.Path != "" {
-				path = filepath.Clean(u.Path)
-				break
+	// Only ask a client that advertised the roots capability. A bare HTTP
+	// client (curl, a shell script) never answers roots/list, and the
+	// request would stall the tool call until the transport timed out.
+	if clientSupportsRoots(ss.InitializeParams()) {
+		rctx, cancel := context.WithTimeout(ctx, rootsTimeout)
+		defer cancel()
+		if res, err := ss.ListRoots(rctx, nil); err == nil {
+			for _, root := range res.Roots {
+				if u, perr := url.Parse(root.URI); perr == nil && u.Scheme == "file" && u.Path != "" {
+					path = filepath.Clean(u.Path)
+					break
+				}
 			}
 		}
 	}
