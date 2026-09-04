@@ -9,7 +9,7 @@ import "github.com/modelcontextprotocol/go-sdk/mcp"
 var agentToolset = []string{
 	"whoami", "recall", "search", "unified_search", "list_keys",
 	"remember", "remember_many", "remember_document", "feedback",
-	"claim_work", "release_work", "list_claims",
+	"claim_work", "release_work", "list_claims", "set_task_status",
 }
 
 // fullOnlyTools are removed when Deps.Toolset is "agent". Keep in sync

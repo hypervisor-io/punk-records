@@ -400,6 +400,7 @@ func New(d Deps) *mcp.Server {
 		})
 
 	registerMemoryV2Tools(s, d, nsr)
+	registerTaskTools(s, d, nsr)
 
 	if d.Region != nil {
 		registerRegionTools(s, d, nsr)

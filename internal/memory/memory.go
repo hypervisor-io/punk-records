@@ -310,9 +310,13 @@ func (s *Store) write(ctx context.Context, in WriteInput, outbox bool) (*Fact, e
 			return fmt.Errorf("insert memory: %w", err)
 		}
 		if outbox {
-			if err := s.outboxTx(ctx, tx, "memory", in.Namespace+":"+in.Key, map[string]any{
+			payload := map[string]any{
 				"namespace": in.Namespace, "key": in.Key, "action": action, "writer": in.Writer,
-			}); err != nil {
+			}
+			if st, ok := in.Attributes["state"].(string); ok && st != "" {
+				payload["state"] = st
+			}
+			if err := s.outboxTx(ctx, tx, "memory", in.Namespace+":"+in.Key, payload); err != nil {
 				return err
 			}
 		}

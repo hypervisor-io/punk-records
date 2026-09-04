@@ -333,3 +333,24 @@ func TestDedupWriteBumpsReinforcements(t *testing.T) {
 		t.Fatalf("recalled reinforcements = %d, want 2", got[0].Reinforcements)
 	}
 }
+
+func TestOutboxCarriesStateAttribute(t *testing.T) {
+	s, _, _ := newTest(t)
+	ctx := context.Background()
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/tasks/T1/status", Body: "done: x", Attributes: map[string]any{"state": "done", "sha": "abc"}, Writer: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: "/notes/a", Body: "plain", Writer: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	var got []OutboxEvent
+	if _, err := s.DrainOutbox(ctx, 10, func(e OutboxEvent) error { got = append(got, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Payload["state"] != "done" || got[0].Payload["sha"] != "" {
+		t.Fatalf("payloads = %+v", got)
+	}
+	if _, ok := got[1].Payload["state"]; ok {
+		t.Fatalf("plain fact must not carry state: %+v", got[1].Payload)
+	}
+}
