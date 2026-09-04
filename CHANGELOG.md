@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.7.1 (2026-09-04)
+
+### Changed
+- Brain view: region activity now glows on the cortex surface itself (shell shader emission around each region anchor) instead of floating haze sprites; stronger red throughout; every glow is red. Depth cues added: holographic ground rings under the brain, drifting dust around it, a scan band sweeping the shell, and a vignette.
+
 ## v1.7.0 (2026-09-04)
 
 ### Changed

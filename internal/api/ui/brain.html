@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Punk Records - brain</title>
 <style>
-:root{--ink:#050507;--panel:#0b0c11;--line:#1a1c26;--glass:#ff2d55;--rim:#ffb3c1;--fire:#ffc470;--ember:#ffb070;--text:#e9e6ee;--dim:#6f7284;
+:root{--ink:#050507;--panel:#0b0c11;--line:#1a1c26;--glass:#ff2d55;--rim:#ff4d6d;--fire:#ff5c7a;--ember:#ffb070;--text:#e9e6ee;--dim:#6f7284;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box;margin:0}
 html,body{height:100%;background:var(--ink);color:var(--text);font:13px/1.45 var(--sans);overflow:hidden}
 #scene{position:fixed;inset:0;width:100%;height:100%;display:block}
+#vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 45%,rgba(0,0,0,0) 40%,rgba(0,0,0,.55) 100%)}
 #labels{position:fixed;inset:0;pointer-events:none}
 .label{position:absolute;font:11px var(--mono);color:var(--rim);white-space:nowrap;transform:translate(0,-50%);padding-left:28px}
 .label::before{content:"";position:absolute;left:0;top:50%;width:24px;height:1px;background:var(--rim);opacity:.6}
@@ -52,6 +53,7 @@ html,body{height:100%;background:var(--ink);color:var(--text);font:13px/1.45 var
 </head>
 <body>
 <canvas id="scene"></canvas>
+<div id="vignette"></div>
 <div id="labels"></div>
 <div class="wordmark">Punk Records <b>brain</b><small id="meta">connecting</small></div>
 <aside id="legend" class="panel"><header><span>Regions</span></header><ul id="legendList"></ul></aside>

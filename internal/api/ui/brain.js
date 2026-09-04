@@ -24,17 +24,37 @@ export const hooks = { onFrame: null };
 let focus = -1;
 export function setFocus(slot) { focus = slot; }
 
-const fresnel = (side, rim) => new THREE.ShaderMaterial({
-  uniforms: { uColor: { value: new THREE.Color(0xff2d55) }, uRim: { value: new THREE.Color(rim) } },
-  vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0); vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }`,
-  fragmentShader: `uniform vec3 uColor; uniform vec3 uRim; varying vec3 vN; varying vec3 vV;
-    void main(){ float f = pow(1.0 - max(dot(normalize(vN), normalize(vV)), 0.0), 2.6); vec3 c = uColor*0.05 + uRim*f*1.1; gl_FragColor = vec4(c, 0.06 + f*0.9); }`,
+// Shell uniforms are shared by the front and back passes: region glow is
+// emitted on the cortex surface around each anchor, and a scan band sweeps
+// the shell so the glass reads as a hologram with depth.
+const shellUniforms = {
+  uColor: { value: new THREE.Color(0xff2d55) },
+  uFire: { value: new THREE.Color(0xff7a94) },
+  uAnchor: { value: Array.from({ length: 12 }, () => new THREE.Vector3(0, 0, 99)) },
+  uGlow: { value: new Float32Array(12) },
+  uScan: { value: -2 },
+};
+const fresnel = (side, rim, fill) => new THREE.ShaderMaterial({
+  uniforms: { ...shellUniforms, uRim: { value: new THREE.Color(rim) }, uFill: { value: fill } },
+  vertexShader: `varying vec3 vN; varying vec3 vV; varying vec3 vP;
+    void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0); vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); vP = position; gl_Position = projectionMatrix*mv; }`,
+  fragmentShader: `uniform vec3 uColor; uniform vec3 uRim; uniform vec3 uFire; uniform float uFill; uniform vec3 uAnchor[12]; uniform float uGlow[12]; uniform float uScan;
+    varying vec3 vN; varying vec3 vV; varying vec3 vP;
+    void main(){
+      float f = pow(1.0 - max(dot(normalize(vN), normalize(vV)), 0.0), 2.4);
+      float e = 0.0;
+      for (int i = 0; i < 12; i++) { e += uGlow[i] * smoothstep(0.7, 0.0, distance(vP, uAnchor[i])); }
+      e = min(e, 1.4);
+      float scan = smoothstep(0.05, 0.0, abs(vP.z - uScan)) * 0.35;
+      vec3 c = uColor * uFill + uRim * f * 1.15 + mix(uColor, uFire, min(e, 1.0)) * e * 4.0 + uRim * scan;
+      gl_FragColor = vec4(c, uFill * 1.2 + f * 0.9 + e * 0.8 + scan);
+    }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side,
 });
 
 let anchors = [];            // neuron indices (12)
 let anchorPos = [];          // THREE.Vector3 in rig space
-let neuronPos, adjacency, hazeSprites = [], fireLayers = [];
+let neuronPos, adjacency, fireLayers = [], groundGroup, dustGroup;
 const signals = [];          // { path: number[], t: 0..1, opacity }
 let signalPoints;
 
@@ -46,11 +66,11 @@ export const ready = (async () => {
   geo.setIndex(new THREE.BufferAttribute(mesh.index, 1));
   geo.computeVertexNormals();
 
-  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x14060a, transparent: true, opacity: 0.45, depthWrite: true }));
-  const back = new THREE.Mesh(geo, fresnel(THREE.BackSide, 0x7a1a2e));
-  const front = new THREE.Mesh(geo, fresnel(THREE.FrontSide, 0xffb3c1));
+  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x2a0812, transparent: true, opacity: 0.5, depthWrite: true }));
+  const back = new THREE.Mesh(geo, fresnel(THREE.BackSide, 0xa3122f, 0.04));
+  const front = new THREE.Mesh(geo, fresnel(THREE.FrontSide, 0xff4d6d, 0.12));
   body.renderOrder = 0; back.renderOrder = 1; front.renderOrder = 2;
-  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 38), new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 38), new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false }));
   edges.renderOrder = 3;
   rig.add(body, back, front, edges);
 
@@ -61,31 +81,59 @@ export const ready = (async () => {
   const axonPos = new Float32Array(pairs.length * 3);
   for (let p = 0; p < pairs.length; p++) axonPos.set(neuronPos.subarray(pairs[p] * 3, pairs[p] * 3 + 3), p * 3);
   const axons = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(axonPos, 3)),
-    new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.10, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
   axons.renderOrder = 3;
   const neurons = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(neuronPos, 3)),
-    new THREE.PointsMaterial({ color: 0xffb3c1, size: 0.02, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    new THREE.PointsMaterial({ color: 0xff8296, size: 0.02, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
   neurons.renderOrder = 4;
   rig.add(axons, neurons);
 
   anchors = farthestPoints(neuronPos, 12, topIndex(neuronPos));
   anchorPos = anchors.map((i) => new THREE.Vector3(neuronPos[i * 3], neuronPos[i * 3 + 1], neuronPos[i * 3 + 2]));
-  const tex = hazeTexture();
   anchors.forEach((ai, a) => {
+    shellUniforms.uAnchor.value[a].copy(anchorPos[a]);
     const near = [];
     for (let k = 0; k < 1800; k++) {
       const dx = neuronPos[k * 3] - anchorPos[a].x, dy = neuronPos[k * 3 + 1] - anchorPos[a].y, dz = neuronPos[k * 3 + 2] - anchorPos[a].z;
       if (dx * dx + dy * dy + dz * dz < 0.09) near.push(neuronPos[k * 3], neuronPos[k * 3 + 1], neuronPos[k * 3 + 2]);
     }
     const fire = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(near), 3)),
-      new THREE.PointsMaterial({ color: 0xffe3a3, size: 0.03, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+      new THREE.PointsMaterial({ color: 0xffc2cc, size: 0.03, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
     fire.renderOrder = 5;
-    const haze = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
-    haze.position.copy(anchorPos[a]); haze.scale.set(0.9, 0.9, 1); haze.renderOrder = 6;
-    fire.userData.indices = near.length / 3;
-    fireLayers.push(fire); hazeSprites.push(haze);
-    rig.add(fire, haze);
+    fireLayers.push(fire);
+    rig.add(fire);
   });
+
+  // depth cues: holographic ground rings under the brain and drifting dust around it
+  const ground = new THREE.Group();
+  ground.position.y = -1.35;
+  [[1.15, 0.28], [1.55, 0.16], [1.95, 0.08]].forEach(([r, op]) => {
+    const pts = [];
+    for (let i = 0; i <= 128; i++) { const a = i / 128 * Math.PI * 2; pts.push(Math.cos(a) * r, 0, Math.sin(a) * r); }
+    const ring = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3)),
+      new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false }));
+    ground.add(ring);
+  });
+  const spokes = [];
+  for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2; spokes.push(Math.cos(a) * 1.15, 0, Math.sin(a) * 1.15, Math.cos(a) * 1.95, 0, Math.sin(a) * 1.95); }
+  ground.add(new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(spokes), 3)),
+    new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.06, blending: THREE.AdditiveBlending, depthWrite: false })));
+  const pool = new THREE.Mesh(new THREE.CircleGeometry(1.5, 64), new THREE.MeshBasicMaterial({ map: groundTexture(), transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+  pool.rotation.x = -Math.PI / 2;
+  ground.add(pool);
+  scene.add(ground);
+  groundGroup = ground;
+
+  const dustRng = lcg(1234);
+  const dustN = 600, dust = new Float32Array(dustN * 3);
+  for (let i = 0; i < dustN; i++) {
+    let x, y, z, r;
+    do { x = dustRng() * 2 - 1; y = dustRng() * 2 - 1; z = dustRng() * 2 - 1; r = Math.hypot(x, y, z); } while (r > 1 || r < 0.42);
+    dust[i * 3] = x * 3.4; dust[i * 3 + 1] = y * 2.4; dust[i * 3 + 2] = z * 3.4;
+  }
+  dustGroup = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(dust, 3)),
+    new THREE.PointsMaterial({ color: 0xff2d55, size: 0.012, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(dustGroup);
 
   const sp = new Float32Array(96 * 3);
   const sa = new Float32Array(96);
@@ -104,11 +152,11 @@ export const ready = (async () => {
   rig.add(signalPoints);
 })();
 
-function hazeTexture() {
-  const c = document.createElement('canvas'); c.width = c.height = 128;
-  const g = c.getContext('2d'); const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-  grad.addColorStop(0, 'rgba(255,196,112,0.9)'); grad.addColorStop(0.4, 'rgba(255,196,112,0.25)'); grad.addColorStop(1, 'rgba(255,196,112,0)');
-  g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+function groundTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'); const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, 'rgba(255,45,85,0.35)'); grad.addColorStop(0.5, 'rgba(255,45,85,0.08)'); grad.addColorStop(1, 'rgba(255,45,85,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
   return new THREE.CanvasTexture(c);
 }
 
@@ -148,9 +196,9 @@ function frame(now) {
   const anchorGlow = new Float32Array(12);
   for (let s = 0; s < MAX_REGIONS; s++) { activity[s] = decay(activity[s], dt); anchorGlow[slotAnchor(s)] = Math.max(anchorGlow[slotAnchor(s)], glow(activity[s])); }
   const focusAnchor = focus >= 0 ? slotAnchor(focus) : -1;
-  for (let a = 0; a < hazeSprites.length; a++) {
+  for (let a = 0; a < fireLayers.length; a++) {
     const dim = focusAnchor >= 0 && focusAnchor !== a ? 0.35 : 1;
-    hazeSprites[a].material.opacity = anchorGlow[a] * dim;
+    shellUniforms.uGlow.value[a] = anchorGlow[a] * dim;
     fireLayers[a].material.opacity = anchorGlow[a] * dim;
   }
   if (!reduced && adjacency) { ambientAcc += dt; if (ambientAcc > 1) { ambientAcc = 0; spawnSignal(Math.floor(signalRng() * 12), 0.35); } }
@@ -174,6 +222,9 @@ function frame(now) {
     signalPoints.geometry.attributes.position.needsUpdate = true;
   }
   if (!reduced && !dragging && now - idleSince > 4000) yaw += dt * 0.08;
+  shellUniforms.uScan.value = reduced ? -2 : -1.1 + ((now / 1000) % 7) / 7 * 2.4;
+  if (dustGroup) dustGroup.rotation.y += dt * 0.02;
+  if (groundGroup) groundGroup.rotation.y -= dt * 0.03;
   camera.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, Math.sin(pitch) * dist + 0.2, Math.cos(yaw) * Math.cos(pitch) * dist);
   camera.lookAt(0, 0, 0);
   rig.updateMatrixWorld();
