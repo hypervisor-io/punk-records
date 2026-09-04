@@ -26,10 +26,11 @@ func New(db *store.DB, now func() time.Time) *Store {
 
 // Member is one satellite registered to a region.
 type Member struct {
-	Namespace string `json:"namespace"`
-	Agent     string `json:"agent"`
-	Role      string `json:"role"`
-	JoinedAt  string `json:"joined_at"`
+	Namespace  string `json:"namespace"`
+	Agent      string `json:"agent"`
+	Role       string `json:"role"`
+	JoinedAt   string `json:"joined_at"`
+	LastSeenAt string `json:"last_seen_at,omitempty"`
 }
 
 // Ensure creates a region if absent.
@@ -49,10 +50,23 @@ func (s *Store) Register(ctx context.Context, ns, agent, role string) error {
 	if err := s.Ensure(ctx, ns, ""); err != nil {
 		return err
 	}
+	now := store.TimeToDB(s.now())
 	_, err := s.db.ExecContext(ctx, s.db.Rebind(`
-		INSERT INTO region_members (namespace, agent, role, joined_at) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (namespace, agent) DO UPDATE SET role = excluded.role`),
-		ns, agent, role, store.TimeToDB(s.now()))
+		INSERT INTO region_members (namespace, agent, role, joined_at, last_seen_at) VALUES ($1, $2, $3, $4, $4)
+		ON CONFLICT (namespace, agent) DO UPDATE SET role = excluded.role, last_seen_at = excluded.last_seen_at`),
+		ns, agent, role, now)
+	return err
+}
+
+// Touch records that an agent is alive in a region. Unregistered agents
+// are ignored: the heartbeat never creates membership by itself.
+func (s *Store) Touch(ctx context.Context, ns, agent string) error {
+	if ns == "" || agent == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, s.db.Rebind(
+		`UPDATE region_members SET last_seen_at = $1 WHERE namespace = $2 AND agent = $3`),
+		store.TimeToDB(s.now()), ns, agent)
 	return err
 }
 
@@ -75,7 +89,7 @@ func (s *Store) Regions(ctx context.Context, agent string) ([]Member, error) {
 
 func (s *Store) query(ctx context.Context, where string, arg string) ([]Member, error) {
 	rows, err := s.db.QueryContext(ctx, s.db.Rebind(
-		`SELECT namespace, agent, role, joined_at FROM region_members `+where), arg)
+		`SELECT namespace, agent, role, joined_at, COALESCE(last_seen_at, '') FROM region_members `+where), arg)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +97,7 @@ func (s *Store) query(ctx context.Context, where string, arg string) ([]Member, 
 	out := []Member{}
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.Namespace, &m.Agent, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.Namespace, &m.Agent, &m.Role, &m.JoinedAt, &m.LastSeenAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

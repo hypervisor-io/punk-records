@@ -39,6 +39,23 @@ func validState(s string) bool {
 	return false
 }
 
+// touch is the heartbeat: any coordination call by a named identity
+// bumps last_seen_at for that agent in the namespace. Anonymous "mcp"
+// callers and a nil region store are skipped; errors are ignored because
+// the heartbeat must never fail the call it rides on.
+func touch(ctx context.Context, d Deps, nsr *nsResolver, req *mcp.CallToolRequest, ns, agent string) {
+	if d.Region == nil {
+		return
+	}
+	if agent == "" {
+		agent = nsr.identity(req)
+	}
+	if agent == "" || agent == "mcp" {
+		return
+	}
+	_ = d.Region.Touch(ctx, ns, agent)
+}
+
 // registerTaskTools adds the task board tools. They need only Mem; Region
 // and Bus are optional and degrade (no claim release, no waiting).
 func registerTaskTools(s *mcp.Server, d Deps, nsr *nsResolver) {
@@ -73,6 +90,7 @@ func registerTaskTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}); err != nil {
 				return nil, statusOut{}, err
 			}
+			touch(ctx, d, nsr, req, ns, in.Agent)
 			out := statusOut{Key: key, State: in.State, Body: body}
 			if d.Region != nil && (in.State == "done" || in.State == "blocked") {
 				if err := d.Region.ReleaseWork(ctx, ns, "/tasks/"+in.ID, in.Agent); err == nil {
@@ -128,6 +146,7 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.State != "" && !validState(in.State) {
 				return nil, taskboard.Board{}, fmt.Errorf("state must be one of %s", strings.Join(memory.TaskStates, ", "))
 			}
+			touch(ctx, d, nsr, req, ns, "")
 			b, err := taskboard.Build(ctx, d.Mem, d.Region, ns)
 			if err != nil {
 				return nil, taskboard.Board{}, err
@@ -147,6 +166,7 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 				timeout = awaitMax
 			}
 			keys := taskboard.WaitForChange(ctx, d.Bus, ns, timeout)
+			touch(ctx, d, nsr, req, ns, "")
 			b, err := taskboard.Build(ctx, d.Mem, d.Region, ns)
 			if err != nil {
 				return nil, awaitOut{}, err

@@ -9,7 +9,7 @@ import "github.com/modelcontextprotocol/go-sdk/mcp"
 var agentToolset = []string{
 	"whoami", "recall", "search", "unified_search", "list_keys",
 	"remember", "remember_many", "remember_document", "feedback",
-	"claim_work", "release_work", "list_claims", "set_task_status",
+	"claim_work", "release_work", "list_claims", "register", "set_task_status",
 	"list_tasks", "await_tasks",
 }
 
@@ -19,7 +19,7 @@ var fullOnlyTools = []string{
 	"submit_task", "get_task", "list_agents", "delegate", "reflect",
 	"recall_as_of", "forget", "link", "unlink", "triplet_search", "neighbors",
 	"remember_model", "list_models", "list_entities", "profile", "diagnose",
-	"register", "list_region_members", "list_agent_regions",
+	"list_region_members", "list_agent_regions",
 }
 
 // applyToolset trims the server to the named set. Unknown or empty means full.
