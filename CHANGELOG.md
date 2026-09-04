@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.7.0 (unreleased)
+## v1.7.0 (2026-09-04)
 
 ### Changed
 - Brain view redrawn around an anatomical brain mesh (BodyParts3D, CC BY-SA 2.1 JP, attribution at `/brain/mesh/NOTICE`): a translucent glass shell with visible gyri, a lattice of neurons inside, signals that run along axons when memory is written, magenta haze on active regions, floating region labels, and a plain-language activity log that coalesces bursts and has a thin scrollbar.
