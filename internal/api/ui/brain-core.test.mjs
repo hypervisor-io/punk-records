@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decay, glow, eventWeight, seedActivity, parseSSE, assignSlots, describe,
-  insideBrain, sampleBrain, foldValue, regionSeeds, nearestSeed, mulberry32, MAX_REGIONS,
+  insideBrain, sampleBrain, foldValue, regionSeeds, nearestSeed, slotSeed, mulberry32, MAX_REGIONS,
 } from './brain-core.js';
 
 test('decay halves per half-life and never goes negative', () => {
@@ -83,4 +83,12 @@ test('region seeds sit on the surface and nearestSeed picks the closest', () => 
   }
   const k = nearestSeed(seeds[9], seeds[10], seeds[11], seeds);
   assert.equal(k, 3);
+});
+
+test('slotSeed is a bijection on the slot range that separates neighbours', () => {
+  const seen = new Set();
+  for (let i = 0; i < MAX_REGIONS; i++) seen.add(slotSeed(i));
+  assert.equal(seen.size, MAX_REGIONS);
+  assert.equal(slotSeed(0), 0);
+  assert.ok(Math.abs(slotSeed(1) - slotSeed(0)) > 8);
 });

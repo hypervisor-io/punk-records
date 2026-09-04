@@ -100,10 +100,10 @@ export function mulberry32(seed) {
 export function insideBrain(x, y, z) {
   const hx = Math.abs(x) - 0.42;
   const cer = (hx * hx) / (0.72 * 0.72) + (y * y) / (0.78 * 0.78) + (z * z) / (1.2 * 1.2);
-  if (cer < 1 && cer > 0.74 && !(Math.abs(x) < 0.05 && y > -0.2)) return true;
+  if (cer < 1 && cer > 0.86 && !(Math.abs(x) < 0.08 && y > -0.25)) return true;
   const cy = y + 0.55, cz = z + 0.75;
   const cb = (x * x) / (0.55 * 0.55) + (cy * cy) / (0.32 * 0.32) + (cz * cz) / (0.42 * 0.42);
-  if (cb < 1 && cb > 0.6) return true;
+  if (cb < 1 && cb > 0.72) return true;
   const sz = z + 0.35;
   if (y < -0.45 && y > -1.1 && x * x + sz * sz < 0.18 * 0.18) return true;
   return false;
@@ -115,6 +115,9 @@ export function sampleBrain(count, rng) {
   while (i < count) {
     const x = (rng() * 2 - 1) * 1.2, y = (rng() * 2 - 1) * 1.1, z = (rng() * 2 - 1) * 1.4;
     if (!insideBrain(x, y, z)) continue;
+    // Carve sulci: on the hemispheres, drop points where the fold value is
+    // low so the gyri read as ridges instead of a uniform haze.
+    if (y > -0.45 && foldValue(x, y, z) < 0.3 && rng() < 0.85) continue;
     out[i * 3] = x; out[i * 3 + 1] = y; out[i * 3 + 2] = z;
     i++;
   }
@@ -123,7 +126,7 @@ export function sampleBrain(count, rng) {
 
 // foldValue is a cheap gyri pattern: layered sines, remapped to [0,1].
 export function foldValue(x, y, z) {
-  const v = Math.sin(6 * x + 4 * Math.sin(3 * z)) * Math.sin(7 * y + 3 * Math.cos(2 * x + z));
+  const v = Math.sin(9 * x + 4 * Math.sin(3 * z) + 2 * y) * Math.sin(8 * y + 3 * Math.cos(2 * x + 5 * z));
   return 0.5 + 0.5 * v;
 }
 
@@ -142,6 +145,13 @@ export function regionSeeds(n) {
     out[i * 3 + 2] = Math.sin(a) * r * 1.2;
   }
   return out;
+}
+
+// slotSeed spreads consecutive namespace slots across the surface: the
+// golden spiral puts seeds 0..n next to each other at the top, so slot k
+// takes seed (k * 37) mod 64 (37 is coprime with 64, so it is a bijection).
+export function slotSeed(slot) {
+  return (slot * 37) % MAX_REGIONS;
 }
 
 export function nearestSeed(x, y, z, seeds) {

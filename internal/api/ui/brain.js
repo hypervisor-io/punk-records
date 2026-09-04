@@ -1,10 +1,10 @@
 import * as THREE from './vendor/three.module.min.js';
 import {
-  MAX_REGIONS, decay, glow, sampleBrain, foldValue, regionSeeds, nearestSeed, mulberry32,
+  MAX_REGIONS, decay, glow, sampleBrain, foldValue, regionSeeds, nearestSeed, slotSeed, mulberry32,
   assignSlots, eventWeight, seedActivity, parseSSE, describe,
 } from './brain-core.js';
 
-const POINTS = 30000;
+const POINTS = 36000;
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ---- renderer, scene, camera ------------------------------------------
@@ -72,7 +72,7 @@ void main() {
   vDim = (uFocus >= 0.0 && abs(uFocus - region) > 0.5) ? 0.25 : 1.0;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   float pulse = 1.0 + uPulse * 0.18 * vGlow * sin(uTime * 6.0 + position.y * 9.0 + position.x * 5.0);
-  gl_PointSize = (2.0 + 4.5 * vGlow) * pulse * uPixelRatio * (150.0 / -mv.z);
+  gl_PointSize = (2.8 + 4.0 * vGlow) * pulse * uPixelRatio * (3.6 / -mv.z);
   gl_Position = projectionMatrix * mv;
 }`;
 
@@ -91,8 +91,8 @@ void main() {
   float soft = smoothstep(0.25, 0.0, d);
   vec3 col = mix(uCold, uWarm, smoothstep(0.0, 0.6, vGlow));
   col = mix(col, uHot, smoothstep(0.6, 1.0, vGlow));
-  float a = soft * (0.16 + 0.22 * vFold + 0.85 * vGlow) * vDim;
-  gl_FragColor = vec4(col * (0.55 + 1.6 * vGlow), a);
+  float a = soft * (0.07 + 0.26 * vFold * vFold + 0.6 * vGlow) * vDim;
+  gl_FragColor = vec4(col * (0.7 + 1.3 * vGlow), a);
 }`;
 
 const material = new THREE.ShaderMaterial({
@@ -120,7 +120,7 @@ varying float vT;
 void main() {
   vT = clamp(age / uLife, 0.0, 1.0);
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  float size = mix(6.0, 70.0, vT) * uPixelRatio * (150.0 / -mv.z);
+  float size = mix(5.0, 56.0, vT) * uPixelRatio * (3.6 / -mv.z);
   gl_PointSize = (vT >= 1.0) ? 0.0 : size;
   gl_Position = projectionMatrix * mv;
 }`,
@@ -145,9 +145,10 @@ let nextSpark = 0;
 
 export function spark(slot) {
   const i = nextSpark++ % MAX_SPARKS;
-  sparkPos[i * 3] = seeds[slot * 3];
-  sparkPos[i * 3 + 1] = seeds[slot * 3 + 1];
-  sparkPos[i * 3 + 2] = seeds[slot * 3 + 2];
+  const seed = slotSeed(slot);
+  sparkPos[i * 3] = seeds[seed * 3];
+  sparkPos[i * 3 + 1] = seeds[seed * 3 + 1];
+  sparkPos[i * 3 + 2] = seeds[seed * 3 + 2];
   sparkAge[i] = 0;
   sparkGeo.attributes.position.needsUpdate = true;
   sparkGeo.attributes.age.needsUpdate = true;
@@ -156,17 +157,17 @@ export function spark(slot) {
 // pulse adds weight to a region's activity and fires a spark there.
 export function pulse(slot, weight) {
   if (slot < 0 || slot >= MAX_REGIONS) return;
-  activity[slot] += weight;
+  activity[slotSeed(slot)] += weight;
   spark(slot);
 }
 
-export function setActivity(slot, value) { activity[slot] = value; }
-export function getGlow(slot) { return uniforms.uGlow.value[slot]; }
-export function setFocus(slot) { uniforms.uFocus.value = slot; }
+export function setActivity(slot, value) { activity[slotSeed(slot)] = value; }
+export function getGlow(slot) { return uniforms.uGlow.value[slotSeed(slot)]; }
+export function setFocus(slot) { uniforms.uFocus.value = slot < 0 ? -1 : slotSeed(slot); }
 
 // ---- camera interaction ---------------------------------------------------
 let dragging = false, lastX = 0, lastY = 0, idleSince = performance.now();
-let yaw = 0.4, pitch = 0.15, dist = 3.6;
+let yaw = 0.7, pitch = 0.45, dist = 3.4;
 canvas.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
 canvas.addEventListener('pointerup', () => { dragging = false; idleSince = performance.now(); });
 canvas.addEventListener('pointermove', (e) => {
