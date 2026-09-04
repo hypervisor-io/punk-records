@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.0 (2026-09-05)
+
+### Added
+- Task board: `list_tasks` and `GET /v1/namespaces/{ns}/tasks` join `/tasks` facts with live claims and members into one parsed view (state, status line, dependencies, holder, ready, next, counts). `await_tasks` and `?wait=` block until something under `/tasks` changes instead of polling. `set_task_status` and `POST /v1/namespaces/{ns}/tasks/{id}/status` write canonical status facts with structured attributes and release the caller's claim on done or blocked.
+- Heartbeat: `region_members.last_seen_at` (migration 0021), updated by every coordination call; shown in members and the brain snapshot.
+
+### Changed
+- `register` is now in the agent toolset (the skill has always asked agents to register, but `/mcp?toolset=agent` hid the tool).
+- The punk-memory skill's coordination section teaches the board flow: register, list_tasks, claim, set_task_status per phase, await_tasks.
+- Brain log words status writes by state: finished, blocked on, sent to review, started.
+
 ## v1.7.1 (2026-09-04)
 
 ### Changed
