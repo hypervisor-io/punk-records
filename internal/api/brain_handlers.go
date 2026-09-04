@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/memory"
@@ -90,4 +92,90 @@ func (s *Server) handleBrainSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// brainEvent is the wire envelope for one bus event on /v1/brain/events.
+// Namespace and Key come from the bus key "ns:/key"; ledger task ids have
+// no namespace and pass through as Key.
+type brainEvent struct {
+	TS        string            `json:"ts"`
+	Kind      string            `json:"kind"`
+	Namespace string            `json:"namespace"`
+	Key       string            `json:"key"`
+	Data      map[string]string `json:"data"`
+}
+
+// splitBusKey splits "ns:/key" at the first colon. Memory keys start with
+// "/" so a namespace never contains one; a key with no colon is a ledger
+// task id and has no namespace.
+func splitBusKey(key string) (string, string) {
+	i := strings.IndexByte(key, ':')
+	if i < 0 {
+		return "", key
+	}
+	return key[:i], key[i+1:]
+}
+
+// brainKeepalive is how often an SSE comment is written on an idle stream
+// so proxies and browsers do not close it.
+const brainKeepalive = 15 * time.Second
+
+func (s *Server) handleBrainEvents(w http.ResponseWriter, r *http.Request) {
+	if s.bus == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not wired"})
+		return
+	}
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+		return
+	}
+	events, cancel := s.bus.Subscribe()
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	write := func(name string, v any) bool {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return true
+		}
+		if _, err := w.Write([]byte("event: " + name + "\ndata: " + string(raw) + "\n\n")); err != nil {
+			return false
+		}
+		fl.Flush()
+		return true
+	}
+	if !write("hello", map[string]string{"version": s.version, "now": time.Now().UTC().Format(time.RFC3339)}) {
+		return
+	}
+
+	tick := time.NewTicker(brainKeepalive)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			fl.Flush()
+		case e, open := <-events:
+			if !open {
+				return
+			}
+			ns, key := splitBusKey(e.Key)
+			ev := brainEvent{TS: time.Now().UTC().Format(time.RFC3339), Kind: e.Kind, Namespace: ns, Key: key, Data: e.Data}
+			if ev.Data == nil {
+				ev.Data = map[string]string{}
+			}
+			if !write(e.Kind, ev) {
+				return
+			}
+		}
+	}
 }

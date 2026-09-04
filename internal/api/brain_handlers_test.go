@@ -1,14 +1,19 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/hypervisor-io/punk-records/internal/store"
@@ -115,3 +120,111 @@ func TestBrainSnapshotWithoutRegionStore(t *testing.T) {
 		t.Fatal("namespaces must be [] not null")
 	}
 }
+
+func TestSplitBusKey(t *testing.T) {
+	for _, tc := range []struct{ in, ns, key string }{
+		{"agent-x:/tasks/T1", "agent-x", "/tasks/T1"},
+		{"ns:/a:b", "ns", "/a:b"},
+		{"task-42", "", "task-42"},
+		{"", "", ""},
+	} {
+		ns, key := splitBusKey(tc.in)
+		if ns != tc.ns || key != tc.key {
+			t.Fatalf("%q: got (%q,%q) want (%q,%q)", tc.in, ns, key, tc.ns, tc.key)
+		}
+	}
+}
+
+func TestBrainEventsStream(t *testing.T) {
+	s, _, _ := brainTestServer(t)
+	b := bus.New()
+	s.bus = b
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/brain/events", nil).WithContext(ctx)
+	pr, pw := io.Pipe()
+	rec := &streamRecorder{ResponseRecorder: httptest.NewRecorder(), w: pw}
+	done := make(chan struct{})
+	go func() {
+		s.Router().ServeHTTP(rec, req)
+		pw.Close()
+		close(done)
+	}()
+
+	r := bufio.NewReader(pr)
+	readFrame := func() (string, string) {
+		t.Helper()
+		var ev, data string
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			line = strings.TrimRight(line, "\n")
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				ev = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				data = strings.TrimPrefix(line, "data: ")
+			case line == "" && ev != "":
+				return ev, data
+			}
+		}
+	}
+
+	ev, data := readFrame()
+	if ev != "hello" || !strings.Contains(data, `"version":"vtest"`) {
+		t.Fatalf("hello frame: %q %q", ev, data)
+	}
+
+	// Subscribe happens before the hello frame is flushed, so a publish
+	// after reading hello is guaranteed to be seen.
+	b.Publish(bus.Event{Kind: "memory", Key: "agent-x:/tasks/T1/status",
+		Data: map[string]string{"action": "add", "writer": "worker-1"}})
+	ev, data = readFrame()
+	if ev != "memory" {
+		t.Fatalf("event name %q", ev)
+	}
+	var got brainEvent
+	if err := json.Unmarshal([]byte(data), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Namespace != "agent-x" || got.Key != "/tasks/T1/status" || got.Data["writer"] != "worker-1" || got.TS == "" {
+		t.Fatalf("envelope: %+v", got)
+	}
+
+	b.Publish(bus.Event{Kind: "task_status", Key: "task-9", Data: map[string]string{"status": "completed"}})
+	ev, data = readFrame()
+	if ev != "task_status" || !strings.Contains(data, `"namespace":""`) || !strings.Contains(data, `"key":"task-9"`) {
+		t.Fatalf("ledger event: %q %q", ev, data)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestBrainEventsWithoutBus(t *testing.T) {
+	s := testServer(t)
+	rec := do(t, s, http.MethodGet, "/v1/brain/events", "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+// streamRecorder forwards every Write to a pipe so the test can read the
+// stream while the handler is still running (ResponseRecorder alone only
+// exposes the body after the handler returns).
+type streamRecorder struct {
+	*httptest.ResponseRecorder
+	w *io.PipeWriter
+}
+
+func (s *streamRecorder) Write(p []byte) (int, error) {
+	if _, err := s.w.Write(p); err != nil {
+		return 0, err
+	}
+	return s.ResponseRecorder.Write(p)
+}
+
+func (s *streamRecorder) Flush() { s.ResponseRecorder.Flush() }

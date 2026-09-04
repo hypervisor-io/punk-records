@@ -101,6 +101,7 @@ func New(log *slog.Logger, d Deps) *Server {
 		}
 		if s.mem != nil {
 			v1.Get("/brain/snapshot", s.handleBrainSnapshot)
+			v1.Get("/brain/events", s.handleBrainEvents)
 		}
 		if s.ledger != nil && s.router != nil {
 			v1.Route("/tasks", func(r chi.Router) {
