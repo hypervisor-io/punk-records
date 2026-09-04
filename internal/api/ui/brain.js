@@ -2,6 +2,7 @@ import * as THREE from './vendor/three.module.min.js';
 import {
   MAX_REGIONS, decay, glow, lcg, decodeMesh, triangleAreas, sampleSurface, nearestNeighbours,
   buildAdjacency, topIndex, farthestPoints, slotAnchor, signalPath,
+  eventWeight, seedActivity, parseSSE, coalesce,
 } from './brain-core.js';
 
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -168,3 +169,176 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+const token = () => localStorage.getItem('amk') || '';
+const headers = () => (token() ? { Authorization: 'Bearer ' + token() } : {});
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const metaEl = $('#meta'), stateEl = $('#logState'), rowsEl = $('#rows'), legendEl = $('#legendList'), labelsEl = $('#labels');
+const tip = $('#tip'), tipName = $('#tipName'), tipBody = $('#tipBody');
+
+let snapshot = { version: '', namespaces: [] };
+let order = [];
+let rows = [];
+const eventTimes = [];
+
+function slotOf(ns) {
+  if (!ns) return -1;
+  let i = order.indexOf(ns);
+  if (i < 0) { order.push(ns); i = order.length - 1; renderLegend(); scheduleSnapshot(2000); }
+  return i;
+}
+
+async function loadSnapshot() {
+  const r = await fetch('/v1/brain/snapshot', { headers: headers() });
+  if (!r.ok) throw new Error('snapshot ' + r.status);
+  snapshot = await r.json();
+  for (const n of snapshot.namespaces) if (!order.includes(n.name)) order.push(n.name);
+  snapshot.namespaces.forEach((n) => { const s = order.indexOf(n.name); const want = seedActivity(n.writes_5m); if (activity[s] < want) activity[s] = want; });
+  renderLegend();
+  renderMeta();
+}
+
+function renderMeta() {
+  metaEl.innerHTML = `${esc(snapshot.version || 'dev')} · ${order.length} regions · ${eventTimes.length} events/min · <a href="/brain/mesh/NOTICE">Mesh: BodyParts3D</a>`;
+}
+
+let snapshotTimer = null;
+function scheduleSnapshot(ms) { clearTimeout(snapshotTimer); snapshotTimer = setTimeout(() => loadSnapshot().catch(() => {}), ms); }
+
+function onEvent(ev) {
+  eventTimes.push(performance.now());
+  const w = eventWeight(ev);
+  if (ev.kind === 'cost_alert') order.forEach((_, s) => pulse(s, w)); else pulse(slotOf(ev.namespace), w);
+  if (ev.kind === 'claim' || /^\/tasks\//.test(ev.key || '')) scheduleSnapshot(1500);
+  rows = coalesce(rows, ev, Date.now());
+  renderRows();
+}
+
+function renderRows() {
+  if (!rows.length) { rowsEl.innerHTML = '<li class="empty">Waiting for the first event. Write a fact or run an agent hook to see it here.</li>'; return; }
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const li = document.createElement('li');
+    if (r.hot) li.className = 'hot';
+    const t = new Date(r.ts);
+    li.innerHTML = '<span class="t"></span><span><span class="who"></span> <span class="what"></span> <span class="count"></span></span><span class="ns"></span>';
+    li.querySelector('.t').textContent = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    li.querySelector('.who').textContent = r.who;
+    li.querySelector('.what').textContent = r.what;
+    li.querySelector('.count').textContent = r.count > 1 ? `×${r.count}` : '';
+    li.querySelector('.ns').textContent = r.ns || '';
+    frag.append(li);
+  }
+  rowsEl.replaceChildren(frag);
+}
+
+async function streamEvents() {
+  let backoff = 1000;
+  for (;;) {
+    try {
+      stateEl.textContent = 'connecting'; stateEl.className = '';
+      const r = await fetch('/v1/brain/events', { headers: { ...headers(), Accept: 'text/event-stream' } });
+      if (!r.ok || !r.body) throw new Error('events ' + r.status);
+      backoff = 1000;
+      const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const { frames, rest } = parseSSE(buf); buf = rest;
+        for (const f of frames) {
+          if (f.event === 'hello') { stateEl.textContent = 'live'; stateEl.className = ''; continue; }
+          try { onEvent(JSON.parse(f.data)); } catch { /* skip malformed frame */ }
+        }
+      }
+      throw new Error('stream closed');
+    } catch {
+      stateEl.textContent = `reconnecting in ${backoff / 1000}s`; stateEl.className = 'warn';
+      await new Promise((res) => setTimeout(res, backoff));
+      backoff = Math.min(15000, backoff * 2);
+    }
+  }
+}
+
+function nsInfo(name) {
+  return snapshot.namespaces.find((m) => m.name === name) || { facts: 0, writes_5m: 0, members: [], claims: [], tasks: { done: 0, blocked: 0, pending: 0, total: 0 } };
+}
+
+function renderLegend() {
+  const frag = document.createDocumentFragment();
+  order.forEach((name, slot) => {
+    const n = nsInfo(name);
+    const li = document.createElement('li');
+    li.tabIndex = 0; li.dataset.slot = String(slot);
+    li.innerHTML = '<span class="sw"></span><span class="name"></span><span class="bar"><i></i></span><span class="meta"></span>';
+    li.querySelector('.name').textContent = name;
+    li.querySelector('.meta').textContent = `${n.members.length}p ${n.claims.length}c ${n.tasks.done}/${n.tasks.total}t`;
+    li.addEventListener('pointerenter', (e) => showTip(slot, e.clientX, e.clientY));
+    li.addEventListener('pointerleave', hideTip);
+    li.addEventListener('focus', () => { const r = li.getBoundingClientRect(); showTip(slot, r.right, r.top); });
+    li.addEventListener('blur', hideTip);
+    frag.append(li);
+  });
+  legendEl.replaceChildren(frag);
+}
+
+function showTip(slot, x, y) {
+  const name = order[slot]; const n = nsInfo(name);
+  tipName.textContent = name;
+  tipBody.innerHTML = [
+    `<div><b>${n.facts}</b> facts, <b>${n.writes_5m}</b> writes in 5 min</div>`,
+    `<div>${n.members.length ? 'members: ' + esc(n.members.map((m) => m.agent).join(', ')) : 'no members registered'}</div>`,
+    `<div>${n.claims.length ? 'claims: ' + esc(n.claims.map((c) => `${c.key} (${c.holder})`).join(', ')) : 'no live claims'}</div>`,
+    `<div>tasks: <b>${n.tasks.done}</b> done, <b>${n.tasks.blocked}</b> blocked, <b>${n.tasks.pending}</b> pending</div>`,
+  ].join('');
+  tip.hidden = false;
+  tip.style.left = Math.min(x + 16, window.innerWidth - 280) + 'px';
+  tip.style.top = Math.min(y - 40, window.innerHeight - 160) + 'px';
+  setFocus(slot);
+}
+function hideTip() { tip.hidden = true; setFocus(-1); }
+
+const labelEls = new Map();
+function updateLabels() {
+  const seen = new Set();
+  order.forEach((name, slot) => {
+    const g = glow(activity[slot]);
+    if (g < 0.15) return;
+    const a = slotAnchor(slot);
+    if (seen.has(a)) return; // one label per anchor: the first namespace on it
+    seen.add(a);
+    const p = anchorScreen(a);
+    let el = labelEls.get(a);
+    if (!el) { el = document.createElement('div'); el.className = 'label'; labelsEl.append(el); labelEls.set(a, el); }
+    el.textContent = name;
+    el.style.opacity = p.visible ? g.toFixed(2) : '0';
+    el.style.left = Math.max(24, Math.min(window.innerWidth - 400, p.x)) + 'px';
+    el.style.top = Math.max(60, Math.min(window.innerHeight - 60, p.y)) + 'px';
+  });
+  for (const [a, el] of labelEls) if (!seen.has(a)) el.style.opacity = '0';
+}
+
+function updateLegend() {
+  for (const li of legendEl.children) {
+    const g = glow(activity[Number(li.dataset.slot)]);
+    li.querySelector('.bar i').style.width = (g * 100).toFixed(0) + '%';
+    li.querySelector('.sw').style.opacity = (0.15 + 0.85 * g).toFixed(2);
+  }
+}
+
+let hudAcc = 0;
+hooks.onFrame = (dt) => {
+  updateLabels();
+  hudAcc += dt;
+  if (hudAcc < 0.25) return;
+  hudAcc = 0;
+  updateLegend();
+  const cutoff = performance.now() - 60000;
+  while (eventTimes.length && eventTimes[0] < cutoff) eventTimes.shift();
+  renderMeta();
+};
+
+renderRows();
+ready.then(() => loadSnapshot()).then(() => setInterval(() => loadSnapshot().catch(() => {}), 30000)).catch(() => { stateEl.textContent = 'snapshot unavailable'; stateEl.className = 'warn'; });
+streamEvents();
