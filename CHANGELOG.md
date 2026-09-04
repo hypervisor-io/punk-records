@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.0 (unreleased)
+## v1.6.0 (2026-09-04)
 
 ### Added
 - The server root `/` (alias `/brain`) is now a live brain visualization of every memory namespace; regions glow with write, claim and task activity, sparks mark each event, and a side log narrates them. `punk brain --open` opens it; `punk brain serve` starts the server and prints the URL.
