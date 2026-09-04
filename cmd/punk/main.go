@@ -2510,29 +2510,29 @@ func defaultAgentName() string {
 	return u + "@" + host
 }
 
-// installSkillFor writes the punk-memory skill where agent loads skills
-// from. A hand-written file at that path is reported and left alone; a
-// skill problem never fails the connect that hooks and MCP already
-// succeeded at.
+// installSkillFor writes the punk-memory and punk-plan skills where agent
+// loads skills from. A hand-written file at either path is reported and
+// left alone; a skill problem never fails the connect that hooks and MCP
+// already succeeded at.
 func installSkillFor(agent string, project bool, serverURL, ns string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("punk: warning - skill not installed: %v\n", err)
 		return
 	}
-	targets, err := hookcli.SkillTargets(agent, project, home, os.Getenv)
+	targets, err := hookcli.AllSkillTargets(agent, project, home, os.Getenv)
 	if err != nil {
 		fmt.Printf("punk: warning - skill not installed: %v\n", err)
 		return
 	}
 	for _, tg := range targets {
 		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, ns
-		changed, err := hookcli.WriteSkill(tg.Path, hookcli.RenderSkill(tg.Opts))
+		changed, err := hookcli.WriteSkill(tg.Path, hookcli.Render(tg))
 		if err != nil {
 			fmt.Printf("punk: warning - %v\n", err)
 			continue
 		}
-		fmt.Printf("punk: skill %s in %s (%s)\n", hookcli.SkillName, tg.Path, changedWord(changed))
+		fmt.Printf("punk: skill %s in %s (%s)\n", tg.Name, tg.Path, changedWord(changed))
 	}
 }
 
@@ -3384,13 +3384,14 @@ func cmdConnectCodex(args []string) error {
 	return nil
 }
 
-// cmdSkill installs, prints or locates the canonical punk-memory usage
-// skill for one agent (see hookcli.SkillTargets for the per-agent
-// locations and hookcli.RenderSkill for the canonical text). install is
+// cmdSkill installs, prints or locates the canonical punk-memory and
+// punk-plan skills for one agent (see hookcli.AllSkillTargets for the
+// per-agent locations and hookcli.Render for the text). install is
 // marker-gated: a file at the target that punk did not write is refused.
+// --name narrows the action to one skill.
 func cmdSkill(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punk skill install|print|paths --agent NAME [--project] [--url URL] [--ns NS]")
+		return errors.New("usage: punk skill install|print|paths --agent NAME [--name punk-memory|punk-plan] [--project] [--url URL] [--ns NS]")
 	}
 	action := args[0]
 	fs := flag.NewFlagSet("skill "+action, flag.ContinueOnError)
@@ -3398,24 +3399,31 @@ func cmdSkill(args []string) error {
 	project := fs.Bool("project", false, "project-local location instead of the global one")
 	urlFlag := fs.String("url", "", "server URL mentioned in the skill (default: resolved like connect)")
 	nsFlag := fs.String("ns", "", "pin the skill to a namespace (default: resolved from the workspace)")
+	nameFlag := fs.String("name", "", "only this skill: punk-memory or punk-plan (default: both)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if *agent == "" {
 		return errors.New("skill: --agent is required")
 	}
+	if *nameFlag != "" && *nameFlag != hookcli.SkillName && *nameFlag != hookcli.PlanSkillName {
+		return fmt.Errorf("skill: --name must be %s or %s", hookcli.SkillName, hookcli.PlanSkillName)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	targets, err := hookcli.SkillTargets(*agent, *project, home, os.Getenv)
+	targets, err := hookcli.AllSkillTargets(*agent, *project, home, os.Getenv)
 	if err != nil {
 		return err
 	}
 	serverURL, _ := hookcli.ResolveServer(*urlFlag)
 	for _, tg := range targets {
+		if *nameFlag != "" && tg.Name != *nameFlag {
+			continue
+		}
 		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, *nsFlag
-		content := hookcli.RenderSkill(tg.Opts)
+		content := hookcli.Render(tg)
 		switch action {
 		case "print":
 			fmt.Print(content)
@@ -3426,7 +3434,7 @@ func cmdSkill(args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("punk: skill %s in %s (%s)\n", hookcli.SkillName, tg.Path, changedWord(changed))
+			fmt.Printf("punk: skill %s in %s (%s)\n", tg.Name, tg.Path, changedWord(changed))
 		default:
 			return fmt.Errorf("skill: want install, print or paths, got %q", action)
 		}

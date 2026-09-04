@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.1 (2026-09-05)
+
+### Added
+- `punk-plan` skill, the planner side of coordination: create a coordination namespace, write `/plan/summary`, conventions and one `/tasks/<id>` fact per task with `depends_on`, leave a `/plan/current` pointer in the repository namespace, hand workers a prompt, gate with `await_tasks` and `list_tasks`, review each finished task, release. Every `punk connect <agent>` now installs it beside `punk-memory` for all nine agents; `punk skill install|print|paths` handle both, `--name` picks one.
+
 ## v1.8.0 (2026-09-05)
 
 ### Added

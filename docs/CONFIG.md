@@ -57,7 +57,7 @@ punk region branch --ns repo-main --dir /tmp/exp --branch exp-1
 punk replay --task <id> --k 3    # golden-ledger eval, pass^k
 punk embed-backfill --ns <ns>    # embed pre-existing facts
 punk topo import --file catalog.yaml   # import a Backstage catalog
-punk skill install --agent <name>      # punk-memory usage skill for an agent (install|print|paths)
+punk skill install --agent <name>      # punk-memory and punk-plan skills for an agent (install|print|paths; --name picks one)
 kill -HUP <pid>                       # force spec reload (watcher also does this)
 ```
 
