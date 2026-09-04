@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +68,7 @@ const usage = `punk - shared brain + coordination layer for domain agents
 
 Usage:
   punk      serve     start the coordinator (HTTP API, MCP, agent runtime)
+  punk      brain     open or serve the brain view (brain [--server URL] [--open] | brain serve [serve flags])
   punk      migrate   run database migrations (up|down|status)
   punk      validate  validate agent/skill/policy specs in a directory
   punk      apikey    manage API keys (create|revoke --name <name>)
@@ -111,6 +113,8 @@ func run(args []string) error {
 		return nil
 	case "serve":
 		return cmdServe(args[1:])
+	case "brain":
+		return cmdBrain(args[1:])
 	case "migrate":
 		return cmdMigrate(args[1:])
 	case "validate":
@@ -699,6 +703,7 @@ func cmdServe(args []string) error {
 		Bus:               eventBus,
 		DB:                db,
 		Reg:               reg,
+		Region:            regionStore,
 		Expander:          expander,
 		TurnContextTokens: cfg.Memory.TurnContextTokens,
 		Inject:            cfg.Memory.Inject,
@@ -711,6 +716,7 @@ func cmdServe(args []string) error {
 	})
 	srv.Ready = db.Ping
 	srv.MountUI()
+	srv.MountBrain()
 	srv.MountAgentCard(version)
 	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		if r.URL.Query().Get("toolset") == "agent" {
@@ -975,6 +981,52 @@ func cmdServe(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpSrv.Shutdown(shutdownCtx)
+}
+
+// cmdBrain prints or opens the brain view of a running server, or with
+// "serve" runs the server itself and prints the URL first so one command
+// gets a demo on screen.
+func cmdBrain(args []string) error {
+	if len(args) > 0 && args[0] == "serve" {
+		// Print the URL serve will actually bind: the same config file
+		// plus PUNK_HTTP_ADDR overrides that cmdServe reads.
+		pf := flag.NewFlagSet("brain serve", flag.ContinueOnError)
+		cfgPath := pf.String("config", "config.yaml", "path to config file")
+		_ = pf.Parse(args[1:])
+		addr := ":9090"
+		if cfg, err := config.Load(*cfgPath); err == nil {
+			addr = cfg.HTTP.Addr
+		}
+		if strings.HasPrefix(addr, ":") {
+			addr = "127.0.0.1" + addr
+		}
+		fmt.Fprintf(os.Stderr, "punk: brain view at http://%s/\n", addr)
+		return cmdServe(args[1:])
+	}
+	fs := flag.NewFlagSet("brain", flag.ContinueOnError)
+	server := fs.String("server", "http://127.0.0.1:9090", "punk server base URL")
+	open := fs.Bool("open", false, "open the brain view in the default browser")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	url := strings.TrimRight(*server, "/") + "/"
+	fmt.Println(url)
+	if !*open {
+		return nil
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open browser: %w (visit %s)", err, url)
+	}
+	return nil
 }
 
 func cmdMigrate(args []string) error {

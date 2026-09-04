@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Punk Records - brain</title>
+<style>
+:root{--bg:#05060f;--panel:rgba(14,18,38,.82);--line:#1b2142;--amber:#ffb64d;--cyan:#3fe0ff;
+--magenta:#ff4fd8;--green:#57ffa0;--ink:#e8ecff;--dim:#8b93b8;
+--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,sans-serif}
+#scene{position:fixed;inset:0;width:100%;height:100%;display:block}
+.hud{position:fixed;pointer-events:none}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;backdrop-filter:blur(6px);pointer-events:auto}
+#top{top:16px;left:16px;padding:12px 16px;min-width:260px}
+#top h1{font-size:14px;letter-spacing:.22em}
+#top h1 b{color:var(--amber)}
+#top .kv{display:flex;gap:14px;margin-top:8px;font:11px var(--mono);color:var(--dim)}
+#top .kv b{color:var(--cyan);font-weight:500}
+#log{top:16px;right:16px;bottom:16px;width:380px;display:flex;flex-direction:column}
+#log h2,#legend h2{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);padding:10px 14px;border-bottom:1px solid var(--line)}
+#log ol{list-style:none;overflow:auto;padding:6px 0;flex:1;font:11.5px/1.4 var(--mono)}
+#log li{padding:4px 14px;border-bottom:1px dashed var(--line);display:grid;grid-template-columns:52px 1fr;gap:8px;animation:in .35s ease-out}
+#log li .t{color:var(--dim)}
+#log li .k{color:var(--dim);font-size:10px}
+.k-memory{color:var(--cyan)}.k-claim{color:var(--amber)}.k-task{color:var(--green)}.k-defense,.k-cost_alert{color:var(--magenta)}.k-task_status{color:var(--green)}
+@keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+#legend{left:16px;bottom:16px;width:420px;max-height:46vh;display:flex;flex-direction:column}
+#legend ul{list-style:none;overflow:auto;padding:4px 0}
+#legend li{display:grid;grid-template-columns:10px 1fr 90px 70px;gap:10px;align-items:center;padding:5px 14px;font:11.5px var(--mono);cursor:default}
+#legend li:hover{background:rgba(63,224,255,.08)}
+#legend .sw{width:10px;height:10px;border-radius:50%;box-shadow:0 0 8px currentColor}
+#legend .bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
+#legend .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--amber),var(--magenta))}
+#legend .meta{color:var(--dim);font-size:10.5px;text-align:right}
+#status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);font:11px var(--mono);color:var(--dim)}
+#status.err{color:var(--magenta)}
+@media (max-width:900px){#log{display:none}#legend{width:calc(100% - 32px)}}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="top" class="hud panel">
+  <h1><b>PUNK RECORDS</b> BRAIN</h1>
+  <div class="kv"><span>server <b id="ver">-</b></span><span>regions <b id="nsCount">0</b></span><span>events/min <b id="epm">0</b></span></div>
+</div>
+<div id="log" class="hud panel"><h2>Activity</h2><ol id="logList"></ol></div>
+<div id="legend" class="hud panel"><h2>Regions</h2><ul id="legendList"></ul></div>
+<div id="status">connecting</div>
+<script type="module" src="/brain/brain.js"></script>
+</body>
+</html>

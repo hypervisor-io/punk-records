@@ -11,6 +11,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/policy"
+	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/hypervisor-io/punk-records/internal/registry"
 	"github.com/hypervisor-io/punk-records/internal/route"
 	"github.com/hypervisor-io/punk-records/internal/store"
@@ -28,6 +29,7 @@ type Deps struct {
 	Bus           *bus.Bus
 	DB            *store.DB // cost summaries
 	Reg           *registry.Registry
+	Region        *region.Store        // nil: brain snapshot reports no members or claims
 	Expander      memory.QueryExpander // nil disables search's expand param (deterministic-first)
 	DefaultBudget task.Budget
 
@@ -53,6 +55,7 @@ type Server struct {
 	bus           *bus.Bus
 	db            *store.DB
 	reg           *registry.Registry
+	region        *region.Store
 	expander      memory.QueryExpander
 	defaultBudget task.Budget
 	turnTokens    int      // per-turn context budget; 0 disables mode=turn
@@ -68,7 +71,7 @@ func New(log *slog.Logger, d Deps) *Server {
 	s := &Server{
 		log: log, mux: chi.NewRouter(),
 		mem: d.Memory, ledger: d.Ledger, router: d.Router, props: d.Proposals,
-		keys: d.Keys, bus: d.Bus, db: d.DB, reg: d.Reg, expander: d.Expander,
+		keys: d.Keys, bus: d.Bus, db: d.DB, reg: d.Reg, region: d.Region, expander: d.Expander,
 		defaultBudget: d.DefaultBudget,
 		turnTokens:    d.TurnContextTokens, inject: d.Inject,
 	}
@@ -95,6 +98,10 @@ func New(log *slog.Logger, d Deps) *Server {
 				ag.Get("/agent/context", s.handleAgentContext)
 				ag.Get("/agent/namespace", s.handleAgentNamespace)
 			})
+		}
+		if s.mem != nil {
+			v1.Get("/brain/snapshot", s.handleBrainSnapshot)
+			v1.Get("/brain/events", s.handleBrainEvents)
 		}
 		if s.ledger != nil && s.router != nil {
 			v1.Route("/tasks", func(r chi.Router) {

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6.0 (unreleased)
+
+### Added
+- The server root `/` (alias `/brain`) is now a live brain visualization of every memory namespace; regions glow with write, claim and task activity, sparks mark each event, and a side log narrates them. `punk brain --open` opens it; `punk brain serve` starts the server and prints the URL.
+- `GET /v1/brain/snapshot` (per-namespace counts, members, claims, task tallies) and `GET /v1/brain/events` (server-wide SSE of bus events).
+- `memory.TaskCounts`: done/blocked/pending digest of the `/tasks` convention.
+
 ## v1.5.3 (2026-09-04)
 
 ### Fixed
