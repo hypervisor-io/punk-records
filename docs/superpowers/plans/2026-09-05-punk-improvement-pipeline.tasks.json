@@ -1,0 +1,473 @@
+{
+  "schema_version": 1,
+  "namespace": "punk-punkrecords-improvement",
+  "branch": "feat/punk-improvement-pipeline",
+  "baseline": "9ab2b8f",
+  "codex_version": "0.153.4",
+  "tasks": [
+    {
+      "id": "C01",
+      "title": "Normalize Codex 0.153.4 native hook events",
+      "deps": [],
+      "files": [
+        "internal/hookcli/normalize.go",
+        "internal/hookcli/hookcli.go",
+        "internal/hookcli/connect_codex_test.go",
+        "internal/api/hookcli_roundtrip_test.go",
+        "internal/hookcli/testdata/codex-0.153.4/ (new)"
+      ],
+      "contract": "Add an explicit Codex normalizer at RunFrom's source boundary. For UserPromptSubmit preserve a supplied prompt_id, otherwise map the native turn_id to the stable capture prompt_id. Preserve session identity and tool IDs. Capture native SessionStart/UserPromptSubmit/PostToolUse/Stop shapes with provenance to upstream rust-v0.153.4; do not change Claude's input contract or hash prompt text as identity.",
+      "red": "A native UserPromptSubmit fixture containing turn_id but no prompt_id must create exactly one prompt fact through a temporary API server; replaying it is idempotent and a distinct turn with identical text remains a distinct capture.",
+      "accept": "All four fixtures exercise the real hook-to-API boundary. Submit capture is retained; capture-only hooks have empty stdout; valid nested additionalContext is produced only for supported injection events. Malformed input and unavailable server remain fail-open.",
+      "tests": "go test ./internal/hookcli ./internal/api -run 'Codex|HookCLI' -count=1",
+      "commit": "fix(codex): normalize native hook event identifiers"
+    },
+    {
+      "id": "C02",
+      "title": "Diagnose and stop Codex terminal/footer repetition",
+      "deps": [],
+      "files": [
+        "internal/hookcli/connect_codex.go",
+        "internal/hookcli/connect_codex_test.go",
+        "internal/hookcli/hookcli.go",
+        "docs/investigations/codex-0.153.4-terminal-spam.md (new)"
+      ],
+      "contract": "Use the user screenshot codex-spam.png: repeated literal punkrecords appears after the transcript overlay's static q-to-quit/esc-to-edit footer. Upstream that footer has no memory/cwd text. Leading hypothesis is terminal title/OSC or other out-of-band output corruption; this is not a proven Punk hook defect. Trace emitted bytes and effective terminal/shell configuration, compare terminal-title enabled/disabled and Punk hooks enabled/disabled independently in temporary config. Verify the exact terminal emulator and whether this is CLI or embedded app. Apply a narrow Punk fix only if the producer is Punk; otherwise provide a tested supported configuration mitigation and a version-pinned upstream reproduction without modifying Codex source inside this repo.",
+      "red": "Record the visible native 0.153.4 footer/composer corruption plus PTY/output evidence. Run a four-cell A/B matrix (title on/off x Punk hooks on/off) with fixed actions and no secrets. Try one-shot codex -c 'tui.terminal_title=[]' using a temporary fixture/config. Rename the fixture directory to a different basename to test whether the repeated word follows the project title. Preserve the original screenshot as user-owned input; do not commit it by default.",
+      "accept": "Show the selected remediation stops footer/input contamination in the user's host while preserving useful memory capture/context, and separately classify any actual repeated hook messages. Do not claim fixed from Go mocks or duplicate skill cleanup. Upstream context-only successful hooks are hidden and the installed config has no custom statusMessage. If the environment cannot reproduce the symptom or validate a mitigation, keep blocked with exact evidence; no blind suppressOutput flags (PostToolUse rejects them).",
+      "tests": "go test ./internal/hookcli ./internal/api -count=1 if Punk code changes; native Codex 0.153.4 terminal/title/hooks A/B matrix with sanitized output capture",
+      "commit": "fix(codex): address terminal footer repetition"
+    },
+    {
+      "id": "C03",
+      "title": "Detect and reconcile duplicate managed Codex integrations",
+      "deps": [],
+      "files": [
+        "internal/hookcli/skillpaths.go",
+        "internal/hookcli/skillpaths_test.go",
+        "internal/hookcli/connect_codex.go",
+        "internal/hookcli/connect_codex_test.go",
+        "internal/hookcli/skill.go",
+        "internal/hookcli/planskill.go"
+      ],
+      "contract": "Detect both shared ~/.agents/skills and CODEX_HOME/skills installations plus global/project hook registrations and duplicate Punk MCP aliases. Resolve only byte-equivalent, Punk-managed duplicate skills/hooks; preserve customized and foreign content and present actionable collision diagnostics. Respect different client tool-prefix needs instead of deleting another client's required skill. Prefer a common discoverable neutral skill only when compatible with all affected clients.",
+      "red": "Temporary-home fixtures with both managed skill roots and global/project hooks produce duplicate effective entries before repair; a mixed custom/managed fixture must not lose custom bytes.",
+      "accept": "Repeated connect is idempotent; the effective Codex catalog has one intended entry per skill and one execution per intended event, or a precise unresolved-collision diagnostic. Custom CODEX_HOME, symlinks, CRLF and project scopes are covered. No automatic changes to the current user's installed files during tests.",
+      "tests": "go test ./internal/hookcli -run 'Skill|ConnectCodex|MCP' -count=1",
+      "commit": "fix(connect): reconcile duplicate managed Codex entries"
+    },
+    {
+      "id": "C04",
+      "title": "Make repeated context delivery idempotent",
+      "deps": [
+        "C01",
+        "C02"
+      ],
+      "files": [
+        "internal/api/agent_handlers.go",
+        "internal/api/agent_handlers_test.go",
+        "internal/hookcli/hookcli.go",
+        "internal/hookcli/connect_codex_test.go",
+        "internal/memory/session.go",
+        "internal/store/migrations/{sqlite,postgres}/ (only if persistence is needed)"
+      ],
+      "contract": "Define delivery identity using namespace, session, event/turn and context revision, plus an explicit issued/acknowledged/retry state boundary. Suppress duplicate concurrent processing of an event, including profile, summary and entities. Do not promise end-to-end exactly-once rendering without a Codex host acknowledgement. Define behavior if the connection fails after a response is produced or the hook exits before stdout is consumed. Deliberate resume refreshes once per identified resume event; distinguish duplicate transport delivery from a fresh resume, or document a bounded policy if the host lacks a delivery ID.",
+      "red": "Concurrent requests for the same delivery share a stable logical delivery identity and do not amplify bookkeeping. Inject disconnect/crash failures before response, after response and before client output; tests assert the documented replay/dedup boundary rather than unobservable host consumption. A distinct turn/revision/session remains eligible.",
+      "accept": "Repeated healthy event delivery is deduplicated at the documented boundary; changed facts are eligible again; namespaces and sessions are isolated. Failed fetch is not recorded as confirmed delivery. Issued versus acknowledged state and any unavoidable loss/duplication window are explicit in code and documentation. Existing per-turn fact dedup remains effective.",
+      "tests": "go test -race ./internal/api ./internal/hookcli ./internal/memory -count=1",
+      "commit": "fix(memory): deduplicate repeated context delivery"
+    },
+    {
+      "id": "C05",
+      "title": "Verify hook and MCP namespace alignment",
+      "deps": [
+        "C03"
+      ],
+      "files": [
+        "internal/hookcli/verify.go",
+        "internal/hookcli/verify_test.go",
+        "internal/hookcli/connect_codex.go",
+        "internal/hookcli/namespace.go",
+        "internal/mcpserver/namespace.go",
+        "internal/mcpserver/namespace_test.go",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Extend connect/verify diagnostics to compare effective capture namespace with MCP whoami using the same project and credentials. Project connections must pin the remote-derived namespace when roots are unavailable. A global connection spanning several repos must not pin all repos to the planner's cwd. Distinguish explicit namespace overrides from accidental fallback. Report existing data locations without copying or deleting data.",
+      "red": "No-roots MCP fixture yields agent-default while the same repository hook resolves a remote namespace; verify must detect this mismatch and a project connection must resolve both sides identically.",
+      "accept": "Cover roots/no roots, explicit headers, two clones, two unrelated repos, custom CODEX_HOME and remote/global connections. whoami reports source. The observed agent-default versus agent-punk-records-75eeb0 mismatch is represented by sanitized fixtures.",
+      "tests": "go test ./internal/hookcli ./internal/mcpserver ./internal/api -run 'Namespace|Verify|Codex' -count=1",
+      "commit": "fix(connect): verify memory namespace alignment"
+    },
+    {
+      "id": "C07",
+      "title": "Bound repeated memory guidance in agent context",
+      "deps": [
+        "C03"
+      ],
+      "files": [
+        "internal/mcpserver/instructions.go",
+        "internal/mcpserver/server_test.go",
+        "internal/hookcli/skill.go",
+        "internal/hookcli/skill_test.go",
+        "internal/hookcli/planskill.go",
+        "internal/mcpserver/toolset.go"
+      ],
+      "contract": "Measure initialization instructions, actual tools/list descriptions and installed skill text separately. Determine whether this host prepends initialize instructions to each exposed tool before changing server descriptions. Keep concise tool-specific descriptions, one canonical routing explanation and discoverable skill references. Remove only verified redundant server-owned content; preserve standalone MCP use without installed skills.",
+      "red": "Snapshot byte/token estimates for the effective agent toolset and initialization payload; pin an upper bound derived from the measured baseline and test that all retrieval and coordination routing guidance remains discoverable.",
+      "accept": "Report before/after payload sizes using the same estimator and actual MCP responses. No lost tool capabilities or ambiguous namespace instructions. Distinguish model-context duplication from the user's UI spam; this task cannot close C02.",
+      "tests": "go test ./internal/mcpserver ./internal/hookcli -run 'Instruction|Skill|Toolset|Budget' -count=1",
+      "commit": "perf(mcp): bound repeated memory guidance"
+    },
+    {
+      "id": "C06",
+      "title": "Gate the complete Codex 0.153.4 integration",
+      "deps": [
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "C05",
+        "C07"
+      ],
+      "files": [
+        "internal/api/codex_roundtrip_test.go (new)",
+        "docs/investigations/codex-0.153.4-terminal-spam.md",
+        "docs/CONFIG.md",
+        "README.md"
+      ],
+      "contract": "Create a repeatable integration acceptance procedure with an isolated config directory and temporary Punk DB. Exercise connect twice, startup, submit, tool burst, stop, resume, duplicate delivery, slow/offline server and foreign configuration. Preserve source-version references and separate native observations from simulated tests.",
+      "red": "The end-to-end acceptance scenario must detect the original spam or documented boundary regression when the responsible fix is reverted, and detect the missing prompt_id capture on the old adapter.",
+      "accept": "All Codex acceptance criteria in the brief pass at 0.153.4. Exact transcript spam trigger and remediation are documented, or task remains blocked; no claim that a CLI test proves a different app's renderer. Installed live Codex/Punk files remain untouched.",
+      "tests": "go test ./internal/hookcli ./internal/api ./internal/mcpserver -count=1; run documented native 0.153.4 acceptance; go vet ./...",
+      "commit": "test(codex): cover native memory integration lifecycle"
+    },
+    {
+      "id": "E01",
+      "title": "Create reproducible retrieval baselines and ablations",
+      "deps": [
+        "C06"
+      ],
+      "files": [
+        "internal/membench/membench.go",
+        "internal/membench/membench_test.go",
+        "internal/membench/locomo.go",
+        "internal/membench/report.go (new)",
+        "scenarios/membench/",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Extend the existing benchmark with a versioned run manifest: corpus hash, seed, commit, embedding/reranker IDs, retrieval settings and warm/cold mode. Persist per-query rankings, latency and aggregate recall/MRR. Add deterministic cases for corrections, exact identifiers, multi-hop evidence, aliases, time windows and missing answers. Keep LoCoMo evidence recall explicitly distinct from answer accuracy.",
+      "red": "A fixed fixture and seed must yield reproducible rankings and manifest content except timing fields; changing corpus or strategy must change the recorded manifest.",
+      "accept": "One command writes machine-readable results for baseline and ablations. No default paid model calls. Fixtures avoid cross-namespace leakage; failed queries are counted rather than silently dropped.",
+      "tests": "go test ./internal/membench ./internal/memory ./cmd/punk -count=1",
+      "commit": "feat(membench): record reproducible retrieval baselines"
+    },
+    {
+      "id": "E02",
+      "title": "Evaluate answer quality and citation support",
+      "deps": [
+        "E01"
+      ],
+      "files": [
+        "internal/membench/answers.go (new)",
+        "internal/membench/answers_test.go (new)",
+        "internal/reflect/reflect.go",
+        "internal/membench/report.go",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Add an optional answer stage with exact/structured grading where possible and a pluggable judge for semantic correctness. Save answers, retrieved IDs, cited IDs, abstention decisions, token usage and judge configuration. Score citation existence separately from claim support. Distinguish unanswerable examples from retrieval misses; fixed test doubles must cover CI.",
+      "red": "An answer citing a real but unrelated fact must pass ID-existence and fail support in a labeled fixture; an unanswerable question answered confidently must fail abstention.",
+      "accept": "Report answer accuracy, evidence metrics and cost separately with per-case artifacts. Model-backed runs require explicit endpoint/model/budget configuration and never use the live memory namespace. No unsupported cross-product winner claim.",
+      "tests": "go test ./internal/membench ./internal/reflect -count=1",
+      "commit": "feat(membench): evaluate answers and citation support"
+    },
+    {
+      "id": "A01",
+      "title": "Add an explicit namespace authorization model",
+      "deps": [
+        "E01"
+      ],
+      "files": [
+        "internal/authz/ (new)",
+        "internal/api/auth.go",
+        "internal/api/auth_test.go",
+        "internal/config/config.go",
+        "internal/config/config_test.go",
+        "internal/store/migrations/{sqlite,postgres}/"
+      ],
+      "contract": "Introduce subject-to-namespace read/write/admin grants with an explicit enforcement mode. Existing trusted single-user deployments remain compatible when enforcement is off; when enabled use deny-by-default. Derive identity from verified credentials, never a user-controlled namespace/header or agent label. Specify local stdio trust separately. Allocate the next free matching migration number on both dialects.",
+      "red": "An authenticated subject with only namespace A read permission is denied namespace B and denied A writes when enforcement is enabled; compatibility mode preserves current bootstrap behavior.",
+      "accept": "Policy decisions cover wildcard/prefix rules only if deliberately specified, grant revocation, empty subject and admin. Migration up/down and default behavior are tested in SQLite and PostgreSQL. No live grant or configuration changes.",
+      "tests": "go test ./internal/authz ./internal/api ./internal/config ./internal/store -count=1",
+      "commit": "feat(authz): add namespace permission grants"
+    },
+    {
+      "id": "A02",
+      "title": "Enforce namespace permissions at every external memory boundary",
+      "deps": [
+        "A01",
+        "C05"
+      ],
+      "files": [
+        "internal/api/server.go",
+        "internal/api/memory_handlers.go",
+        "internal/api/agent_handlers.go",
+        "internal/api/brain_handlers.go",
+        "internal/api/task_board_handlers.go",
+        "internal/mcpserver/server.go",
+        "internal/mcpserver/tasks.go",
+        "internal/mcpserver/namespace.go"
+      ],
+      "contract": "Apply the common authorizer before reads/writes across REST, HTTP MCP, subscriptions/SSE, hook context/capture, task board, claims, brain snapshots, exports/imports and cross-region operations. Produce an endpoint/tool permission inventory. Do not let roots, ns headers or explicit tool arguments grant access; prevent unauthorized resource enumeration and subscription delivery.",
+      "red": "Table-driven REST/MCP tests use a valid A-only credential to attempt B access on every inventory entry, including query overrides and resource subscriptions.",
+      "accept": "All external surfaces are inventoried and enforced in enabled mode; trusted disabled mode is compatible. Revocation affects subsequent subscription deliveries according to documented policy. Cross-region calls check source and destination separately.",
+      "tests": "go test -race ./internal/authz ./internal/api ./internal/mcpserver ./internal/region -count=1",
+      "commit": "feat(authz): enforce memory permissions across interfaces"
+    },
+    {
+      "id": "G01",
+      "title": "Add typed entities and optional domain vocabulary",
+      "deps": [
+        "E01",
+        "A02"
+      ],
+      "files": [
+        "internal/memory/entity.go",
+        "internal/memory/entity_test.go",
+        "internal/memory/enrich.go",
+        "internal/config/config.go",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Add an optional structured extractor interface returning name, type, aliases and source fact IDs while adapting the legacy name-only interface. Initial types: service, repository, database, host, incident, person and unknown. Canonical IDs are distinct from display names; existing /entities keys remain addressable. Use a small optional vocabulary, not a general OWL engine.",
+      "red": "Same display name for a person and service remains distinct; legacy string extractor remains supported; malformed structured results do not write partial invalid entities.",
+      "accept": "Disabled mode is unchanged. New entities retain provenance and declared types, unknown types have an explicit policy, batching and fallback remain correct. Compare fixture retrieval against E01.",
+      "tests": "go test ./internal/memory ./internal/config ./cmd/punk -count=1",
+      "commit": "feat(memory): add typed entity extraction"
+    },
+    {
+      "id": "G02",
+      "title": "Resolve aliases with reversible, type-aware merge proposals",
+      "deps": [
+        "G01",
+        "E02"
+      ],
+      "files": [
+        "internal/memory/entity.go",
+        "internal/memory/entity_test.go",
+        "internal/memory/entity_resolve.go (new)",
+        "internal/memory/entity_resolve_test.go (new)",
+        "internal/memory/links.go"
+      ],
+      "contract": "Resolve exact aliases first, then type-compatible contextual/embedding candidates. Add dry-run merge proposals with evidence and protected types. Applying a proposal records canonical aliases and lineage while preserving old IDs and historical facts; no destructive node deletion or broad fuzzy-name auto-merge. Remove bounded-scan blind spots through paginated candidate discovery.",
+      "red": "Alice/Alice Chen may resolve with supporting identity evidence; two different services sharing a short name do not merge; proposal replay is idempotent; rejected proposals leave data untouched.",
+      "accept": "Measure false merges and missed aliases on labeled fixtures. Types constrain matching, source provenance survives, old references resolve, undo or supersession is defined and tested.",
+      "tests": "go test ./internal/memory ./internal/membench -count=1",
+      "commit": "feat(memory): propose reversible entity alias merges"
+    },
+    {
+      "id": "I01",
+      "title": "Preserve document and chunk source provenance",
+      "deps": [
+        "E01",
+        "A02"
+      ],
+      "files": [
+        "internal/memory/document.go",
+        "internal/memory/document_test.go",
+        "internal/memory/document_source.go (new)",
+        "internal/api/memory_handlers.go",
+        "internal/mcpserver/server.go"
+      ],
+      "contract": "Add source-aware document input containing stable source ID/URI, revision/content hash, media type, section/page and offsets. Retain the existing text-only API. Track stable chunk identity so inserting an early paragraph does not rewrite every unaffected later paragraph; define deterministic handling of repeated identical paragraphs. Keep source metadata secret-scrubbed under the same namespace policy.",
+      "red": "Insert a paragraph at the beginning of a document and assert unchanged later chunks preserve IDs/provenance; deleting a section tombstones only owned chunks; legacy input still behaves compatibly.",
+      "accept": "Reingestion is idempotent; provenance points to exact retained source revisions, old fact citations remain resolvable within retention, and export/import round-trips source metadata.",
+      "tests": "go test ./internal/memory ./internal/api ./internal/mcpserver -count=1",
+      "commit": "feat(ingest): preserve stable chunk provenance"
+    },
+    {
+      "id": "I02",
+      "title": "Add optional text and document loader adapters",
+      "deps": [
+        "I01"
+      ],
+      "files": [
+        "internal/ingest/ (new)",
+        "cmd/punk/main.go",
+        "internal/memory/document.go",
+        "docs/CONFIG.md"
+      ],
+      "contract": "Define a Loader interface producing source-aware document sections and implement plain text, Markdown, HTML and structured incident JSON. Provide an optional external-process adapter contract for PDF extraction rather than embedding a Python/OCR stack. Limit file size and process time; make URL fetching explicit and protect server-side private-network access if supported. Normalize into I01 instead of creating a second write path.",
+      "red": "Fixtures preserve Markdown headings, HTML text order and incident fields with source locations; unavailable PDF adapter yields an actionable error without a partial successful ingest.",
+      "accept": "Static binary remains useful without external loaders. Repeated ingestion writes no unchanged chunks. Unsupported formats and extraction errors are visible, and all writes pass defense/provenance handling.",
+      "tests": "go test ./internal/ingest ./internal/memory ./cmd/punk -count=1",
+      "commit": "feat(ingest): add optional source loader adapters"
+    },
+    {
+      "id": "S01",
+      "title": "Discover procedural skills without loading full procedures",
+      "deps": [
+        "E01",
+        "A02"
+      ],
+      "files": [
+        "internal/skillmine/",
+        "internal/spec/",
+        "internal/memory/skills.go (new)",
+        "internal/mcpserver/server.go",
+        "internal/mcpserver/toolset.go"
+      ],
+      "contract": "Index existing SKILL.md metadata (name, description, version, declared tools, scope) for lexical/semantic discovery. Return metadata-only results and load the exact versioned body on demand. Reuse existing spec loading and generated skill formats; do not duplicate entire procedures into every prompt. Enforce namespace authorization when enabled.",
+      "red": "Searching for a procedure returns metadata without procedure text; loading its ID/version returns the matching body; inactive/unauthorized skills are excluded and no-embedder search works.",
+      "accept": "Existing authored and mined skills are discoverable. Missing skill collection is a normal empty result, permission checks hold, and discovery payload stays within an explicit measured size bound.",
+      "tests": "go test ./internal/skillmine ./internal/spec ./internal/memory ./internal/mcpserver -count=1",
+      "commit": "feat(skills): add scoped procedural discovery"
+    },
+    {
+      "id": "S02",
+      "title": "Record skill outcomes and propose versioned improvements",
+      "deps": [
+        "S01",
+        "E02"
+      ],
+      "files": [
+        "internal/skillmine/",
+        "internal/task/ledger.go",
+        "internal/memory/skills.go",
+        "internal/policy/proposals.go"
+      ],
+      "contract": "Record run outcome against the exact skill version and originating ledger/task evidence. Generate explicit improvement proposals from failed or successful trajectories; separate proposal generation from approval/application. Reuse the existing proposal mechanism where its semantics fit, without giving a skill draft automatic authority to edit active procedures.",
+      "red": "A run references the original version after a new version is proposed; an unapproved draft cannot replace the active procedure; applying the same approved proposal twice has one effect.",
+      "accept": "Versions and run lineage are queryable; regressions can revert to a prior version; proposals cite actual runs and pass E02-style outcome checks before activation.",
+      "tests": "go test ./internal/skillmine ./internal/memory ./internal/task ./internal/policy -count=1",
+      "commit": "feat(skills): propose improvements from run outcomes"
+    },
+    {
+      "id": "R01",
+      "title": "Route retrieval with explicit, inspectable strategies",
+      "deps": [
+        "E01",
+        "G02",
+        "S01"
+      ],
+      "files": [
+        "internal/memory/unified.go",
+        "internal/memory/retrieval_route.go (new)",
+        "internal/memory/retrieval_route_test.go (new)",
+        "internal/api/memory_handlers.go",
+        "internal/mcpserver/server.go"
+      ],
+      "contract": "Add caller-selectable exact, semantic, historical, relationship and procedural modes with an optional deterministic auto router. Return selected mode, reasons and fallback metadata. Reuse current search functions; preserve legacy default behavior until evaluation supports changing it. Do not interpret arbitrary years in identifiers as time filters or execute raw query text.",
+      "red": "Version/error strings containing years route as identifiers; explicit mode wins; ambiguous language falls back predictably; missing embeddings degrade to lexical retrieval.",
+      "accept": "All strategies preserve namespace and token budgets. E01 reports routing mistakes and quality/cost per strategy. Auto routing adds no model call.",
+      "tests": "go test ./internal/memory ./internal/api ./internal/mcpserver ./internal/membench -count=1",
+      "commit": "feat(search): add inspectable retrieval strategies"
+    },
+    {
+      "id": "R02",
+      "title": "Add optional budgeted evidence expansion to reflect",
+      "deps": [
+        "R01",
+        "E02"
+      ],
+      "files": [
+        "internal/reflect/reflect.go",
+        "internal/reflect/reflect_test.go",
+        "internal/memory/triplet.go",
+        "internal/membench/answers.go"
+      ],
+      "contract": "Extend the existing reflect loop with bounded relationship/evidence expansion, deduplicated evidence IDs, per-round cost and latency, and a no-new-evidence stop rule. Model-generated search suggestions never become facts by themselves. Enforce caller token/tool/time caps and validate citations against actual retrieved IDs.",
+      "red": "A multi-hop fixture needs a second evidence hop; repeated identical retrieval stops early; fabricated relation IDs are rejected; budget exhaustion returns a partial/abstained result with reason.",
+      "accept": "Compare against existing reflect on E02 under equal model/context budgets. Feature stays opt-in unless the final gate demonstrates a justified default change. No unlimited recursion or new agent framework.",
+      "tests": "go test ./internal/reflect ./internal/memory ./internal/membench -count=1",
+      "commit": "feat(reflect): bound iterative evidence expansion"
+    },
+    {
+      "id": "P01",
+      "title": "Persist enrichment stage status and retry lineage",
+      "deps": [
+        "E01",
+        "A02"
+      ],
+      "files": [
+        "internal/memory/outbox.go",
+        "internal/memory/enrich.go",
+        "internal/memory/pipeline_runs.go (new)",
+        "internal/api/memory_handlers.go",
+        "internal/store/migrations/{sqlite,postgres}/",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Extend the existing outbox/enricher with source-revision and stage-version run records: pending/running/succeeded/failed, attempts, timestamps, counts and sanitized error classification. Stages remain in-process workers; do not introduce Kafka or a new orchestration service. Work keys must make at-least-once delivery idempotent and prevent stale revisions overwriting newer derived state.",
+      "red": "Crash after stage output but before acknowledgment, then retry: no duplicate derived entities/links. Stage failure remains visible and a changed source revision gets a new run.",
+      "accept": "Restart recovery and stale-worker handling are tested. Status endpoints honor authorization. Stage errors and durations are inspectable without exposing secrets. Paired SQLite/Postgres migrations preserve old data.",
+      "tests": "go test -race ./internal/memory ./internal/api ./internal/store ./cmd/punk -count=1",
+      "commit": "feat(memory): track enrichment stages and retries"
+    },
+    {
+      "id": "P02",
+      "title": "Preview ingestion and enrichment work before execution",
+      "deps": [
+        "P01",
+        "I02",
+        "G02"
+      ],
+      "files": [
+        "internal/ingest/estimate.go (new)",
+        "internal/ingest/estimate_test.go (new)",
+        "internal/memory/pipeline_runs.go",
+        "internal/cost/",
+        "cmd/punk/main.go"
+      ],
+      "contract": "Add a dry-run command reusing real loader/chunker/change-detection rules. Return changed/unchanged chunks, expected stage calls, token estimates, configured model IDs and explicitly approximate cost. No memory writes, model calls or loader subprocesses with hidden network side effects in default dry-run. Unsupported expensive formats must be labeled unestimated.",
+      "red": "A spy store/client sees zero writes and model calls during preview; an unchanged document estimates zero changed-chunk enrichment; unsupported input is never counted as a cheap URL/string.",
+      "accept": "Estimates distinguish measured input from heuristic output, include exclusions, and compare predicted versus recorded P01 work on fixtures. Missing prices return unknown, never zero-cost certainty.",
+      "tests": "go test ./internal/ingest ./internal/memory ./internal/cost ./cmd/punk -count=1",
+      "commit": "feat(ingest): preview enrichment work and cost"
+    },
+    {
+      "id": "H01",
+      "title": "Build opt-in source-linked hierarchical summaries",
+      "deps": [
+        "E02",
+        "P01",
+        "G02",
+        "R01"
+      ],
+      "files": [
+        "internal/memory/consolidate.go",
+        "internal/memory/observe.go",
+        "internal/memory/summary_tree.go (new)",
+        "internal/memory/summary_tree_test.go (new)",
+        "internal/reflect/reflect.go"
+      ],
+      "contract": "Build bounded topic summaries above source-linked observations using deterministic initial grouping by domain/key prefix. Record child revision IDs, stage version and stale state; regenerate only affected ancestors. Generated summaries stay separate from curated /mental-models. Support paginated scans, not a silent first-1000-facts ceiling.",
+      "red": "Editing/deleting one leaf invalidates only its ancestors; untouched branches do no model work; a corpus beyond the old cap retains full coverage and an empty subtree disappears.",
+      "accept": "Feature stays off by default. E02 broad-question cases measure benefit and extra cost. Sources remain traceable and compaction cannot silently present an unsupported summary as current.",
+      "tests": "go test ./internal/memory ./internal/reflect ./internal/membench -count=1",
+      "commit": "feat(memory): add incremental summary hierarchies"
+    },
+    {
+      "id": "Z01",
+      "title": "Run cross-feature acceptance and publish the local evidence report",
+      "deps": [
+        "A02",
+        "G02",
+        "I02",
+        "S02",
+        "R02",
+        "P02",
+        "H01"
+      ],
+      "files": [
+        "docs/CONFIG.md",
+        "README.md",
+        "CHANGELOG.md",
+        "docs/reports/punk-improvement-pipeline.md (new)",
+        "scenarios/membench/"
+      ],
+      "contract": "Review the integrated branch against the brief. Run fresh migrations and upgrades from the baseline on both databases, native Codex 0.153.4 acceptance, authorization inventory, deterministic and opt-in retrieval modes, restart/retry scenarios and benchmark ablations. Document historical retention, approximate token budgets and citation-existence limits accurately. Report actual results and remaining limitations; do not claim Cognee superiority without a controlled comparative run.",
+      "red": "Revert representative boundary fixes in a disposable test checkout to verify the acceptance harness detects missing prompt capture, cross-namespace access and duplicate stage output; never revert the shared integration branch.",
+      "accept": "All task commits integrated and reviewed; full gates pass with actual logs. The report records SHAs, commands, configurations, results, no unexplained regressions and rollout/rollback steps. No deployment, release, tagging or merge to main is part of this task.",
+      "tests": "go test ./...; go test -race ./internal/hookcli ./internal/api ./internal/mcpserver ./internal/memory ./internal/reflect; go vet ./...; go build ./...; make test-ui; PostgreSQL and native Codex acceptance from brief",
+      "commit": "docs: record improvement pipeline acceptance"
+    }
+  ]
+}
