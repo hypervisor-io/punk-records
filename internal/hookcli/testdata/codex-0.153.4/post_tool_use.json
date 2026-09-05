@@ -1,0 +1,13 @@
+{
+  "session_id": "sess-codex-0153-1",
+  "turn_id": "turn-codex-0001",
+  "transcript_path": "/home/u/.codex/sessions/2026/09/05/rollout-sess-codex-0153-1.jsonl",
+  "cwd": "/home/u/punkrecords",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.1-codex",
+  "permission_mode": "default",
+  "tool_name": "shell",
+  "tool_input": {"command": ["git", "status", "--short"]},
+  "tool_response": {"output": " M internal/hookcli/normalize.go", "exit_code": 0},
+  "tool_use_id": "call-codex-9f8e7d6c"
+}

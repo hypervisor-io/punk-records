@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,6 +163,205 @@ func TestCursorHookRoundTripsThroughServerContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCodexHookRoundTripsThroughServerContract is the C01 red proof: the
+// captured native Codex 0.153.4 fixtures (internal/hookcli/testdata/
+// codex-0.153.4/, mirroring upstream codex-rs/hooks/src/schema.rs at
+// rust-v0.153.4) must exercise the REAL hook-to-API boundary - the actual
+// hookcli.Normalize output POSTed to the actual handleAgentHook - and land
+// as stored facts, not 200 "ignored". The old passthrough (--from codex
+// routed to Run, forwarding stdin unchanged) failed exactly here: the
+// native UserPromptSubmit has turn_id and no prompt_id, so the server's
+// prompt_id gate dropped every Codex prompt capture.
+//
+// The UserPromptSubmit subtest additionally pins the capture-identity
+// contract: replaying the identical payload is idempotent (one fact at one
+// stable key), while a DISTINCT turn_id with identical prompt text remains
+// a distinct capture - turn identity, not prompt text, keys the capture.
+func TestCodexHookRoundTripsThroughServerContract(t *testing.T) {
+	fixture := func(name string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("..", "hookcli", "testdata", "codex-0.153.4", name))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", name, err)
+		}
+		return raw
+	}
+
+	cases := []struct {
+		name             string
+		fixture          string
+		wantBodyContains []string
+	}{
+		{name: "sessionStart", fixture: "session_start.json"},
+		{
+			name:             "userPromptSubmit",
+			fixture:          "user_prompt_submit.json",
+			wantBodyContains: []string{"normalize native codex hook events"},
+		},
+		{
+			name:             "postToolUse",
+			fixture:          "post_tool_use.json",
+			wantBodyContains: []string{"shell", "git", "exit_code"},
+		},
+		{
+			name:             "stop",
+			fixture:          "stop.json",
+			wantBodyContains: []string{"Normalized the native Codex hook payloads."},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fixture(tc.fixture)
+			translated, ok, err := hookcli.Normalize("codex", raw)
+			if err != nil {
+				t.Fatalf("Normalize: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Normalize: event unexpectedly skipped (ok=false): %s", raw)
+			}
+
+			var in agentHookIn
+			if err := json.Unmarshal(translated, &in); err != nil {
+				t.Fatalf("translated envelope not decodable as agentHookIn: %v: %s", err, translated)
+			}
+
+			srv := testServer(t)
+			rec := do(t, srv, "POST", "/v1/agent/hooks", string(translated))
+			if rec.Code != 200 {
+				t.Fatalf("POST /v1/agent/hooks: %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Status    string `json:"status"`
+				Namespace string `json:"namespace"`
+				Key       string `json:"key"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("response not decodable: %v: %s", err, rec.Body.String())
+			}
+			if resp.Status != "stored" {
+				t.Fatalf("status = %q, want stored (translated envelope: %s)", resp.Status, translated)
+			}
+
+			sid := sanitizeID(in.SessionID)
+			var wantKeySuffix string
+			switch in.HookEventName {
+			case "SessionStart":
+				wantKeySuffix = "/start"
+			case "UserPromptSubmit":
+				pid := sanitizeID(in.PromptID)
+				if pid == "" {
+					t.Fatalf("translated envelope has no usable prompt_id - the C01 defect: %s", translated)
+				}
+				wantKeySuffix = "/prompt-" + pid
+			case "PostToolUse":
+				tuid := sanitizeID(in.ToolUseID)
+				if tuid == "" {
+					t.Fatalf("translated envelope has no usable tool_use_id: %s", translated)
+				}
+				wantKeySuffix = "/tool-" + tuid
+			case "Stop":
+				wantKeySuffix = "/stop"
+			default:
+				t.Fatalf("unexpected translated hook_event_name %q", in.HookEventName)
+			}
+			wantKey := "/agent-sessions/" + sid + wantKeySuffix
+			if resp.Key != wantKey {
+				t.Fatalf("stored key = %q, want %q", resp.Key, wantKey)
+			}
+
+			ns := AgentNamespace(in.CWD)
+			if resp.Namespace != ns {
+				t.Fatalf("stored namespace = %q, want %q", resp.Namespace, ns)
+			}
+			facts, err := srv.mem.Recall(context.Background(), ns, wantKey, 1)
+			if err != nil || len(facts) != 1 {
+				t.Fatalf("stored fact not recallable at %s%s: %v %v", ns, wantKey, facts, err)
+			}
+			if facts[0].SourceRef != "codex" {
+				t.Fatalf("SourceRef = %q, want %q (provenance to the codex source, not the native startup reason)", facts[0].SourceRef, "codex")
+			}
+			for _, want := range tc.wantBodyContains {
+				if !strings.Contains(facts[0].Body, want) {
+					t.Fatalf("fact body missing %q: %q", want, facts[0].Body)
+				}
+			}
+		})
+	}
+}
+
+// TestCodexUserPromptSubmitReplayIsIdempotent is the second half of C01's
+// red proof, run against the real server: one native UserPromptSubmit
+// payload (turn_id, no prompt_id) creates exactly ONE prompt fact;
+// replaying the identical payload stays exactly one fact at the same key;
+// a distinct turn_id with byte-identical prompt text is a DISTINCT capture.
+func TestCodexUserPromptSubmitReplayIsIdempotent(t *testing.T) {
+	fixture := func(name string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("..", "hookcli", "testdata", "codex-0.153.4", name))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", name, err)
+		}
+		return raw
+	}
+
+	srv := testServer(t)
+	submit := func(raw []byte) (key, ns string) {
+		t.Helper()
+		translated, ok, err := hookcli.Normalize("codex", raw)
+		if err != nil || !ok {
+			t.Fatalf("Normalize: ok=%v err=%v", ok, err)
+		}
+		rec := do(t, srv, "POST", "/v1/agent/hooks", string(translated))
+		if rec.Code != 200 {
+			t.Fatalf("POST /v1/agent/hooks: %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Status    string `json:"status"`
+			Namespace string `json:"namespace"`
+			Key       string `json:"key"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("response not decodable: %v", err)
+		}
+		if resp.Status != "stored" {
+			t.Fatalf("status = %q, want stored (translated envelope: %s)", resp.Status, translated)
+		}
+		return resp.Key, resp.Namespace
+	}
+
+	raw := fixture("user_prompt_submit.json")
+	key1, ns := submit(raw)
+	// Replay: identical bytes must land on the identical key.
+	key2, _ := submit(raw)
+	if key1 != key2 {
+		t.Fatalf("replay produced a different key: %q then %q", key1, key2)
+	}
+	facts, err := srv.mem.Recall(context.Background(), ns, key1, 10)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("exactly one prompt fact must exist after replay, got %d facts (%v)", len(facts), err)
+	}
+
+	// Distinct turn, identical prompt text: a second, separate capture.
+	var native map[string]any
+	if err := json.Unmarshal(raw, &native); err != nil {
+		t.Fatal(err)
+	}
+	native["turn_id"] = "turn-codex-0002"
+	raw2, err := json.Marshal(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key3, _ := submit(raw2)
+	if key3 == key1 {
+		t.Fatalf("distinct turn_id collapsed onto the first turn's key %q - prompt text must not be capture identity", key1)
+	}
+	facts, err = srv.mem.Recall(context.Background(), ns, key3, 10)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("distinct turn must be recallable at its own key %s: %v %v", key3, facts, err)
 	}
 }
 

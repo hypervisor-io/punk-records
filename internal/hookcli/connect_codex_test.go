@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,46 +40,124 @@ func TestConnectCodexHooksWritesClaudeShapedFile(t *testing.T) {
 	}
 }
 
-func TestRunFromCodexIsPassthrough(t *testing.T) {
-	// Mirrors the Claude passthrough contract (TestRunFromClaudeIsByteExactPassthrough
-	// and the from="" test in hookcli_test.go): Codex's hook payloads share
-	// Claude Code's field names, so Run must forward stdin byte-exact and
-	// SessionStart must still inject the context envelope.
-	var gotHook []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// codexHookSrv is a minimal capture+context double for the RunFrom("codex")
+// tests below: it records the last forwarded /v1/agent/hooks body and
+// answers /v1/agent/context with a fixed non-empty context.
+type codexHookSrv struct {
+	gotHook []byte
+	srv     *httptest.Server
+}
+
+func newCodexHookSrv(t *testing.T, contextBody string) *codexHookSrv {
+	t.Helper()
+	h := &codexHookSrv{}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/agent/hooks":
-			gotHook, _ = io.ReadAll(r.Body)
+			h.gotHook, _ = io.ReadAll(r.Body)
 			w.Write([]byte(`{"status":"stored"}`))
 		case "/v1/agent/context":
-			w.Write([]byte(`{"namespace":"agent-p","context":"## Project memory\n- [/a] x","fact_ids":["1"]}`))
+			w.Write([]byte(`{"namespace":"agent-p","context":` + strconv.Quote(contextBody) + `,"fact_ids":["1"]}`))
 		}
 	}))
-	defer srv.Close()
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+// TestRunFromCodexNormalizesSessionStart replaces the old byte-exact
+// passthrough contract (TestRunFromCodexIsPassthrough, removed by C01):
+// RunFrom("codex", ...) now routes through the explicit Codex normalizer,
+// so the forwarded body is the TRANSLATED envelope (source hardcoded
+// "codex", never Codex's own session-start "source" reason), not stdin
+// verbatim. SessionStart remains an injection event: the nested
+// hookSpecificOutput envelope Codex 0.153.4's session-start command output
+// schema accepts (same shape as Claude Code's) is printed when the server
+// has context to inject.
+func TestRunFromCodexNormalizesSessionStart(t *testing.T) {
+	h := newCodexHookSrv(t, "## Project memory\n- [/a] x")
 
 	var out, errw strings.Builder
-	in := `{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/w","source":"startup","model":"gpt-5","permission_mode":"default"}`
-	if err := RunFrom("codex", strings.NewReader(in), srv.URL, "", &out, &errw); err != nil {
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), h.srv.URL, "", &out, &errw); err != nil {
 		t.Fatal(err)
 	}
-	if string(gotHook) != in {
-		t.Fatalf("RunFrom(\"codex\", ...) must forward stdin byte-exact:\n got:  %s\n want: %s", gotHook, in)
+	env := decodeEnvelope(t, h.gotHook)
+	if env.HookEventName != "SessionStart" || env.SessionID != "sess-codex-0153-1" {
+		t.Fatalf("forwarded envelope = %s", h.gotHook)
 	}
-	if !strings.Contains(out.String(), `"hookSpecificOutput"`) {
-		t.Fatalf("codex SessionStart must inject context: %s", out.String())
+	if env.Source != "codex" {
+		t.Fatalf("forwarded source = %q, want codex (not the native startup reason)", env.Source)
 	}
+	if !strings.Contains(out.String(), `"hookSpecificOutput"`) || !strings.Contains(out.String(), "## Project memory") {
+		t.Fatalf("codex SessionStart must inject the nested additionalContext envelope: %s", out.String())
+	}
+}
 
-	var out2, errw2 strings.Builder
-	gotHook = nil
-	in2 := `{"hook_event_name":"Stop","session_id":"s1","cwd":"/p","stop_hook_active":false,"last_assistant_message":"m"}`
-	if err := RunFrom("codex", strings.NewReader(in2), srv.URL, "", &out2, &errw2); err != nil {
+// TestRunFromCodexUserPromptSubmitMapsTurnID is the C01 regression test at
+// the RunFrom boundary: a native 0.153.4 UserPromptSubmit carries turn_id
+// and no prompt_id, and the forwarded envelope must carry that turn_id
+// verbatim as prompt_id so the server actually retains the capture instead
+// of answering "ignored". UserPromptSubmit is also an injection event, so
+// a non-empty turn context produces the nested envelope here too.
+func TestRunFromCodexUserPromptSubmitMapsTurnID(t *testing.T) {
+	h := newCodexHookSrv(t, "- [/a] relevant turn fact")
+
+	var out, errw strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "user_prompt_submit.json"))), h.srv.URL, "", &out, &errw); err != nil {
 		t.Fatal(err)
 	}
-	if string(gotHook) != in2 {
-		t.Fatalf("RunFrom(\"codex\", ...) must forward stdin byte-exact:\n got:  %s\n want: %s", gotHook, in2)
+	env := decodeEnvelope(t, h.gotHook)
+	if env.HookEventName != "UserPromptSubmit" {
+		t.Fatalf("forwarded envelope = %s", h.gotHook)
+	}
+	if env.PromptID != "turn-codex-0001" {
+		t.Fatalf("forwarded prompt_id = %q, want native turn_id verbatim", env.PromptID)
+	}
+	if env.Prompt != "normalize native codex hook events" {
+		t.Fatalf("forwarded prompt = %q", env.Prompt)
+	}
+	if !strings.Contains(out.String(), `"hookSpecificOutput"`) || !strings.Contains(out.String(), "relevant turn fact") {
+		t.Fatalf("codex UserPromptSubmit must inject the turn context envelope: %s", out.String())
+	}
+}
+
+// TestRunFromCodexCaptureOnlyEventsPrintNothing pins stdout semantics for
+// the capture-only events: PostToolUse and Stop forward their translated
+// envelopes but must leave stdout completely empty - neither event has an
+// additionalContext contract upstream (their output schemas carry no such
+// field for punk's use).
+func TestRunFromCodexCaptureOnlyEventsPrintNothing(t *testing.T) {
+	for _, fixture := range []string{"post_tool_use.json", "stop.json"} {
+		h := newCodexHookSrv(t, "context that must never print")
+		var out, errw strings.Builder
+		if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, fixture))), h.srv.URL, "", &out, &errw); err != nil {
+			t.Fatal(err)
+		}
+		if len(h.gotHook) == 0 {
+			t.Fatalf("%s: nothing forwarded", fixture)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("%s: capture-only hook must print nothing, got %s", fixture, out.String())
+		}
+	}
+}
+
+// TestRunFromCodexFailOpen mirrors the fail-open contract every other
+// entry point documents: a dead server must not error and must not print
+// anything, and malformed stdin must not error either.
+func TestRunFromCodexFailOpen(t *testing.T) {
+	var out, errw strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), "http://127.0.0.1:1", "", &out, &errw); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("dead server must print nothing: %s", out.String())
+	}
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(`{not json`), "http://127.0.0.1:1", "", &out2, &errw2); err != nil {
+		t.Fatal(err)
 	}
 	if out2.Len() != 0 {
-		t.Fatalf("non-SessionStart must print nothing: %s", out2.String())
+		t.Fatalf("malformed stdin must print nothing: %s", out2.String())
 	}
 }
 

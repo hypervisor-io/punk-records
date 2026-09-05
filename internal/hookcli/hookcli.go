@@ -6,9 +6,12 @@
 // server and, on SessionStart in Claude Code mode only, printing the
 // additionalContext JSON that Claude Code injects into the session.
 // Non-Claude RunFrom modes have no additionalContext contract and never
-// print that envelope; the one exception is Cursor's beforeSubmitPrompt,
+// print that envelope, with two exceptions: Cursor's beforeSubmitPrompt,
 // which prints exactly {"continue":true} on its own separate stdout
-// contract - see RunFrom's doc comment for why. Every other non-Claude
+// contract - see RunFrom's doc comment for why - and Codex, whose 0.153.4
+// SessionStart/UserPromptSubmit output schemas accept the very same nested
+// envelope Claude Code reads, so codex mode reuses Run's injection shape
+// for those two events (see injectCodexContext). Every other non-Claude
 // event still prints nothing at all. Antigravity CLI and GitHub Copilot CLI
 // are each handled by their own entry point - RunFromAntigravity and
 // RunFromCopilot respectively - rather than through RunFrom/Normalize
@@ -267,11 +270,14 @@ func fetchContext(baseURL, apiKey string, params url.Values, errw io.Writer) (st
 // Any other from is normalized first (see Normalize): the translated
 // Claude-shaped envelope is forwarded to /v1/agent/hooks exactly like
 // Run's claude-mode forward, but RunFrom never calls fetchContext and
-// never prints the additionalContext injection envelope. Cursor (and any
-// other non-Claude agent) has no additionalContext contract - Claude Code
-// alone is the reader that turns hookSpecificOutput.additionalContext on
-// stdout into injected context, so printing that envelope in a non-Claude
-// hook process would just be garbage on that agent's stdout. Context
+// never prints the additionalContext injection envelope for those agents -
+// Claude Code alone is the reader that turns
+// hookSpecificOutput.additionalContext on stdout into injected context, so
+// printing that envelope in a hook process whose agent cannot read it
+// would just be garbage on that agent's stdout. Codex is the one
+// RunFrom-routed exception: its native 0.153.4 output schemas accept the
+// identical nested envelope for SessionStart and UserPromptSubmit, so
+// codex mode injects through injectCodexContext (below). Context
 // injection for other agents is a separate feature, not part of this
 // translation path.
 //
@@ -315,7 +321,7 @@ func fetchContext(baseURL, apiKey string, params url.Values, errw io.Writer) (st
 // or a bad --from flag must never break the user's coding session.
 func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.Writer) error {
 	fromKey := strings.ToLower(from)
-	if fromKey == "" || fromKey == "claude" || fromKey == "claude-code" || fromKey == "codex" {
+	if fromKey == "" || fromKey == "claude" || fromKey == "claude-code" {
 		return Run(stdin, baseURL, apiKey, out, errw)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
@@ -388,7 +394,69 @@ func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.
 		// to blocking the prompt just as much as it does to capture.
 		fmt.Fprintln(out, `{"continue":true}`)
 	}
+
+	// Codex alone among the RunFrom agents gets context injection: its
+	// 0.153.4 SessionStart/UserPromptSubmit command output schemas accept
+	// the same nested hookSpecificOutput.additionalContext envelope Claude
+	// Code reads (codex-rs/hooks/src/schema.rs's
+	// SessionStartHookSpecificOutputWire/UserPromptSubmitHookSpecificOutputWire
+	// at rust-v0.153.4), so Run's exact print shape is reused here rather
+	// than a codex-specific envelope. Every other codex event
+	// (PostToolUse, Stop) is capture-only and prints nothing, and every
+	// other RunFrom agent keeps its own "never print Claude's envelope"
+	// rule (Cursor's blocking reply above excepted).
+	if fromKey == "codex" {
+		injectCodexContext(translated, baseURL, apiKey, out, errw)
+	}
 	return nil
+}
+
+// injectCodexContext is RunFrom's codex-mode injection step, mirroring
+// Run's own SessionStart/UserPromptSubmit logic against the TRANSLATED
+// envelope: SessionStart fetches the session-start block, UserPromptSubmit
+// the per-turn prompt-scoped block, and both print Claude Code's nested
+// hookSpecificOutput envelope only when the server returned a non-empty
+// context. Any failure (undecodable translation, dead server, empty
+// context) stays silent, exactly like Run.
+func injectCodexContext(translated []byte, baseURL, apiKey string, out, errw io.Writer) {
+	var env hookPayload
+	if err := json.Unmarshal(translated, &env); err != nil {
+		// Unreachable in practice: the translator just produced these
+		// bytes via its own json.Marshal. Guarded anyway rather than
+		// assumed, matching this package's discipline of never trusting a
+		// decode to succeed silently (see fetchContext's error path).
+		fmt.Fprintln(errw, "punk hook: decode translated codex envelope:", err)
+		return
+	}
+
+	var params url.Values
+	switch env.HookEventName {
+	case "SessionStart":
+		params = sessionParams(env.CWD, env.SessionID)
+	case "UserPromptSubmit":
+		if env.Prompt == "" {
+			return
+		}
+		params = turnParams(env.CWD, env.SessionID, env.Prompt)
+	default:
+		return
+	}
+
+	ctxBody, ok := fetchContext(baseURL, apiKey, params, errw)
+	if !ok || ctxBody == "" {
+		return
+	}
+	outJSON, err := json.Marshal(map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     env.HookEventName,
+			"additionalContext": ctxBody,
+		},
+	})
+	if err != nil {
+		fmt.Fprintln(errw, "punk hook: encode injection payload:", err)
+		return
+	}
+	fmt.Fprintln(out, string(outJSON))
 }
 
 // isCursorBeforeSubmitPrompt reports whether raw's hook_event_name field

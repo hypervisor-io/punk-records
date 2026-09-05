@@ -1,0 +1,9 @@
+{
+  "session_id": "sess-codex-0153-1",
+  "transcript_path": "/home/u/.codex/sessions/2026/09/05/rollout-sess-codex-0153-1.jsonl",
+  "cwd": "/home/u/punkrecords",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5.1-codex",
+  "permission_mode": "default",
+  "source": "startup"
+}

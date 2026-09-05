@@ -98,6 +98,7 @@ var translators = map[string]translator{
 	"cursor":  translateCursor,
 	"copilot": translateCopilot,
 	"hermes":  translateHermes,
+	"codex":   translateCodex,
 }
 
 // Normalize translates a native hook payload from agent "from" into the
@@ -307,6 +308,143 @@ func fileEditToolUseID(filePath string) string {
 // fileEditToolUseID already makes for repeated edits to one file.
 func promptIDFallback(conversationID, prompt string) string {
 	return "gen-" + fnv32aHex(conversationID+"\x00"+prompt)
+}
+
+// codexPayload is the subset of Codex 0.153.4 native hook stdin fields
+// this translator reads, sourced directly from upstream
+// codex-rs/hooks/src/schema.rs at rust-v0.153.4 (commit
+// 3d2ee51ca2d5db578f328aa75e20aa22c0197c9a - field names are not guessed;
+// captured payloads live in testdata/codex-0.153.4/). Codex's schema
+// already uses Claude Code's snake_case field names for the shared core
+// (session_id, cwd, hook_event_name, tool_name, tool_input, tool_response,
+// tool_use_id, last_assistant_message), plus two Codex-specific wrinkles:
+//
+//   - turn_id: a Codex extension present (and required) on every
+//     TURN-SCOPED event (UserPromptSubmit, PostToolUse, Stop, PreToolUse,
+//     the compaction events, ...) but absent from SessionStart, which is
+//     session-scoped. It is Codex's per-turn identity - exactly the grain
+//     the server's prompt_id keys UserPromptSubmit captures on.
+//   - NullableString fields (transcript_path, last_assistant_message) may
+//     be a literal JSON null, so last_assistant_message is decoded as
+//     *string rather than string.
+//
+// Codex 0.153.4 has no prompt_id field anywhere in its schema;
+// UserPromptSubmitCommandInput is exactly session_id, turn_id, agent_id?,
+// agent_type?, transcript_path, cwd, hook_event_name, model,
+// permission_mode, prompt.
+type codexPayload struct {
+	HookEventName string `json:"hook_event_name"`
+	SessionID     string `json:"session_id"`
+	TurnID        string `json:"turn_id"`
+	CWD           string `json:"cwd"`
+	Model         string `json:"model"`
+	// Source is SessionStart's own field ("startup"|"resume"|"clear"|
+	// "compact" per the upstream session_start_source_schema) - a REASON
+	// the session started, not an agent identity, the same shape as Claude
+	// Code's own SessionStart "source" enum. It is read here only so the
+	// struct decodes cleanly; it is deliberately never copied into
+	// env.Source below (which is hardcoded "codex") - doing so would
+	// repeat the exact documented collision translateCopilot avoids.
+	Source string `json:"source"`
+
+	// Prompt is UserPromptSubmit's own field.
+	Prompt string `json:"prompt"`
+	// PromptID exists in NO 0.153.4 native schema; it is decoded only so a
+	// payload that already carries one (a wrapper, or a future upstream
+	// schema) keeps it verbatim - see translateCodex's UserPromptSubmit
+	// case.
+	PromptID string `json:"prompt_id"`
+
+	// ToolName/ToolInput/ToolResponse/ToolUseID are PostToolUse's own
+	// fields, with the same names and meanings the server's agentHookIn
+	// already uses - they pass through untouched.
+	ToolName     string          `json:"tool_name"`
+	ToolInput    json.RawMessage `json:"tool_input"`
+	ToolResponse json.RawMessage `json:"tool_response"`
+	ToolUseID    string          `json:"tool_use_id"`
+
+	// StopHookActive and LastAssistantMessage are Stop's own fields; the
+	// latter is a NullableString upstream, hence *string here.
+	StopHookActive       bool    `json:"stop_hook_active"`
+	LastAssistantMessage *string `json:"last_assistant_message"`
+}
+
+// translateCodex documents the wired-event mapping this translator
+// implements; see the switch below for the per-case rationale. punk wires
+// exactly four Codex events (codexHookEvents, connect_codex.go), so those
+// four are the only ones mapped:
+//
+// codex event (0.153.4) -> claude-shaped hook_event_name
+// SessionStart           -> SessionStart
+// UserPromptSubmit       -> UserPromptSubmit (prompt_id := prompt_id, else turn_id)
+// PostToolUse            -> PostToolUse
+// Stop                   -> Stop
+// anything else          -> skipped (ok=false), never an error
+func translateCodex(raw []byte) ([]byte, bool, error) {
+	var p codexPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, false, fmt.Errorf("hookcli: codex payload: %w", err)
+	}
+
+	env := claudeEnvelope{
+		Source:    "codex",
+		SessionID: p.SessionID,
+		CWD:       p.CWD,
+	}
+
+	switch p.HookEventName {
+	case "SessionStart":
+		env.HookEventName = "SessionStart"
+
+	case "UserPromptSubmit":
+		env.HookEventName = "UserPromptSubmit"
+		env.Prompt = p.Prompt
+		// prompt_id is required server-side (agent_handlers.go's
+		// UserPromptSubmit case ignores any request whose sanitized
+		// prompt_id is empty), and Codex 0.153.4's native schema has NO
+		// prompt_id at all - the old --from codex passthrough forwarded
+		// these payloads unchanged, so every native Codex prompt capture
+		// was silently dropped as "ignored". A supplied prompt_id always
+		// wins verbatim; otherwise the native turn_id IS the stable
+		// per-turn capture identity and maps straight onto prompt_id.
+		// When both are absent the field stays empty (the server reports
+		// the event ignored, fail-open): prompt text is never hashed into
+		// an identity here - two distinct turns that happen to share text
+		// must remain distinct captures.
+		env.PromptID = p.PromptID
+		if env.PromptID == "" {
+			env.PromptID = p.TurnID
+		}
+
+	case "PostToolUse":
+		env.HookEventName = "PostToolUse"
+		// Every field already carries the server's own name and grain -
+		// tool_use_id especially is preserved verbatim, not re-derived.
+		env.ToolName = p.ToolName
+		env.ToolInput = p.ToolInput
+		env.ToolResponse = p.ToolResponse
+		env.ToolUseID = p.ToolUseID
+
+	case "Stop":
+		env.HookEventName = "Stop"
+		// Unlike Cursor/Copilot (whose terminal events carry no assistant
+		// text and need a synthesized status string), Codex's Stop carries
+		// a real last_assistant_message - nullable, but verbatim when
+		// present. An absent/null message stays empty: it means the model
+		// genuinely produced no text, same rule translateHermes applies.
+		if p.LastAssistantMessage != nil {
+			env.LastAssistantMessage = *p.LastAssistantMessage
+		}
+
+	default:
+		return nil, false, nil
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		return nil, false, fmt.Errorf("hookcli: encode envelope: %w", err)
+	}
+	return out, true, nil
 }
 
 // antigravityPayload is the subset of Antigravity CLI hook stdin fields

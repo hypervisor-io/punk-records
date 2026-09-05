@@ -1,0 +1,10 @@
+{
+  "session_id": "sess-codex-0153-1",
+  "turn_id": "turn-codex-0001",
+  "transcript_path": "/home/u/.codex/sessions/2026/09/05/rollout-sess-codex-0153-1.jsonl",
+  "cwd": "/home/u/punkrecords",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.1-codex",
+  "permission_mode": "default",
+  "prompt": "normalize native codex hook events"
+}
