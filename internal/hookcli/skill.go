@@ -115,21 +115,26 @@ The pi tools cover reading and writing. Coordination goes through the HTTP API: 
 
 - Start of session: {{tool .Opts "whoami"}}, then {{tool .Opts "recall"}} ` + "`/decisions`" + ` and ` + "`/conventions`" + `, then ask memory before re-deriving something a previous session may have recorded.
 - One or two direct calls beat a sub-agent launched just to query memory.
-- Treat a compact hit as already-read evidence; recall its key only when the clipped body is insufficient.
 - Verify memory against the code before acting on it, and do not repeat it back unprompted.
 `))
 
 // routingBody is shared with the MCP server's initialize instructions so
-// the two never drift. Plain prose, no markdown headers.
-const routingBody = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked. Read tools return at most about 8000 tokens unless max_tokens is set (-1 for no cap); a truncated: true result names how many facts matched. Enumerate a big prefix with list_keys instead of recalling it.
-- search: you know words or identifiers. Set hybrid and scored for ranked fusion. Put exact identifiers, error strings, flags or file names in anchors; they are extra retrieval routes, not filters. Pass format: compact unless you need attributes or timestamps.
+// the two never drift. Plain prose, no markdown headers. It carries the
+// routing decisions only - which tool to reach for given what you already
+// know. Mechanics the tools/list payload delivers anyway (token budgets in
+// the max_tokens schemas, anchors and format advice in search's schema,
+// write-tool selection in the remember/feedback descriptions) live in the
+// tool descriptions and input schemas, not here; every sentence removed by
+// C07 was verified near-verbatim in the served tools/list before the cut,
+// so a standalone MCP session without the skill keeps the full guidance
+// while the shared text stops repeating what each tool entry already says.
+const routingBody = `- recall: you know the key prefix (for example /decisions, /code-map, /entities). Deterministic, unranked.
+- search: you know words or identifiers. Set hybrid and scored for ranked fusion.
 - unified_search: wording unknown, or the answer spans facts and relations (architecture, causality, history, "why" questions). Prefer it first; pass format: compact.
 - triplet_search and neighbors: follow relations from a known key.
-- recall_as_of: what was believed at a past instant.
-- list_keys: discover keys. Never invent a key.
 - Flags on hits: stale means newer raw facts exist since this synthesis; invalidated means a later fact superseded it (demoted, not hidden); model means a curated mental model; relation means the hit is an edge rendered as "from -> type -> to".
 - A compact hit is already-read evidence. recall its key only when the clipped body is insufficient.
-- Writing: remember one durable decision, fix, convention or gotcha per hierarchical key; remember_many for batches; remember_document for long text; feedback with the ids of hits that helped or misled. Do not store secrets.`
+- Writing: remember one durable decision, fix, convention or gotcha per hierarchical key. Do not store secrets.`
 
 // RoutingSection returns the shared read/write routing prose.
 func RoutingSection() string { return routingBody }

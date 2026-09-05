@@ -778,10 +778,16 @@ func TestSearchCompactFormat(t *testing.T) {
 	}
 }
 
+// TestServerInstructionsAdvertised: the initialize instructions orient the
+// session (whoami, the punk-memory skill reference) and carry the routing
+// decisions. list_keys no longer appears here: C07 moved its guidance wholly
+// into its own tools/list description, which
+// TestInstructionsAndToolsetRoutingDiscoverable pins as discoverable in the
+// union of instructions and tools/list.
 func TestServerInstructionsAdvertised(t *testing.T) {
 	cs := session(t)
 	got := cs.InitializeResult().Instructions
-	for _, want := range []string{"unified_search", "recall", "compact", "list_keys", "remember"} {
+	for _, want := range []string{"whoami", "unified_search", "recall", "compact", "remember"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("instructions missing %q:\n%s", want, got)
 		}
