@@ -26,6 +26,7 @@ type Config struct {
 	A2A       A2A       `yaml:"a2a"`
 	Route     Route     `yaml:"route"`
 	Proposals Proposals `yaml:"proposals"`
+	Authz     Authz     `yaml:"authz"`
 }
 
 type HTTP struct {
@@ -80,6 +81,24 @@ type Route struct {
 type Proposals struct {
 	ExpireAfterHours int `yaml:"expire_after_hours"` // 0 disables the sweep
 }
+
+// Authz is the namespace authorization model (internal/authz, task
+// A01). Enforcement selects how the server wires it:
+//   - "off" (default): trusted single-user behavior, grants table inert;
+//     every verified API key reaches every namespace.
+//   - "deny": deny-by-default. Requests on namespace routes require an
+//     exact subject -> namespace grant for the operation; the empty
+//     subject and the zero-key bootstrap are denied there.
+//
+// Grants are provisioned locally via internal/authz (or direct DB
+// access), never over unauthenticated HTTP. The stdio MCP server is a
+// separate trust domain (see the authz package docs).
+type Authz struct {
+	Enforcement string `yaml:"enforcement"` // off | deny
+}
+
+// Enabled reports whether deny-by-default enforcement is configured.
+func (a Authz) Enabled() bool { return a.Enforcement == "deny" }
 
 // Budgets are the per-task defaults; agent specs may lower (never raise)
 // them per agent.
@@ -176,6 +195,7 @@ func Default() *Config {
 		Memory:    Memory{RetentionDays: 0, TurnContextTokens: 600},
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
+		Authz:     Authz{Enforcement: "off"},
 	}
 }
 
@@ -257,6 +277,7 @@ func applyEnv(c *Config) error {
 	str("PUNK_OTEL_ENDPOINT", &c.OTel.Endpoint)
 	integer("PUNK_MEMORY_RETENTION_DAYS", &c.Memory.RetentionDays)
 	integer("PUNK_MEMORY_TURN_CONTEXT_TOKENS", &c.Memory.TurnContextTokens)
+	str("PUNK_AUTHZ_ENFORCEMENT", &c.Authz.Enforcement)
 
 	return errors.Join(errs...)
 }
@@ -331,6 +352,11 @@ func (c *Config) validate() error {
 	}
 	if c.Proposals.ExpireAfterHours < 0 {
 		errs = append(errs, errors.New("proposals.expire_after_hours: must be >= 0"))
+	}
+	switch c.Authz.Enforcement {
+	case "", "off", "deny":
+	default:
+		errs = append(errs, fmt.Errorf("authz.enforcement %q: want off or deny", c.Authz.Enforcement))
 	}
 	return errors.Join(errs...)
 }

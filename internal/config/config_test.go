@@ -99,6 +99,50 @@ func TestEmbeddingsMaxInputTokensValidation(t *testing.T) {
 	}
 }
 
+func TestAuthzEnforcementConfig(t *testing.T) {
+	// default: enforcement off (trusted single-user behavior unchanged)
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Authz.Enforcement != "off" {
+		t.Errorf("default authz.enforcement = %q, want off", c.Authz.Enforcement)
+	}
+	if c.Authz.Enabled() {
+		t.Error("authz enabled by default, want disabled")
+	}
+
+	// file value loads
+	dir := t.TempDir()
+	path := filepath.Join(dir, "authz.yaml")
+	if err := os.WriteFile(path, []byte("authz:\n  enforcement: deny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(path)
+	if err != nil {
+		t.Fatalf("deny should validate: %v", err)
+	}
+	if !c.Authz.Enabled() {
+		t.Error("authz.enforcement=deny not reflected in Enabled()")
+	}
+
+	// env override wins
+	t.Setenv("PUNK_AUTHZ_ENFORCEMENT", "off")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Authz.Enforcement != "off" {
+		t.Errorf("env override lost: enforcement = %q, want off", c.Authz.Enforcement)
+	}
+
+	// invalid value rejected
+	t.Setenv("PUNK_AUTHZ_ENFORCEMENT", "maybe")
+	if _, err := Load(""); err == nil {
+		t.Fatal("want error for authz.enforcement=maybe, got nil")
+	}
+}
+
 func TestEmbeddingsProviderValidation(t *testing.T) {
 	dir := t.TempDir()
 	okPath := filepath.Join(dir, "ok.yaml")

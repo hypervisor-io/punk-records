@@ -28,6 +28,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/a2a"
 	"github.com/hypervisor-io/punk-records/internal/agent"
 	"github.com/hypervisor-io/punk-records/internal/api"
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/config"
 	"github.com/hypervisor-io/punk-records/internal/cost"
@@ -72,6 +73,7 @@ Usage:
   punk      migrate   run database migrations (up|down|status)
   punk      validate  validate agent/skill/policy specs in a directory
   punk      apikey    manage API keys (create|revoke --name <name>)
+  punk      authz     manage namespace grants (grant|revoke|list --subject S [--namespace N --op read|write|admin])
   punk      mcp       serve the MCP interface on stdio
   punk      backup    snapshot the SQLite database (--out file)
   punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
@@ -127,6 +129,8 @@ func run(args []string) error {
 		return cmdSeed(args[1:])
 	case "apikey":
 		return cmdAPIKey(args[1:])
+	case "authz":
+		return cmdAuthz(args[1:])
 	case "mcp":
 		return cmdMCP(args[1:])
 	case "backup":
@@ -531,6 +535,20 @@ func (e *queryExpander) Expand(ctx context.Context, query string) ([]string, err
 	return refs, nil
 }
 
+// newKeys builds the API key manager for the HTTP boundary and wires
+// namespace authorization when configured (authz.enforcement: deny).
+// With enforcement off the authorizer stays nil and the server keeps
+// the legacy trusted behavior: any verified key reaches every
+// namespace.
+func newKeys(cfg *config.Config, db *store.DB, log *slog.Logger) *api.Keys {
+	keys := api.NewKeys(db, nil)
+	if cfg.Authz.Enabled() {
+		keys.SetAuthorizer(authz.New(db, nil))
+		log.Info("namespace authorization enforced", "mode", cfg.Authz.Enforcement)
+	}
+	return keys
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
@@ -699,7 +717,7 @@ func cmdServe(args []string) error {
 		Ledger:            ledger,
 		Router:            router,
 		Proposals:         props,
-		Keys:              api.NewKeys(db, nil),
+		Keys:              newKeys(cfg, db, log),
 		Bus:               eventBus,
 		DB:                db,
 		Reg:               reg,
@@ -1375,6 +1393,80 @@ func cmdAPIKey(args []string) error {
 		return keys.Revoke(context.Background(), *name)
 	default:
 		return fmt.Errorf("apikey: want create or revoke, got %q", action)
+	}
+}
+
+// cmdAuthz is the local provisioning path for namespace grants (task
+// A01): same trust level as `punk apikey create` - direct DB access, no
+// HTTP, no unauthenticated endpoint. It is also the recovery path when
+// authz.enforcement=deny has locked every subject out: grant locally,
+// then authenticate with the matching key.
+func cmdAuthz(args []string) error {
+	// action may come first (Go's flag parsing stops at the first
+	// non-flag): punk authz grant --subject alice ...
+	action := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("authz", flag.ContinueOnError)
+	cfgPath := fs.String("config", "config.yaml", "path to config file")
+	subject := fs.String("subject", "", "verified API-key subject the grant applies to")
+	namespace := fs.String("namespace", "", "namespace the grant applies to (exact match, no wildcards)")
+	op := fs.String("op", "", "read | write | admin")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if action == "" && fs.NArg() > 0 {
+		action = fs.Arg(0)
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.DB.Driver, cfg.DB.DSN)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	az := authz.New(db, nil)
+	ctx := context.Background()
+
+	switch action {
+	case "grant", "revoke":
+		if *subject == "" || *namespace == "" || *op == "" {
+			return fmt.Errorf("authz %s: --subject, --namespace and --op are required", action)
+		}
+		if action == "grant" {
+			if err := az.Grant(ctx, *subject, *namespace, authz.Op(*op)); err != nil {
+				return err
+			}
+			fmt.Printf("granted %s %s on %s\n", *subject, *op, *namespace)
+			return nil
+		}
+		if err := az.Revoke(ctx, *subject, *namespace, authz.Op(*op)); err != nil {
+			return err
+		}
+		fmt.Printf("revoked %s %s on %s\n", *subject, *op, *namespace)
+		return nil
+	case "list":
+		if *subject == "" {
+			return errors.New("authz list: --subject is required")
+		}
+		grants, err := az.Grants(ctx, *subject)
+		if err != nil {
+			return err
+		}
+		if len(grants) == 0 {
+			fmt.Printf("no active grants for %s\n", *subject)
+			return nil
+		}
+		for _, g := range grants {
+			fmt.Printf("%s %s %s %s\n", g.Subject, g.Namespace, g.Op, g.CreatedAt.Format(time.RFC3339))
+		}
+		return nil
+	default:
+		return fmt.Errorf("authz: unknown action %q (want grant|revoke|list)", action)
 	}
 }
 

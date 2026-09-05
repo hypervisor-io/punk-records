@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/store"
 )
 
-func authServer(t *testing.T) (*Server, *Keys) {
+func authServer(t *testing.T) (*Server, *Keys, *store.DB) {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
@@ -27,11 +28,11 @@ func authServer(t *testing.T) (*Server, *Keys) {
 	now := func() time.Time { clk = clk.Add(time.Millisecond); return clk }
 	keys := NewKeys(db, now)
 	s := New(testLogger(), Deps{Memory: memory.New(db, now), Keys: keys})
-	return s, keys
+	return s, keys, db
 }
 
 func TestAuthBootstrapThenEnforced(t *testing.T) {
-	s, keys := authServer(t)
+	s, keys, _ := authServer(t)
 	ctx := context.Background()
 
 	// bootstrap: zero keys -> open
@@ -109,7 +110,7 @@ func TestIntakeRateLimit(t *testing.T) {
 }
 
 func TestForgedSubjectHeaderIsReplaced(t *testing.T) {
-	s, keys := authServer(t)
+	s, keys, _ := authServer(t)
 	ctx := context.Background()
 	token, err := keys.Create(ctx, "test-key", "real-subject")
 	if err != nil {
@@ -133,5 +134,100 @@ func TestForgedSubjectHeaderIsReplaced(t *testing.T) {
 	}
 	if got != "real-subject" {
 		t.Fatalf("subject = %q, want real-subject (forged value must be replaced)", got)
+	}
+}
+
+func authedGet(t *testing.T, s *Server, token, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+// Red proof: with enforcement wired (config authz.enforcement=deny), a
+// subject holding only namespace-A read is denied namespace B and denied
+// writes to A.
+func TestNamespaceAuthzEnforcement(t *testing.T) {
+	s, keys, db := authServer(t)
+	ctx := context.Background()
+	az := authz.New(db, nil)
+	keys.SetAuthorizer(az)
+
+	token, err := keys.Create(ctx, "alice-key", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := az.Grant(ctx, "alice", "ns-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-a/keys"); rr.Code != http.StatusOK {
+		t.Fatalf("alice read ns-a = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-b/keys"); rr.Code != http.StatusForbidden {
+		t.Fatalf("alice read ns-b = %d, want 403", rr.Code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/namespaces/ns-a/memories",
+		strings.NewReader(`{"key":"/k","body":"v"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("alice write ns-a = %d, want 403 (read grant must not write)", rec.Code)
+	}
+
+	// revocation takes effect on the next request
+	if err := az.Revoke(ctx, "alice", "ns-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-a/keys"); rr.Code != http.StatusForbidden {
+		t.Fatalf("post-revoke read ns-a = %d, want 403", rr.Code)
+	}
+}
+
+// Enabled mode denies an empty verified subject: a key without a subject
+// claim authenticates but holds no grants.
+func TestNamespaceAuthzEmptySubjectDenied(t *testing.T) {
+	s, keys, db := authServer(t)
+	ctx := context.Background()
+	keys.SetAuthorizer(authz.New(db, nil))
+
+	token, err := keys.Create(ctx, "no-subject", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-a/keys"); rr.Code != http.StatusForbidden {
+		t.Fatalf("empty subject = %d, want 403", rr.Code)
+	}
+}
+
+// Enabled mode denies the zero-key bootstrap on namespaced routes: no
+// keys means no verified subject, and deny-by-default gives the empty
+// subject nothing. First key and grants are provisioned locally (CLI),
+// never through an unauthenticated HTTP path.
+func TestNamespaceAuthzZeroKeyBootstrapDenied(t *testing.T) {
+	s, keys, db := authServer(t)
+	keys.SetAuthorizer(authz.New(db, nil))
+
+	rr := do(t, s, http.MethodGet, "/v1/namespaces/ns-a/keys", "")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("bootstrap with enforcement = %d, want 403", rr.Code)
+	}
+}
+
+// Compatibility mode: with no authorizer wired (authz.enforcement=off,
+// the default), the current trusted behavior is unchanged - any valid
+// key reaches any namespace.
+func TestNamespaceAuthzDisabledCompat(t *testing.T) {
+	s, keys, _ := authServer(t)
+	ctx := context.Background()
+	token, err := keys.Create(ctx, "trusted", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-b/keys"); rr.Code != http.StatusOK {
+		t.Fatalf("enforcement-off read = %d, want 200: %s", rr.Code, rr.Body)
 	}
 }

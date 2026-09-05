@@ -12,8 +12,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/store"
 )
+
+// namespacesPrefix prefixes every /v1 route that is scoped to one
+// namespace; the next path segment is the namespace name.
+const namespacesPrefix = "/v1/namespaces/"
+
+// namespaceFromPath extracts the {ns} segment from a namespaced route
+// path, or "" for any other path.
+func namespaceFromPath(path string) string {
+	rest, ok := strings.CutPrefix(path, namespacesPrefix)
+	if !ok {
+		return ""
+	}
+	ns, _, _ := strings.Cut(rest, "/")
+	return ns
+}
 
 // Keys manages API keys. Tokens are random 256-bit values shown once;
 // only SHA-256 hashes are stored, and lookup is by hash so comparison is
@@ -21,6 +37,7 @@ import (
 type Keys struct {
 	db  *store.DB
 	now func() time.Time
+	az  *authz.Authorizer
 }
 
 func NewKeys(db *store.DB, now func() time.Time) *Keys {
@@ -29,6 +46,11 @@ func NewKeys(db *store.DB, now func() time.Time) *Keys {
 	}
 	return &Keys{db: db, now: now}
 }
+
+// SetAuthorizer wires namespace authorization (config
+// authz.enforcement: deny). nil - the default - keeps the legacy
+// trusted behavior where any verified key reaches every namespace.
+func (k *Keys) SetAuthorizer(az *authz.Authorizer) { k.az = az }
 
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
@@ -111,6 +133,14 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if n == 0 {
+			// Bootstrap pass-through. With authorization enforced there is
+			// no verified subject, and deny-by-default grants the empty
+			// subject nothing on namespaced routes; first key and grants
+			// are provisioned locally (CLI), never over unauthenticated
+			// HTTP.
+			if !s.enforceNamespace(w, r, "") {
+				return
+			}
 			next.ServeHTTP(w, r) // bootstrap
 			return
 		}
@@ -130,7 +160,42 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 			return
 		}
+		if !s.enforceNamespace(w, r, subject) {
+			return
+		}
 		r.Header.Set("X-Punk-Subject", subject)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// enforceNamespace is the A01 authorization hook: when an authorizer is
+// wired (authz.enforcement: deny), a route carrying a {ns} path
+// parameter requires a grant for the verified subject - GET/HEAD need
+// read, every other method needs write. Without an authorizer, or on
+// routes with no {ns} parameter, behavior is unchanged; task A02
+// extends enforcement to the full boundary inventory (agent hooks,
+// brain, tasks, MCP, subscriptions).
+func (s *Server) enforceNamespace(w http.ResponseWriter, r *http.Request, subject string) bool {
+	az := s.keys.az
+	if az == nil {
+		return true
+	}
+	// The {ns} chi param is not yet parsed when this middleware runs
+	// (v1 middlewares execute before the sub-router matches the route),
+	// so the namespace comes from the well-known route prefix.
+	ns := namespaceFromPath(r.URL.Path)
+	if ns == "" {
+		return true
+	}
+	op := authz.OpWrite
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		op = authz.OpRead
+	}
+	if az.Allow(r.Context(), subject, ns, op) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{
+		"error": "namespace grant required: " + string(op) + " on " + ns,
+	})
+	return false
 }
