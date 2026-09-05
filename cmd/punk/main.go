@@ -89,6 +89,7 @@ Usage:
   punk      itbench   score the SRE loop against ITBench scenarios (run --dir <dir> --agent <name>)
   punk      membench  score recall/MRR of memory retrieval against a JSONL scenario (--file <path> [--k N] [--ns name])
                       or retrieval recall over LoCoMo gold evidence (--locomo <locomo10.json> [--k N])
+                      --report <path> writes the versioned baseline+ablation report (run manifests, per-query rankings) for --file scenarios
   punk      export    write a namespace's memory history as JSONL to stdout
   punk      import    read a JSONL export from stdin into a namespace
   punk      seed      seed memory from a code-knowledge tool (seed rinnegan [--ns NS] [--dir DIR] < map.json)
@@ -2254,7 +2255,21 @@ func cmdRegion(args []string) error {
 //
 //	punk membench --file scenarios/membench/sample.jsonl [--k N] [--ns name]
 //	punk membench --file ... --rerank --reranker-url http://host:8080/rerank
+//	punk membench --file scenarios/membench/baseline.jsonl --report report.json [--k N] [--seed N] [--commit SHA]
 //	punk membench --locomo locomo10.json [--k N] [--config config.yaml]
+//
+// --report writes the versioned machine-readable report (membench.Report:
+// run manifests with corpus hash/seed/commit/model IDs/settings/mode,
+// per-query rankings and latency, aggregate hit_at_k/evidence recall/MRR)
+// for the baseline and its ablations in one command. The report's
+// source_revision records the code-state provenance resolved at report
+// time (git HEAD of the tree the command runs in, "+dirty.<hash>" when
+// uncommitted changes are present, else explicit "unknown"), separate
+// from the --commit build label. Offline by design: --file mode wires no
+// embedder, and model-based ablations are recorded explicitly unavailable
+// unless a reranker URL is given; no paid model calls happen by default.
+// A reranker that fails degrades the rerank ablation to recorded baseline
+// fallback, never to a silent "successful" rerank.
 func cmdMembench(args []string) error {
 	fs := flag.NewFlagSet("membench", flag.ContinueOnError)
 	file := fs.String("file", "", "JSONL scenario file")
@@ -2264,6 +2279,9 @@ func cmdMembench(args []string) error {
 	rerank := fs.Bool("rerank", false, "score via HybridSearchReranked instead of HybridSearch")
 	rerankerURL := fs.String("reranker-url", "", "cross-encoder endpoint for --rerank (TEI /rerank shape)")
 	cfgPath := fs.String("config", "config.yaml", "path to config file (wires the embedder if configured, for a hybrid rather than FTS-only number)")
+	report := fs.String("report", "", "write the versioned baseline+ablation report (manifests, per-query rankings, aggregate metrics) to this path; --file scenarios only")
+	seed := fs.Int64("seed", 1, "seed recorded in report manifests (retrieval is deterministic; reserved for future randomized ablations)")
+	commit := fs.String("commit", version, "build/commit label recorded in report manifests (code-state provenance is resolved separately into the report's source_revision)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2272,6 +2290,12 @@ func cmdMembench(args []string) error {
 	}
 	if *file != "" && *locomo != "" {
 		return errors.New("membench: --file and --locomo are mutually exclusive")
+	}
+	if *report != "" && *locomo != "" {
+		return errors.New("membench: --report supports --file scenarios only")
+	}
+	if *report != "" && *rerank {
+		return errors.New("membench: --report runs its own rerank ablation when --reranker-url is set; --rerank applies to plain scoring only")
 	}
 	db, err := store.Open("sqlite", ":memory:")
 	if err != nil {
@@ -2319,6 +2343,39 @@ func cmdMembench(args []string) error {
 	recs, err := membench.Load(*file)
 	if err != nil {
 		return err
+	}
+	if *report != "" {
+		rerankerID := "none"
+		if *rerankerURL != "" {
+			rerankerID = *rerankerURL
+		}
+		rep, err := membench.Suite(ctx, mem, *ns, recs, membench.SuiteOptions{
+			K:          *k,
+			Seed:       *seed,
+			Commit:     *commit,
+			EmbedderID: "none", // --file mode wires no embedder: offline FTS-only, no paid model calls
+			RerankerID: rerankerID,
+			Fixture:    filepath.Base(*file),
+		})
+		if err != nil {
+			return err
+		}
+		out, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*report, append(out, '\n'), 0o644); err != nil {
+			return err
+		}
+		sum := rep.Runs[0].Summary
+		fmt.Printf("report written: %s (%d runs; baseline hit_at_k=%.4f evidence_recall_at_k=%.4f mrr=%.4f)\n",
+			*report, len(rep.Runs), sum.HitAtK, sum.EvidenceRecallAtK, sum.MRR)
+		for _, r := range rep.Runs {
+			if r.Available && r.Reason != "" {
+				fmt.Printf("NOTE: %s run degraded: %s\n", r.Name, r.Reason)
+			}
+		}
+		return nil
 	}
 	res, err := membench.Run(ctx, mem, *ns, recs, *k, *rerank)
 	if err != nil {

@@ -26,6 +26,12 @@ type Record struct {
 }
 
 // Result is the aggregate score over every query record in a scenario.
+// RecallAtK is the LEGACY any-hit rate: the fraction of ALL query records
+// with >=1 expected key in the top-k (unanswerable records included), not
+// per-gold-ID evidence recall. Preserved unchanged for compatibility; the
+// versioned Report (report.go) exposes the correctly named hit_at_k,
+// evidence_recall_at_k and mrr, and carries the legacy number alongside
+// them as Summary.LegacyRecallAtK.
 type Result struct {
 	Queries   int     `json:"queries"`
 	RecallAtK float64 `json:"recall_at_k"`

@@ -1,0 +1,310 @@
+{
+  "schema": "punk.membench.report/v1",
+  "fixture": "baseline.jsonl",
+  "source_revision": "736f5ae175a8fe6ba5b267cb24a30e28c0d84042+modified",
+  "generated_at": "2026-09-05T21:08:31Z",
+  "runs": [
+    {
+      "name": "baseline",
+      "available": true,
+      "manifest": {
+        "corpus_sha256": "b745b70d9761b3069a6eef0d92851e5b2c708c0f5b5745eba8e1f6b9366cf85a",
+        "seed": 1,
+        "commit": "dev",
+        "embedder_id": "none",
+        "reranker_id": "none",
+        "strategy": "hybrid",
+        "k": 5,
+        "recency_half_life": "0s",
+        "mode": "cold"
+      },
+      "summary": {
+        "queries": 9,
+        "answerable": 8,
+        "unanswerable": 1,
+        "failed": 1,
+        "hit_at_k": 0.875,
+        "evidence_recall_at_k": 0.8125,
+        "mrr": 0.875,
+        "legacy_recall_at_k": 0.7777777777777778
+      },
+      "queries": [
+        {
+          "q": "correction postgres primary moved ceph-node-09",
+          "expect": [
+            "/svc/db/correction"
+          ],
+          "ranking": [
+            "/svc/db/correction",
+            "/svc/db/primary",
+            "/ops/ceph-upgrade",
+            "/ops/window"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1958168
+        },
+        {
+          "q": "failover promote replica haproxy",
+          "expect": [
+            "/svc/db/failover"
+          ],
+          "ranking": [
+            "/svc/db/failover",
+            "/svc/db/primary"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1618388
+        },
+        {
+          "q": "ERR_POOL_EXHAUSTED intake pool",
+          "expect": [
+            "/incidents/err-pool"
+          ],
+          "ranking": [
+            "/incidents/err-pool"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1046263
+        },
+        {
+          "q": "argocd canary rollout",
+          "expect": [
+            "/deploy/api",
+            "/deploy/rollout"
+          ],
+          "ranking": [
+            "/deploy/rollout",
+            "/deploy/api"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1156134
+        },
+        {
+          "q": "argocd repo punk-api",
+          "expect": [
+            "/deploy/api",
+            "/deploy/rollout"
+          ],
+          "ranking": [
+            "/deploy/api"
+          ],
+          "hit": true,
+          "evidence_recall": 0.5,
+          "reciprocal_rank": 1,
+          "latency_ns": 876811
+        },
+        {
+          "q": "kubernetes control plane",
+          "expect": [
+            "/infra/k8s"
+          ],
+          "ranking": [
+            "/infra/k8s"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1472527
+        },
+        {
+          "q": "maintenance window ceph upgrade",
+          "expect": [
+            "/ops/window"
+          ],
+          "ranking": [
+            "/ops/window",
+            "/ops/ceph-upgrade",
+            "/svc/db/primary",
+            "/svc/db/correction"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1556391
+        },
+        {
+          "q": "quantum flux capacitor calibration",
+          "expect": null,
+          "ranking": null,
+          "hit": false,
+          "evidence_recall": 0,
+          "reciprocal_rank": 0,
+          "latency_ns": 700230
+        },
+        {
+          "q": "   ",
+          "expect": [
+            "/svc/db/primary"
+          ],
+          "ranking": null,
+          "hit": false,
+          "evidence_recall": 0,
+          "reciprocal_rank": 0,
+          "latency_ns": 849,
+          "error": "memory: empty search query"
+        }
+      ],
+      "duration_ns": 10413498
+    },
+    {
+      "name": "top1",
+      "available": true,
+      "manifest": {
+        "corpus_sha256": "b745b70d9761b3069a6eef0d92851e5b2c708c0f5b5745eba8e1f6b9366cf85a",
+        "seed": 1,
+        "commit": "dev",
+        "embedder_id": "none",
+        "reranker_id": "none",
+        "strategy": "hybrid",
+        "k": 1,
+        "recency_half_life": "0s",
+        "mode": "warm"
+      },
+      "summary": {
+        "queries": 9,
+        "answerable": 8,
+        "unanswerable": 1,
+        "failed": 1,
+        "hit_at_k": 0.875,
+        "evidence_recall_at_k": 0.75,
+        "mrr": 0.875,
+        "legacy_recall_at_k": 0.7777777777777778
+      },
+      "queries": [
+        {
+          "q": "correction postgres primary moved ceph-node-09",
+          "expect": [
+            "/svc/db/correction"
+          ],
+          "ranking": [
+            "/svc/db/correction"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 1098454
+        },
+        {
+          "q": "failover promote replica haproxy",
+          "expect": [
+            "/svc/db/failover"
+          ],
+          "ranking": [
+            "/svc/db/failover"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 728605
+        },
+        {
+          "q": "ERR_POOL_EXHAUSTED intake pool",
+          "expect": [
+            "/incidents/err-pool"
+          ],
+          "ranking": [
+            "/incidents/err-pool"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 891268
+        },
+        {
+          "q": "argocd canary rollout",
+          "expect": [
+            "/deploy/api",
+            "/deploy/rollout"
+          ],
+          "ranking": [
+            "/deploy/rollout"
+          ],
+          "hit": true,
+          "evidence_recall": 0.5,
+          "reciprocal_rank": 1,
+          "latency_ns": 658414
+        },
+        {
+          "q": "argocd repo punk-api",
+          "expect": [
+            "/deploy/api",
+            "/deploy/rollout"
+          ],
+          "ranking": [
+            "/deploy/api"
+          ],
+          "hit": true,
+          "evidence_recall": 0.5,
+          "reciprocal_rank": 1,
+          "latency_ns": 634754
+        },
+        {
+          "q": "kubernetes control plane",
+          "expect": [
+            "/infra/k8s"
+          ],
+          "ranking": [
+            "/infra/k8s"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 739276
+        },
+        {
+          "q": "maintenance window ceph upgrade",
+          "expect": [
+            "/ops/window"
+          ],
+          "ranking": [
+            "/ops/window"
+          ],
+          "hit": true,
+          "evidence_recall": 1,
+          "reciprocal_rank": 1,
+          "latency_ns": 811136
+        },
+        {
+          "q": "quantum flux capacitor calibration",
+          "expect": null,
+          "ranking": null,
+          "hit": false,
+          "evidence_recall": 0,
+          "reciprocal_rank": 0,
+          "latency_ns": 565663
+        },
+        {
+          "q": "   ",
+          "expect": [
+            "/svc/db/primary"
+          ],
+          "ranking": null,
+          "hit": false,
+          "evidence_recall": 0,
+          "reciprocal_rank": 0,
+          "latency_ns": 470,
+          "error": "memory: empty search query"
+        }
+      ],
+      "duration_ns": 6143376
+    },
+    {
+      "name": "rerank",
+      "available": false,
+      "reason": "reranker not configured: model-based ablation unavailable (no external model calls by default)"
+    },
+    {
+      "name": "embed-hybrid",
+      "available": false,
+      "reason": "embedder not configured: --file runs are offline FTS-only, vector-arm ablation unavailable (no paid model calls by default)"
+    }
+  ]
+}

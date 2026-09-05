@@ -1,0 +1,18 @@
+{"type":"fact","key":"/svc/db/primary","body":"postgres 16 primary runs on ceph-node-07, replica on ceph-node-09"}
+{"type":"fact","key":"/svc/db/correction","body":"correction: postgres primary moved to ceph-node-09, ceph-node-07 is decommissioned"}
+{"type":"fact","key":"/svc/db/failover","body":"failover procedure: promote replica with pg_ctl promote, update haproxy backend"}
+{"type":"fact","key":"/incidents/err-pool","body":"ERR_POOL_EXHAUSTED fires when the intake connection pool exceeds 4096"}
+{"type":"fact","key":"/deploy/api","body":"api service deploys from repo punk-api via argocd"}
+{"type":"fact","key":"/deploy/rollout","body":"rollout policy: canary at 10 percent, then full fleet"}
+{"type":"fact","key":"/infra/k8s","body":"k8s cluster, also called kubernetes, runs calico cni with three control plane nodes"}
+{"type":"fact","key":"/ops/window","body":"maintenance window 2026-07-14 02:00 to 04:00 UTC reserved for the ceph upgrade"}
+{"type":"fact","key":"/ops/ceph-upgrade","body":"ceph upgrade order: mons first, then osd hosts one rack at a time"}
+{"type":"query","q":"correction postgres primary moved ceph-node-09","expect":["/svc/db/correction"]}
+{"type":"query","q":"failover promote replica haproxy","expect":["/svc/db/failover"]}
+{"type":"query","q":"ERR_POOL_EXHAUSTED intake pool","expect":["/incidents/err-pool"]}
+{"type":"query","q":"argocd canary rollout","expect":["/deploy/api","/deploy/rollout"]}
+{"type":"query","q":"argocd repo punk-api","expect":["/deploy/api","/deploy/rollout"]}
+{"type":"query","q":"kubernetes control plane","expect":["/infra/k8s"]}
+{"type":"query","q":"maintenance window ceph upgrade","expect":["/ops/window"]}
+{"type":"query","q":"quantum flux capacitor calibration"}
+{"type":"query","q":"   ","expect":["/svc/db/primary"]}
