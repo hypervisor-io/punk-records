@@ -276,3 +276,283 @@ func TestConnectCodexConfigKeepsCRLF(t *testing.T) {
 		t.Fatal("idempotent on CRLF files")
 	}
 }
+
+// TestDedupeCodexHookScopesRemovesByteEquivalentProjectGroups is the C03
+// red proof for hook scopes: the same punk-managed group registered in
+// BOTH the global ~/.codex/hooks.json and the project ./.codex/hooks.json
+// executes every wired event twice for that repo. The project copy of a
+// byte-equivalent group is the redundant one (the global registration
+// already fires here) and must be removed; user entries and non-punk
+// groups are untouched, and a second pass reports no change.
+func TestDedupeCodexHookScopesRemovesByteEquivalentProjectGroups(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global", "hooks.json")
+	projectPath := filepath.Join(dir, "project", "hooks.json")
+
+	if _, err := ConnectCodexHooks(globalPath, "/usr/local/bin/punk", "http://localhost:9090", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexHooks(projectPath, "/usr/local/bin/punk", "http://localhost:9090", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A user entry in the project file must survive the dedupe.
+	settings, _, err := loadSettings(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]any)
+	hooks["PostToolUse"] = append(hooks["PostToolUse"].([]any), map[string]any{
+		"matcher": "Bash",
+		"hooks":   []any{map[string]any{"type": "command", "command": "my-lint.sh"}},
+	})
+	raw, _ := encodeSettings(settings)
+	if err := os.WriteFile(projectPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	notes, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/usr/local/bin/punk")
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	settings, _, err = loadSettings(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks = settings["hooks"].(map[string]any)
+	for _, ev := range codexHookEvents {
+		groups, _ := hooks[ev].([]any)
+		for _, g := range groups {
+			if isPunkManagedGroup(g, "/usr/local/bin/punk") {
+				t.Fatalf("%s: byte-equivalent punk group must be removed from the project file", ev)
+			}
+		}
+	}
+	raw, _ = json.Marshal(hooks["PostToolUse"])
+	if !strings.Contains(string(raw), "my-lint.sh") {
+		t.Fatalf("user entry must survive: %s", raw)
+	}
+	joined := strings.Join(notes, "\n")
+	if !strings.Contains(joined, "UserPromptSubmit") {
+		t.Fatalf("notes must name the deduped events: %s", joined)
+	}
+
+	// Global file untouched, and a rerun is a no-op.
+	settings, _, err = loadSettings(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := settings["hooks"].(map[string]any)["Stop"].([]any); !isPunkManagedGroup(g[len(g)-1], "/usr/local/bin/punk") {
+		t.Fatal("global registration must be preserved")
+	}
+	if _, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/usr/local/bin/punk"); err != nil || changed {
+		t.Fatalf("idempotent: changed=%v err=%v", changed, err)
+	}
+}
+
+// TestDedupeCodexHookScopesKeepsNamespacePinnedProjectGroups: a project
+// registration whose command differs from the global one (a --ns pin from
+// punk connect codex --project) is NOT a byte-equivalent duplicate - it is
+// kept, and the note explains the double execution so the user can act.
+func TestDedupeCodexHookScopesKeepsNamespacePinnedProjectGroups(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global", "hooks.json")
+	projectPath := filepath.Join(dir, "project", "hooks.json")
+
+	if _, err := ConnectCodexHooks(globalPath, "/usr/local/bin/punk", "http://localhost:9090", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexHooks(projectPath, "/usr/local/bin/punk", "http://localhost:9090", "agent-proj-1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/usr/local/bin/punk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("namespace-pinned project groups are not byte-equivalent; nothing may be removed")
+	}
+	settings, _, err := loadSettings(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := settings["hooks"].(map[string]any)["Stop"].([]any)
+	if !isPunkManagedGroup(groups[len(groups)-1], "/usr/local/bin/punk") {
+		t.Fatal("pinned project group must be kept")
+	}
+	joined := strings.Join(notes, "\n")
+	if !strings.Contains(joined, "both") || !strings.Contains(joined, "Stop") {
+		t.Fatalf("double-execution diagnostic must name the event and both scopes: %s", joined)
+	}
+}
+
+// TestConnectCodexConfigStripsAllManagedBlocks: a config.toml carrying TWO
+// punk-managed blocks (a paste accident or a pre-stripManagedBlock bug)
+// must converge to exactly one after connect - the MCP alias is
+// punk-managed twice, which is precisely a duplicate punk can reconcile.
+func TestConnectCodexConfigStripsAllManagedBlocks(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	o := MCPEntryOpts{ServerURL: "http://localhost:9090"}
+	if _, err := ConnectCodexConfig(p, o, false, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	// Duplicate the managed block by hand, then reconnect.
+	if err := os.WriteFile(p, append(raw, raw...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexConfig(p, o, false, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(p)
+	if strings.Count(string(raw), codexBlockStart) != 1 || strings.Count(string(raw), codexPunkTable) != 1 {
+		t.Fatalf("all stale managed blocks must be stripped, leaving exactly one:\n%s", raw)
+	}
+}
+
+// TestDetectCodexMCPAliases: two mcp_servers tables pointing at the same
+// punk /mcp endpoint are duplicate aliases Codex would connect twice.
+// Punk-managed duplicates are reconciled elsewhere (the marker block);
+// this detector must report the aliases so the user can resolve a foreign
+// one - it never edits the file.
+func TestDetectCodexMCPAliases(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	content := "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n" +
+		"[mcp_servers.punk_old]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n" +
+		"[mcp_servers.other]\nurl = \"http://example.com/mcp\"\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := DetectCodexMCPAliases(p, "http://localhost:9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliases) != 2 || aliases[0] != "punk" || aliases[1] != "punk_old" {
+		t.Fatalf("aliases = %v, want [punk punk_old]", aliases)
+	}
+
+	// One alias only: no duplicate, empty result.
+	p2 := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p2, []byte("[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliases, err = DetectCodexMCPAliases(p2, "http://localhost:9090")
+	if err != nil || len(aliases) != 0 {
+		t.Fatalf("aliases = %v err=%v, want none", aliases, err)
+	}
+
+	// CRLF content parses the same.
+	p3 := filepath.Join(t.TempDir(), "config.toml")
+	crlf := strings.ReplaceAll(content, "\n", "\r\n")
+	if err := os.WriteFile(p3, []byte(crlf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliases, err = DetectCodexMCPAliases(p3, "http://localhost:9090")
+	if err != nil || len(aliases) != 2 {
+		t.Fatalf("CRLF: aliases = %v err=%v", aliases, err)
+	}
+}
+
+// TestDedupeCodexHookScopesPreservesDifferentMatchers is the review
+// regression for matcher-blind deletion: a global SessionStart group with
+// matcher "startup" and a project group with the same command but matcher
+// "resume" are NOT equivalent - the project registration covers a case the
+// global one does not, so nothing may be removed and the note must name
+// the difference. (Modeled on the reviewer's
+// TestReviewerC03PreserveDifferentHookMatchers.)
+func TestDedupeCodexHookScopesPreservesDifferentMatchers(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global.json")
+	projectPath := filepath.Join(dir, "project.json")
+	for path, matcher := range map[string]string{globalPath: "startup", projectPath: "resume"} {
+		payload := `{"hooks":{"SessionStart":[{"matcher":"` + matcher + `","hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex"}]}]}}`
+		if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := os.ReadFile(projectPath)
+	_, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(projectPath)
+	if changed || string(before) != string(after) {
+		t.Fatal("resume-only project hook must not be removed against a startup-only global hook")
+	}
+}
+
+// TestDedupeCodexHookScopesPreservesDifferentHookMetadata: same command,
+// same matcher, but a different timeout - conservative preservation: the
+// project group stays and the diagnostic fires.
+func TestDedupeCodexHookScopesPreservesDifferentHookMetadata(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global.json")
+	projectPath := filepath.Join(dir, "project.json")
+	global := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":10}]}]}}`
+	project := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":30}]}]}}`
+	os.WriteFile(globalPath, []byte(global), 0o600)
+	os.WriteFile(projectPath, []byte(project), 0o600)
+
+	_, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("different hook timeout must preserve the project group")
+	}
+}
+
+// TestDedupeCodexHookScopesRemovesExactlyIdenticalGroups pins the positive
+// case at group granularity: same command, same matcher, same timeout -
+// removed from the project file.
+func TestDedupeCodexHookScopesRemovesExactlyIdenticalGroups(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global.json")
+	projectPath := filepath.Join(dir, "project.json")
+	payload := `{"hooks":{"SessionStart":[{"matcher":"startup|resume","hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":10}]}]}}`
+	os.WriteFile(globalPath, []byte(payload), 0o600)
+	os.WriteFile(projectPath, []byte(payload), 0o600)
+
+	_, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	settings, _, err := loadSettings(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groups, ok := settings["hooks"].(map[string]any)["SessionStart"]; ok && len(groups.([]any)) != 0 {
+		t.Fatalf("identical project group must be removed: %v", groups)
+	}
+}
+
+// TestDedupeCodexHookScopesSameFileNoOp is the same-file boundary from
+// review round 3: global and project paths naming ONE file (directly or
+// through aliases) must no-op - deduping a file against itself would
+// delete its own punk registrations. (Reviewer's
+// TestReviewerC03SameHookFileMustNotDedupeItself, plus a symlink alias.)
+func TestDedupeCodexHookScopesSameFileNoOp(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "hooks.json")
+	if _, err := ConnectCodexHooks(p, "/bin/punk", "http://localhost:19393", ""); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(p)
+
+	// Direct: identical path twice.
+	if _, changed, err := DedupeCodexHookScopes(p, p, "/bin/punk"); err != nil || changed {
+		t.Fatalf("identical paths must no-op: changed=%v err=%v", changed, err)
+	}
+	// Aliased: a symlink to the same file.
+	link := filepath.Join(dir, "linked-hooks.json")
+	if err := os.Symlink(p, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := DedupeCodexHookScopes(p, link, "/bin/punk"); err != nil || changed {
+		t.Fatalf("symlinked same file must no-op: changed=%v err=%v", changed, err)
+	}
+	after, _ := os.ReadFile(p)
+	if string(before) != string(after) {
+		t.Fatal("one hooks file must never be deduped against itself")
+	}
+}

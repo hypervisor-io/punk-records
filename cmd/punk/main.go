@@ -2525,8 +2525,25 @@ func installSkillFor(agent string, project bool, serverURL, ns string) {
 		fmt.Printf("punk: warning - skill not installed: %v\n", err)
 		return
 	}
+	// Fill the effective options for EVERY target before anything compares
+	// or writes: Render(tg) is the byte baseline, and a reconcile pass that
+	// ran with blank options would never recognize an installed shared copy
+	// rendered with the real ServerURL/Namespace as equivalent.
+	for i := range targets {
+		targets[i].Opts.ServerURL, targets[i].Opts.Namespace = serverURL, ns
+	}
+	// Codex discovers both CODEX_HOME/skills and the shared
+	// ~/.agents/skills tree, so a global codex install must first be
+	// reconciled against whatever the shared root already holds - see
+	// hookcli.ReconcileCodexSkillTargets.
+	if agent == "codex" && !project {
+		var notes []string
+		targets, notes = hookcli.ReconcileCodexSkillTargets(targets, home, os.Getenv)
+		for _, n := range notes {
+			fmt.Printf("punk: note - %s\n", n)
+		}
+	}
 	for _, tg := range targets {
-		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, ns
 		changed, err := hookcli.WriteSkill(tg.Path, hookcli.Render(tg))
 		if err != nil {
 			fmt.Printf("punk: warning - %v\n", err)
@@ -3353,6 +3370,17 @@ func cmdConnectCodex(args []string) error {
 			return fmt.Errorf("connect codex hooks: %w", err)
 		}
 		fmt.Printf("punk: Codex hooks in %s (%s)\n", hooksPath, changedWord(changed))
+		if *project {
+			// Codex merges global and project hook scopes; a punk group
+			// identical to the global one would fire every event twice.
+			notes, _, err := hookcli.DedupeCodexHookScopes(filepath.Join(codexHome, "hooks.json"), hooksPath, punkPath)
+			if err != nil {
+				return fmt.Errorf("reconcile codex hook scopes: %w", err)
+			}
+			for _, n := range notes {
+				fmt.Printf("punk: note - %s\n", n)
+			}
+		}
 	}
 	if !*noMCP {
 		opts := hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: ns, Agent: *agent}
@@ -3361,6 +3389,9 @@ func cmdConnectCodex(args []string) error {
 			return fmt.Errorf("connect codex config: %w", err)
 		}
 		fmt.Printf("punk: MCP entry%s in %s (%s)\n", map[bool]string{true: " and hooks feature flag", false: ""}[!*noHooks], configPath, changedWord(changed))
+		if aliases, err := hookcli.DetectCodexMCPAliases(configPath, serverURL); err == nil && len(aliases) > 1 {
+			fmt.Printf("punk: warning - %s registers more than one MCP alias for the same punk server (%s); codex will connect twice - remove the extra [mcp_servers.*] table by hand\n", configPath, strings.Join(aliases, ", "))
+		}
 		if apiKey != "" || *apiKeyEnv != "" {
 			envName := *apiKeyEnv
 			if envName == "" {

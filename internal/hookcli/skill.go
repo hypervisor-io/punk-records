@@ -13,6 +13,12 @@ const SkillName = "punk-memory"
 // untouched.
 const SkillMarker = "<!-- managed by punk connect; edit outside this file's marker and punk will not overwrite it -->"
 
+// IsManagedSkill reports whether content is a skill file punk wrote (it
+// carries SkillMarker). This is the single gate behind WriteSkill's
+// refusal to overwrite foreign files and the reconciler's "only touch
+// punk-managed duplicates" rule, so the two can never drift apart.
+func IsManagedSkill(content []byte) bool { return strings.Contains(string(content), SkillMarker) }
+
 // SkillOpts selects the per-agent rendering of the canonical skill.
 type SkillOpts struct {
 	Agent      string // claude-code | codex | opencode | cursor | copilot | antigravity | hermes | openclaw | pi
