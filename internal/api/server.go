@@ -161,7 +161,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // MountMCP exposes the MCP streamable-HTTP endpoint at /mcp behind the
-// same bearer auth as /v1.
+// same bearer auth as /v1, plus the A02 namespace gate: every tool,
+// resource and subscription call reauthorizes its final resolved
+// namespace against the verified key's subject (see authz_boundary.go).
 func (s *Server) MountMCP(h http.Handler) {
-	s.mux.With(s.authMiddleware).Handle("/mcp", h)
+	s.mux.With(s.authMiddleware, s.mcpAuthz).Handle("/mcp", h)
 }

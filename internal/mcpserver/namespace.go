@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/hypervisor-io/punk-records/internal/authz"
 )
 
 // nsResolver turns an omitted namespace into the one the connecting
@@ -106,6 +108,19 @@ func (r *nsResolver) resolve(ctx context.Context, req *mcp.CallToolRequest, expl
 		}
 	}
 	return r.defaultNS, "default"
+}
+
+// resolveAuthed is resolve plus task A02 enforcement: it resolves the
+// FINAL namespace for a tool call (explicit argument > header > roots >
+// server default) and requires op on it for the request's verified
+// subject (see authorizeNS). Every selection input only picks the
+// namespace; the grant decision comes from the credential alone.
+func (r *nsResolver) resolveAuthed(ctx context.Context, req *mcp.CallToolRequest, explicit string, op authz.Op) (string, error) {
+	ns, _ := r.resolve(ctx, req, explicit)
+	if err := authorizeNS(ctx, ns, op); err != nil {
+		return "", err
+	}
+	return ns, nil
 }
 
 type whoamiOut struct {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/taskboard"
 )
@@ -41,6 +42,17 @@ func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 		}
 		keys = taskboard.WaitForChange(r.Context(), s.bus, ns, timeout)
 		waited = true
+		// A02: the initial GET is path-enforced by the A01 hook, but the
+		// long-poll outlives that check: a credential revoked during the
+		// wait answers 401, a grant revoked during the wait answers 403
+		// - never a fresh board.
+		if !s.credentialActive(r.Context(), verifiedKeyID(r)) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "credential revoked"})
+			return
+		}
+		if !s.authorizeResolved(w, r, ns, authz.OpRead) {
+			return
+		}
 	}
 	b, err := taskboard.Build(r.Context(), s.mem, s.region, ns)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/taskboard"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,7 +63,10 @@ func registerTaskTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "set_task_status",
 		Description: "Report a task's state in the /tasks convention: writes /tasks/<id>/status with a canonical body and structured attributes. done and blocked also release your claim on /tasks/<id>."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in statusIn) (*mcp.CallToolResult, statusOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, statusOut{}, err
+			}
 			in.ID = strings.TrimSpace(in.ID)
 			if in.ID == "" || strings.ContainsRune(in.ID, '/') {
 				return nil, statusOut{}, fmt.Errorf("id is required and must not contain '/'")
@@ -142,7 +146,10 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_tasks",
 		Description: "The task board of a namespace: every /tasks/<id> with its parsed state, one-line status, dependencies, holder and lease, whether it is ready to start, plus next (the first ready id), counts and members. Cheap: one line per task; recall /tasks/<id> for the full text."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listTasksIn) (*mcp.CallToolResult, taskboard.Board, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, taskboard.Board{}, err
+			}
 			if in.State != "" && !validState(in.State) {
 				return nil, taskboard.Board{}, fmt.Errorf("state must be one of %s", strings.Join(memory.TaskStates, ", "))
 			}
@@ -157,7 +164,10 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "await_tasks",
 		Description: "Block until something under /tasks changes in the namespace (a task, status or claim), or the timeout passes, then return the task board with changed and the keys that fired. Use it instead of a polling loop."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in awaitIn) (*mcp.CallToolResult, awaitOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, awaitOut{}, err
+			}
 			timeout := time.Duration(in.TimeoutSeconds) * time.Second
 			if timeout <= 0 {
 				timeout = awaitDefault

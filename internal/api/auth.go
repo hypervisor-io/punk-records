@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +22,9 @@ import (
 const namespacesPrefix = "/v1/namespaces/"
 
 // namespaceFromPath extracts the {ns} segment from a namespaced route
-// path, or "" for any other path.
+// path, or "" for any other path. The input must be the path chi routes
+// on (see routePathFor): segments are used exactly as they appear on the
+// wire, because that raw segment is what chi.URLParam hands the handlers.
 func namespaceFromPath(path string) string {
 	rest, ok := strings.CutPrefix(path, namespacesPrefix)
 	if !ok {
@@ -29,6 +32,20 @@ func namespaceFromPath(path string) string {
 	}
 	ns, _, _ := strings.Cut(rest, "/")
 	return ns
+}
+
+// routePathFor returns the path chi matches routes - and fills URL
+// parameters - against: the escaped path (URL.RawPath) when the request
+// carries one, else the decoded path. chi does not percent-decode route
+// segments, so chi.URLParam("ns") is the raw segment of exactly this
+// path; anything that authorizes a {ns} route must use it too, or the
+// check and the handler can resolve different namespaces (e.g. a decoded
+// "ns-a" vs the raw "ns-a%2Fns-b" or "%6Es-a" the handler actually reads).
+func routePathFor(r *http.Request) string {
+	if r.URL.RawPath != "" {
+		return r.URL.RawPath
+	}
+	return r.URL.Path
 }
 
 // Keys manages API keys. Tokens are random 256-bit values shown once;
@@ -100,19 +117,39 @@ func (k *Keys) ActiveCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// Check validates a bearer token and returns the key's subject claim.
-func (k *Keys) Check(ctx context.Context, token string) (bool, string, error) {
+// Check validates a bearer token and returns the key's row ID and its
+// subject claim. The row ID is the safe, stable credential identity used
+// everywhere downstream (never the token itself, which exists only here
+// and in its stored SHA-256 hash): long-lived streams and MCP sessions
+// revalidate it so a key revoked after their opening request stops
+// working.
+func (k *Keys) Check(ctx context.Context, token string) (bool, int64, string, error) {
+	var id int64
 	var subject string
 	err := k.db.QueryRowContext(ctx, k.db.Rebind(`
-		SELECT subject FROM api_keys WHERE token_hash = $1 AND revoked_at IS NULL`),
-		hashToken(token)).Scan(&subject)
+		SELECT id, subject FROM api_keys WHERE token_hash = $1 AND revoked_at IS NULL`),
+		hashToken(token)).Scan(&id, &subject)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, "", nil
+		return false, 0, "", nil
 	}
 	if err != nil {
-		return false, "", err
+		return false, 0, "", err
 	}
-	return true, subject, nil
+	return true, id, subject, nil
+}
+
+// KeyActive reports whether the key with this row ID is still valid. It
+// is the credential-revalidation point for deliveries that outlive their
+// request (SSE streams, MCP subscriptions, board waits): a key revoked
+// mid-stream fails here. Errors deny (fail-closed).
+func (k *Keys) KeyActive(ctx context.Context, id int64) bool {
+	if id == 0 {
+		return false
+	}
+	var one int
+	err := k.db.QueryRowContext(ctx, k.db.Rebind(`
+		SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL`), id).Scan(&one)
+	return err == nil
 }
 
 // AuthMiddleware guards /v1. Bootstrap mode: while ZERO active keys
@@ -120,9 +157,11 @@ func (k *Keys) Check(ctx context.Context, token string) (bool, string, error) {
 // moment a key exists, every request needs one.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A client-supplied subject is never trusted; the middleware
-		// replaces it with the one the key check verifies below.
+		// Client-supplied identity headers are never trusted; the
+		// middleware replaces them with the ones the key check verifies
+		// below.
 		r.Header.Del("X-Punk-Subject")
+		r.Header.Del(keyIDHeader)
 		if s.keys == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -150,7 +189,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
 			return
 		}
-		valid, subject, err := s.keys.Check(r.Context(), token)
+		valid, keyID, subject, err := s.keys.Check(r.Context(), token)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -164,6 +203,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		r.Header.Set("X-Punk-Subject", subject)
+		r.Header.Set(keyIDHeader, strconv.FormatInt(keyID, 10))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -182,8 +222,12 @@ func (s *Server) enforceNamespace(w http.ResponseWriter, r *http.Request, subjec
 	}
 	// The {ns} chi param is not yet parsed when this middleware runs
 	// (v1 middlewares execute before the sub-router matches the route),
-	// so the namespace comes from the well-known route prefix.
-	ns := namespaceFromPath(r.URL.Path)
+	// so the namespace comes from the well-known route prefix - taken
+	// from the same escaped path chi routes on, so the authorized
+	// segment is byte-for-byte the one chi.URLParam gives the handler
+	// (percent-encoded names resolve to their raw form, never to a
+	// decoded alias the grant was issued for).
+	ns := namespaceFromPath(routePathFor(r))
 	if ns == "" {
 		return true
 	}

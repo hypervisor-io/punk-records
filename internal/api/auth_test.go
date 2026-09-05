@@ -88,7 +88,7 @@ func TestAuthBootstrapThenEnforced(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("post-revoke bootstrap = %d", rec.Code)
 	}
-	ok, _, err := keys.Check(ctx, token)
+	ok, _, _, err := keys.Check(ctx, token)
 	if err != nil || ok {
 		t.Fatalf("revoked token Check = %v err=%v", ok, err)
 	}
@@ -229,5 +229,71 @@ func TestNamespaceAuthzDisabledCompat(t *testing.T) {
 	}
 	if rr := authedGet(t, s, token, "/v1/namespaces/ns-b/keys"); rr.Code != http.StatusOK {
 		t.Fatalf("enforcement-off read = %d, want 200: %s", rr.Code, rr.Body)
+	}
+}
+
+// Enabled-mode enforcement authorizes exactly the namespace the handler
+// resolves. chi matches the {ns} parameter against the escaped request
+// path and never percent-decodes it, so "ns-a%2Fns-b" and "%6Es-a"
+// reach the memory store as those literal names - namespaces distinct
+// from the granted "ns-a" whose decoded aliases they resemble.
+// Regression (A02 round-2 review): enforcement used to check the
+// decoded URL.Path while the handlers read the raw chi parameter, so
+// /v1/namespaces/ns-a%2Fns-b/memories and /v1/namespaces/%6Es-a/
+// memories answered 200 with facts from namespaces alice held no grant
+// on. Read, write and delete must all authorize the raw segment, and a
+// grant on a literal encoded name must authorize exactly that name.
+func TestNamespaceAuthzEncodedPathIsolation(t *testing.T) {
+	s, keys, db := authServer(t)
+	ctx := context.Background()
+	az := authz.New(db, nil)
+	keys.SetAuthorizer(az)
+	token, err := keys.Create(ctx, "reviewer-key", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := az.Grant(ctx, "alice", "ns-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	for _, ns := range []string{"ns-a%2Fns-b", "ns-a/ns-b", "%6Es-a"} {
+		if _, err := s.mem.Write(ctx, memory.WriteInput{Namespace: ns, Key: "/reviewer", Body: "other-namespace-fixture"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{"/v1/namespaces/ns-a%2Fns-b/memories", "/v1/namespaces/%6Es-a/memories"} {
+		if rr := authedGet(t, s, token, path); rr.Code != http.StatusForbidden {
+			t.Errorf("GET %s = %d, want 403: the encoded name is not the granted ns-a: %s", path, rr.Code, rr.Body)
+		}
+		if rr := authedGet(t, s, token, path+"/search?q=reviewer"); rr.Code != http.StatusForbidden {
+			t.Errorf("GET %s/search = %d, want 403", path, rr.Code)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"key":"/k","body":"v"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		s.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s = %d, want 403 (write on an encoded name)", path, rec.Code)
+		}
+		req = httptest.NewRequest(http.MethodDelete, path+"?key=/reviewer", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec = httptest.NewRecorder()
+		s.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("DELETE %s = %d, want 403 (delete on an encoded name)", path, rec.Code)
+		}
+	}
+	// positive control: the plain granted namespace still reads
+	if rr := authedGet(t, s, token, "/v1/namespaces/ns-a/keys"); rr.Code != http.StatusOK {
+		t.Fatalf("plain granted ns-a = %d, want 200: %s", rr.Code, rr.Body)
+	}
+	// a grant on the literal encoded name authorizes exactly that name:
+	// the check and the handler resolve the same final namespace in both
+	// directions
+	if err := az.Grant(ctx, "alice", "%6Es-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	if rr := authedGet(t, s, token, "/v1/namespaces/%6Es-a/memories"); rr.Code != http.StatusOK ||
+		!strings.Contains(rr.Body.String(), "other-namespace-fixture") {
+		t.Fatalf("explicit grant on literal %%6Es-a = %d, want 200 with its own fixture: %s", rr.Code, rr.Body)
 	}
 }

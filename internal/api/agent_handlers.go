@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 )
 
@@ -181,6 +182,12 @@ func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ns = override
+	}
+	// A02: the namespace resolves from client input (cwd or the ns
+	// override), but write access depends on the verified key's subject
+	// alone - the inputs only select where the capture would land.
+	if !s.authorizeResolved(w, r, ns, authz.OpWrite) {
+		return
 	}
 	expiresAt := time.Now().Add(agentCaptureTTL)
 
@@ -419,6 +426,12 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ns or cwd required"})
 		return
 	}
+	// A02: read on the final resolved namespace, before any store
+	// access - covering both the session-start block and the mode=turn
+	// path below.
+	if !s.authorizeResolved(w, r, ns, authz.OpRead) {
+		return
+	}
 	sid := sanitizeID(r.URL.Query().Get("sid"))
 	if r.URL.Query().Get("mode") == "turn" {
 		s.handleAgentTurnContext(w, r, ns, sid)
@@ -538,12 +551,16 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 		b.WriteString(agentContextDirectives)
 	}
 	profileCount := 0
-	if wantProfile {
+	if wantProfile && s.allowNS(r.Context(), verifiedSubject(r), ProfileNamespace, authz.OpRead) {
 		// The profile card reads from the
 		// global ProfileNamespace, not the project namespace: stable
 		// user-level facts follow the user across every project. A read
 		// failure degrades to no card - the block must not 500 because
-		// the profile namespace is unreadable.
+		// the profile namespace is unreadable. A02: so does a missing
+		// read grant on ProfileNamespace (checked in the condition
+		// above) - the card is omitted silently, exactly like a read
+		// failure, so the project block never leaks another
+		// namespace's data.
 		if cardFacts, err := s.mem.Recall(r.Context(), ProfileNamespace, "/profile/", profileMaxEntries); err == nil && len(cardFacts) > 0 {
 			b.WriteString("About the user:\n")
 			for _, f := range cardFacts {

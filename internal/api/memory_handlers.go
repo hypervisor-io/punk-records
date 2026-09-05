@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 )
 
@@ -241,6 +242,13 @@ func (s *Server) handleMemoryEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
 
+	// A02: the initial access is path-enforced by the A01 hook (GET =>
+	// read on {ns}), but the stream outlives that one check: the
+	// credential that opened the stream AND the namespace grant are
+	// rechecked before every delivery, so revoking either mid-stream
+	// closes the connection instead of continuing to notify.
+	subject := verifiedSubject(r)
+	keyID := verifiedKeyID(r)
 	keyPrefix := ns + ":" + prefix
 	for {
 		select {
@@ -252,6 +260,9 @@ func (s *Server) handleMemoryEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			if e.Kind != "memory" || !strings.HasPrefix(e.Key, keyPrefix) {
 				continue
+			}
+			if !s.streamAllowed(r.Context(), keyID, subject, ns, authz.OpRead) {
+				return // credential or grant revoked mid-stream: stop delivering
 			}
 			raw, err := json.Marshal(e)
 			if err != nil {

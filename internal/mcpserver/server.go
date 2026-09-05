@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/llm"
 	"github.com/hypervisor-io/punk-records/internal/memory"
@@ -212,14 +213,26 @@ func New(d Deps) *mcp.Server {
 	var opts *mcp.ServerOptions
 	var subs *subscriptions
 	if d.Bus != nil {
-		subs = &subscriptions{uris: map[string]bool{}}
+		subs = newSubscriptions()
 		opts = &mcp.ServerOptions{
-			SubscribeHandler: func(_ context.Context, req *mcp.SubscribeRequest) error {
-				subs.set(req.Params.URI, true)
-				return nil
+			SubscribeHandler: func(ctx context.Context, req *mcp.SubscribeRequest) error {
+				// A02: namespace-scoped resources authorize at subscribe
+				// time; a denial records no subscription, so nothing is
+				// ever delivered. The gate captured here reauthorizes
+				// every later delivery (revocation policy, see
+				// reauthorizeSubscribers), and add rejects a subscribe
+				// that would attach this session's subscriptions to a
+				// different verified subject than the one that created
+				// them (credential-changed session reuse).
+				if ns, _, ok := parseMemoryURI(req.Params.URI); ok {
+					if err := authorizeNS(ctx, ns, authz.OpRead); err != nil {
+						return err
+					}
+				}
+				return subs.add(req.Params.URI, req.Session, namespaceGateFrom(ctx))
 			},
 			UnsubscribeHandler: func(_ context.Context, req *mcp.UnsubscribeRequest) error {
-				subs.set(req.Params.URI, false)
+				subs.remove(req.Params.URI, req.Session)
 				return nil
 			},
 		}
@@ -264,6 +277,10 @@ func New(d Deps) *mcp.Server {
 			if !ok {
 				return nil, fmt.Errorf("bad memory resource uri %q", req.Params.URI)
 			}
+			// A02: the URI's namespace is a read boundary like any recall.
+			if err := authorizeNS(ctx, ns, authz.OpRead); err != nil {
+				return nil, err
+			}
 			facts, err := d.Mem.Recall(ctx, ns, prefix, 200)
 			if err != nil {
 				return nil, err
@@ -282,8 +299,10 @@ func New(d Deps) *mcp.Server {
 			for e := range events {
 				switch e.Kind {
 				case "task_status":
+					// the task ledger is global (matches get_task and
+					// /v1/tasks): no namespace grant applies
 					uri := "punk://tasks/" + e.Key
-					if subs.get(uri) {
+					if subs.any(uri) {
 						_ = s.ResourceUpdated(context.Background(),
 							&mcp.ResourceUpdatedNotificationParams{URI: uri})
 					}
@@ -296,6 +315,12 @@ func New(d Deps) *mcp.Server {
 						uns, uprefix, ok := parseMemoryURI(u)
 						return ok && uns == ns && strings.HasPrefix(key, uprefix)
 					}) {
+						// A02: reauthorize every delivery; revoked
+						// subscribers are dropped and closed first, then
+						// the notification goes to the remaining
+						// authorized ones (revocation policy, see
+						// reauthorizeSubscribers).
+						reauthorizeSubscribers(subs, uri, ns)
 						_ = s.ResourceUpdated(context.Background(),
 							&mcp.ResourceUpdatedNotificationParams{URI: uri})
 					}
@@ -366,7 +391,10 @@ func New(d Deps) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "remember",
 		Description: "Store a fact in the memory plane (append-only, latest wins per key)."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in rememberIn) (*mcp.CallToolResult, *memory.Fact, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			f, err := d.Mem.Write(ctx, memory.WriteInput{
 				Namespace: ns, Key: in.Key, Body: in.Body,
 				Author: in.Author, Writer: in.Author, Importance: in.Importance,
@@ -380,7 +408,10 @@ func New(d Deps) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "recall",
 		Description: "Recall the latest live facts under a key prefix."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in recallIn) (*mcp.CallToolResult, recallOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, recallOut{}, err
+			}
 			facts, err := d.Mem.Recall(ctx, ns, in.Prefix, 0)
 			if err != nil {
 				return nil, recallOut{}, err
@@ -391,7 +422,10 @@ func New(d Deps) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_keys",
 		Description: "List live memory keys under a prefix. Discover keys, never invent them. Cheap: keys only, no bodies, no budget; use it to enumerate a busy prefix such as /tasks before recalling single keys."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listKeysIn) (*mcp.CallToolResult, listKeysOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, listKeysOut{}, err
+			}
 			keys, err := d.Mem.ListKeys(ctx, ns, in.Prefix)
 			if err != nil {
 				return nil, listKeysOut{}, err
@@ -409,7 +443,7 @@ func New(d Deps) *mcp.Server {
 		registerA2ATools(s, d)
 	}
 	if d.LLM != nil {
-		registerReflectTool(s, d)
+		registerReflectTool(s, d, nsr)
 	}
 
 	applyToolset(s, d.Toolset)
@@ -427,12 +461,19 @@ type reflectIn struct {
 // models, then observations, then raw recall to verify — only when a
 // model is configured (Deps.LLM != nil); every other memory tool works
 // with ai.enabled=false.
-func registerReflectTool(s *mcp.Server, d Deps) {
+func registerReflectTool(s *mcp.Server, d Deps, nsr *nsResolver) {
 	eng := reflect.New(d.Mem, d.LLM)
 	mcp.AddTool(s, &mcp.Tool{Name: "reflect",
 		Description: "Answer a question by reasoning hierarchically over the memory plane (mental models, then observations, then raw recall), with citations validated against what was actually retrieved."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in reflectIn) (*mcp.CallToolResult, reflect.Answer, error) {
-			ans, err := eng.ReflectWith(ctx, in.Namespace, in.Query, reflect.Opts{Level: in.Level, Schema: in.Schema})
+		func(ctx context.Context, req *mcp.CallToolRequest, in reflectIn) (*mcp.CallToolResult, reflect.Answer, error) {
+			// resolve the namespace exactly like every other memory tool
+			// (its input schema always promised roots resolution) and
+			// enforce read on it (A02)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, reflect.Answer{}, err
+			}
+			ans, err := eng.ReflectWith(ctx, ns, in.Query, reflect.Opts{Level: in.Level, Schema: in.Schema})
 			if err != nil {
 				return nil, reflect.Answer{}, err
 			}
@@ -527,7 +568,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "remember_document",
 		Description: "Chunk and store a document under a key prefix; rewrites only changed chunks and tombstones chunks past the new end (delta ingest)."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in documentIn) (*mcp.CallToolResult, documentOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, documentOut{}, err
+			}
 			text := in.Text
 			switch {
 			case in.Path != "" && in.Text != "":
@@ -559,7 +603,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if len(in.Facts) == 0 || len(in.Facts) > rememberManyMax {
 				return nil, rememberManyOut{}, fmt.Errorf("facts: want 1..%d entries, got %d", rememberManyMax, len(in.Facts))
 			}
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, rememberManyOut{}, err
+			}
 			out := rememberManyOut{IDs: make([]string, 0, len(in.Facts))}
 			for i, f := range in.Facts {
 				fact, err := d.Mem.Write(ctx, memory.WriteInput{
@@ -577,7 +624,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "search",
 		Description: "Search a region's facts by full text, or hybrid vector+FTS when embeddings are enabled."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in searchIn) (*mcp.CallToolResult, searchOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, searchOut{}, err
+			}
 			// Temporal is plain-search only: if Hybrid or Fusion=interleave
 			// is also set, that path wins and Temporal is ignored (WindowedSearch
 			// is FTS-only and can't do hybrid/scored/interleave).
@@ -617,7 +667,6 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 				return nil, finishSearch(in, nil, scored), nil
 			}
 			var facts []memory.Fact
-			var err error
 			if in.Hybrid {
 				facts, err = d.Mem.HybridSearch(ctx, ns, in.Query, in.Limit, 0)
 			} else {
@@ -631,7 +680,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "recall_as_of",
 		Description: "Read a region as it was at a past instant (bi-temporal); shows the facts valid then."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in asOfIn) (*mcp.CallToolResult, recallOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, recallOut{}, err
+			}
 			at, err := time.Parse(time.RFC3339, in.AsOf)
 			if err != nil {
 				return nil, recallOut{}, fmt.Errorf("as_of: %w", err)
@@ -645,7 +697,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "forget",
 		Description: "Tombstone a key (closes its validity window); history is preserved."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in forgetIn) (*mcp.CallToolResult, map[string]string, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			if err := d.Mem.Forget(ctx, ns, in.Key, in.Author); err != nil {
 				return nil, nil, err
 			}
@@ -654,7 +709,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "link",
 		Description: "Add a typed edge between two facts (from_key -> to_key), e.g. a change touches a file. An optional description (a one-sentence NL restatement of the fact the edge encodes) is embedded, making the relation itself retrievable via triplet_search."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in linkIn) (*mcp.CallToolResult, map[string]string, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			if in.Description != "" {
 				if err := d.Mem.AddLinkDescribed(ctx, ns, in.FromKey, in.ToKey, in.LinkType, 1.0, in.Description); err != nil {
 					return nil, nil, err
@@ -669,7 +727,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "unlink",
 		Description: "Soft-delete a typed edge (from_key -> to_key): closes its validity window rather than deleting the row, so neighbors as_of an earlier instant still sees it. Errors if no live edge matches."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in unlinkIn) (*mcp.CallToolResult, map[string]string, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			// InvalidateLink already defaults "" to relates_to and validates
 			// the type; no need to duplicate that here.
 			if err := d.Mem.InvalidateLink(ctx, ns, in.FromKey, in.ToKey, in.LinkType); err != nil {
@@ -680,7 +741,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "triplet_search",
 		Description: "Rank source->edge->target triplets by query relevance over the edge's description and both endpoint facts; makes relations first-class retrievable for multi-hop recall."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in tripletSearchIn) (*mcp.CallToolResult, tripletSearchOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, tripletSearchOut{}, err
+			}
 			triplets, err := d.Mem.TripletSearch(ctx, ns, in.Query, in.K)
 			if err != nil {
 				return nil, tripletSearchOut{}, err
@@ -690,7 +754,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "unified_search",
 		Description: "One recall entry point that fuses fact/observation/entity/mental-model hits with relation-triplet hits via reciprocal rank fusion, instead of two separate calls."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in unifiedSearchIn) (*mcp.CallToolResult, unifiedSearchOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, unifiedSearchOut{}, err
+			}
 			hits, err := d.Mem.UnifiedSearch(ctx, ns, in.Query, in.K)
 			if err != nil {
 				return nil, unifiedSearchOut{}, err
@@ -703,7 +770,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "neighbors",
 		Description: "List facts linked to/from a key (direction: out|in). With as_of, reads the edges valid at that past instant instead of the live set; a future as_of returns the live set, same as recall_as_of."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in neighborsIn) (*mcp.CallToolResult, neighborsOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, neighborsOut{}, err
+			}
 			dir := in.Direction
 			if dir == "" {
 				dir = "out"
@@ -728,7 +798,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "remember_model",
 		Description: "Store a curated mental model — a durable, top-tier synthesis that outranks auto-consolidated observations."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in rememberModelIn) (*mcp.CallToolResult, *memory.Fact, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			f, err := d.Mem.RememberModel(ctx, ns, in.Slug, in.Body, in.SourceIDs, in.Pinned)
 			if err != nil {
 				return nil, nil, err
@@ -738,7 +811,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_models",
 		Description: "List the live curated mental models in a namespace."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listModelsIn) (*mcp.CallToolResult, listModelsOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, listModelsOut{}, err
+			}
 			models, err := d.Mem.ListModels(ctx, ns)
 			if err != nil {
 				return nil, listModelsOut{}, err
@@ -748,7 +824,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_entities",
 		Description: "List the live extracted entities (people, orgs, places, concepts) in a namespace."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listEntitiesIn) (*mcp.CallToolResult, listEntitiesOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, listEntitiesOut{}, err
+			}
 			entities, err := d.Mem.ListEntities(ctx, ns)
 			if err != nil {
 				return nil, listEntitiesOut{}, err
@@ -758,7 +837,11 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "feedback",
 		Description: "Rate the facts used in an answer; EWMA-updates their feedback weight, which feeds future ranking."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in feedbackIn) (*mcp.CallToolResult, feedbackOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			// feedback mutates ranking weights: a write on the namespace
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, feedbackOut{}, err
+			}
 			if err := d.Mem.RecordFeedback(ctx, ns, in.IDs, in.Rating); err != nil {
 				return nil, feedbackOut{}, err
 			}
@@ -767,7 +850,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "profile",
 		Description: "Deterministic namespace digest: top entities, hot keys, recent facts, counts. No LLM."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listModelsIn) (*mcp.CallToolResult, *memory.Profile, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, nil, err
+			}
 			p, err := d.Mem.Profile(ctx, ns)
 			if err != nil {
 				return nil, nil, err
@@ -777,7 +863,10 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "diagnose",
 		Description: "Namespace health counters: quarantined rows, missing embeddings, orphan links, stale observations, expired claims."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in listModelsIn) (*mcp.CallToolResult, *memory.Diagnosis, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, nil, err
+			}
 			dg, err := d.Mem.Diagnose(ctx, ns)
 			if err != nil {
 				return nil, nil, err
@@ -904,7 +993,10 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "claim_work",
 		Description: "Claim a sub-key in a region so no other satellite works it (conflict-free work partitioning). Fails if a live claim already holds it."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in claimIn) (*mcp.CallToolResult, *region.Claim, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			if in.Holder == "" {
 				in.Holder = nsr.identity(req)
 			}
@@ -926,7 +1018,10 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "release_work",
 		Description: "Release a work claim so other satellites can take the sub-key."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in claimIn) (*mcp.CallToolResult, map[string]string, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			if in.Holder == "" {
 				in.Holder = nsr.identity(req)
 			}
@@ -943,7 +1038,10 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_claims",
 		Description: "List the live work claims in a region."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in membersIn) (*mcp.CallToolResult, claimsOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, claimsOut{}, err
+			}
 			c, err := d.Region.ListClaims(ctx, ns)
 			if err != nil {
 				return nil, claimsOut{}, err
@@ -954,7 +1052,10 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "register",
 		Description: "Register an agent/consumer as a satellite of a brain region (namespace). Satellites coordinate through the region's shared memory."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in registerIn) (*mcp.CallToolResult, map[string]string, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
+			if err != nil {
+				return nil, nil, err
+			}
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
@@ -966,7 +1067,10 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_region_members",
 		Description: "List the satellites registered to a brain region."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in membersIn) (*mcp.CallToolResult, membersOut, error) {
-			ns, _ := nsr.resolve(ctx, req, in.Namespace)
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, membersOut{}, err
+			}
 			m, err := d.Region.Members(ctx, ns)
 			if err != nil {
 				return nil, membersOut{}, err
@@ -980,30 +1084,159 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, membersOut{}, err
 			}
+			// A02: cross-region enumeration. The agent argument is
+			// client-chosen, so under enforcement each source region is
+			// checked separately against the verified subject's read
+			// grants and unreadable regions are omitted. Trusted
+			// transports (no gate) see the full list.
+			if g := namespaceGateFrom(ctx); g != nil {
+				kept := m[:0]
+				for _, mem := range m {
+					if g.Allow(ctx, mem.Namespace, authz.OpRead) {
+						kept = append(kept, mem)
+					}
+				}
+				m = kept
+			}
 			return nil, membersOut{Members: m}, nil
 		})
 }
 
-// subscriptions tracks which resource URIs any client asked to watch.
+// subscriptions tracks resource subscriptions per session, together
+// with the authorization gate captured at subscribe time (nil for
+// trusted transports like stdio) and the verified subject the session's
+// subscriptions belong to. Deliveries reauthorize through the gate on
+// every event, so a revoked grant OR a revoked credential stops
+// subsequent notifications (task A02 revocation policy, see
+// reauthorizeSubscribers).
+//
+// The registry never discards tracked state while the MCP SDK can still
+// deliver to a session: the SDK keeps its own per-session subscription
+// set (mcp.Server.resourceSubscriptions) and keeps notifying every
+// session that ever subscribed, so forgetting a session here - e.g. via
+// a wholesale bounded reset - would silently exempt it from every later
+// reauthorization while deliveries continue. Instead of resetting, the
+// registry bounds the number of distinct sessions: when a NEW session
+// would exceed maxCachedSessions, the oldest tracked sessions are
+// evicted by closing them, and a closed session loses its SDK delivery
+// subscriptions - an evicted session cannot receive what the registry
+// can no longer gate. Closing an already-closed (churned-out) session
+// is a no-op, so ordinary churn is pruned under the same bound.
 type subscriptions struct {
-	mu   sync.RWMutex
-	uris map[string]bool
+	mu       sync.RWMutex
+	uris     map[string]map[*mcp.ServerSession]NamespaceGate
+	sessions map[*mcp.ServerSession]*subSession
+	order    []*mcp.ServerSession // first-subscribe order, oldest first
 }
 
-func (s *subscriptions) set(uri string, on bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if on {
-		s.uris[uri] = true
-	} else {
-		delete(s.uris, uri)
+// subSession is the registry state of one session: the verified subject
+// its subscriptions belong to and the URIs it subscribes to. The
+// subject binds at the session's first gated subscribe; later subscribes
+// under a different verified subject are rejected, so a
+// credential-changed reuse of the session cannot attach to (or rebind)
+// another subject's subscriptions. Trusted (gate-less) transports never
+// bind and stay fully trusted, matching the gate model.
+type subSession struct {
+	bound   bool
+	subject string
+	uris    map[string]bool
+}
+
+func newSubscriptions() *subscriptions {
+	return &subscriptions{
+		uris:     map[string]map[*mcp.ServerSession]NamespaceGate{},
+		sessions: map[*mcp.ServerSession]*subSession{},
 	}
 }
 
-func (s *subscriptions) get(uri string) bool {
+// add records one subscription. It rejects a subscribe that would bind
+// the session's subscriptions to a different verified subject than the
+// one that created them, and evicts (closes) the oldest sessions when a
+// new session would exceed the cap. Eviction closes the SDK session
+// BEFORE dropping its registry entries - the opposite order would open
+// a window where the SDK could still deliver to a session this registry
+// already forgot - and closing runs outside the lock, so a victim is
+// still fully gated while its close is in flight.
+func (s *subscriptions) add(uri string, ss *mcp.ServerSession, g NamespaceGate) error {
+	s.mu.Lock()
+	var evicted []struct {
+		ss   *mcp.ServerSession
+		uris map[string]bool
+	}
+	st := s.sessions[ss]
+	if st == nil {
+		for len(s.sessions) >= maxCachedSessions {
+			victim := s.order[0]
+			s.order = s.order[1:]
+			vst := s.sessions[victim]
+			delete(s.sessions, victim)
+			evicted = append(evicted, struct {
+				ss   *mcp.ServerSession
+				uris map[string]bool
+			}{victim, vst.uris})
+		}
+		st = &subSession{uris: map[string]bool{}}
+		s.sessions[ss] = st
+		s.order = append(s.order, ss)
+	}
+	if g != nil {
+		subject := gateSubject(g)
+		if st.bound && st.subject != subject {
+			s.mu.Unlock()
+			return fmt.Errorf("mcp session subscriptions are bound to a different verified subject")
+		}
+		st.bound = true
+		st.subject = subject
+	}
+	if s.uris[uri] == nil {
+		s.uris[uri] = map[*mcp.ServerSession]NamespaceGate{}
+	}
+	s.uris[uri][ss] = g
+	st.uris[uri] = true
+	s.mu.Unlock()
+	for _, ev := range evicted {
+		_ = ev.ss.Close() // the SDK delivery subscriptions die here...
+		s.mu.Lock()
+		// ...so dropping the entries is safe now. A session that
+		// re-subscribed mid-eviction is tracked again with fresh state;
+		// leave that alone.
+		if _, live := s.sessions[ev.ss]; !live {
+			for u := range ev.uris {
+				if m, ok := s.uris[u]; ok {
+					delete(m, ev.ss)
+					if len(m) == 0 {
+						delete(s.uris, u)
+					}
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *subscriptions) remove(uri string, ss *mcp.ServerSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.uris[uri]; ok {
+		delete(m, ss)
+		if len(m) == 0 {
+			delete(s.uris, uri)
+		}
+	}
+	// The session state (subject binding) outlives individual
+	// unsubscribes: a session that unsubscribed everything is still the
+	// same verified subject's session.
+	if st, ok := s.sessions[ss]; ok {
+		delete(st.uris, uri)
+	}
+}
+
+// any reports whether any session subscribes to uri.
+func (s *subscriptions) any(uri string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.uris[uri]
+	return len(s.uris[uri]) > 0
 }
 
 // matching returns the subscribed URIs accepted by keep.
@@ -1017,6 +1250,40 @@ func (s *subscriptions) matching(keep func(uri string) bool) []string {
 		}
 	}
 	return out
+}
+
+// snapshot copies uri's subscriber set (session -> gate) for iteration
+// outside the lock.
+func (s *subscriptions) snapshot(uri string) map[*mcp.ServerSession]NamespaceGate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[*mcp.ServerSession]NamespaceGate, len(s.uris[uri]))
+	for ss, g := range s.uris[uri] {
+		out[ss] = g
+	}
+	return out
+}
+
+// reauthorizeSubscribers is the task A02 revocation policy for one
+// resource notification: every subscribed session's gate is rechecked
+// against the event's namespace BEFORE delivery, and the gate itself
+// revalidates that the subscribing credential is still valid (a key
+// revoked since subscribe fails here). A session that lost its grant or
+// its credential is closed - closing removes the session's SDK delivery
+// subscriptions, so it receives neither this nor any later notification
+// - and only then dropped from the registry, so no window exists where
+// the SDK could still deliver to a session whose gate was discarded.
+// Delivery then proceeds for the remaining subscribers: one revocation
+// silences only the revoked session, never the authorized ones. Trusted
+// sessions (no gate: stdio, enforcement off) always pass.
+func reauthorizeSubscribers(subs *subscriptions, uri, ns string) {
+	for ss, g := range subs.snapshot(uri) {
+		if g == nil || g.Allow(context.Background(), ns, authz.OpRead) {
+			continue
+		}
+		_ = ss.Close()       // SDK delivery subscriptions die first...
+		subs.remove(uri, ss) // ...so this drop cannot lose a live gate
+	}
 }
 
 // parseMemoryURI splits punk://memory/<ns><prefix> into namespace and

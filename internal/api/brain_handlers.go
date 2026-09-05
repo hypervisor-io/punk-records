@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/region"
 )
@@ -38,13 +39,18 @@ type brainSnapshot struct {
 // namespace; the page seeds its glow from it.
 const brainActivityWindow = 5 * time.Minute
 
-func (s *Server) buildBrainSnapshot(ctx context.Context) (brainSnapshot, error) {
+func (s *Server) buildBrainSnapshot(ctx context.Context, subject string) (brainSnapshot, error) {
 	now := time.Now().UTC()
 	snap := brainSnapshot{Version: s.version, Now: now.Format(time.RFC3339), Namespaces: []brainNamespace{}}
 	names, err := s.mem.Namespaces(ctx)
 	if err != nil {
 		return snap, err
 	}
+	// A02: aggregate surface. Every region is checked separately
+	// against the verified subject's read grants; unreadable regions
+	// are omitted rather than denied wholesale. Without an authorizer
+	// the list passes through unchanged.
+	names = s.readableNamespaces(ctx, subject, names)
 	for _, name := range names {
 		n := brainNamespace{Name: name, Members: []region.Member{}, Claims: []region.Claim{}}
 		if p, err := s.mem.Profile(ctx, name); err == nil && p != nil {
@@ -86,7 +92,7 @@ func (s *Server) buildBrainSnapshot(ctx context.Context) (brainSnapshot, error) 
 }
 
 func (s *Server) handleBrainSnapshot(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.buildBrainSnapshot(r.Context())
+	snap, err := s.buildBrainSnapshot(r.Context(), verifiedSubject(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -155,6 +161,8 @@ func (s *Server) handleBrainEvents(w http.ResponseWriter, r *http.Request) {
 
 	tick := time.NewTicker(brainKeepalive)
 	defer tick.Stop()
+	subject := verifiedSubject(r)
+	keyID := verifiedKeyID(r)
 	for {
 		select {
 		case <-r.Context().Done():
@@ -169,6 +177,19 @@ func (s *Server) handleBrainEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			ns, key := splitBusKey(e.Key)
+			// A02: aggregate stream. A credential revoked mid-stream
+			// ends the stream. Namespace-less events (the task ledger,
+			// matching /v1/tasks and the global MCP task tools) stay
+			// global; a namespaced event is delivered only while the
+			// stream's verified subject may read that namespace,
+			// rechecked at every delivery so a revoked grant stops
+			// subsequent events without closing the stream.
+			if !s.credentialActive(r.Context(), keyID) {
+				return
+			}
+			if ns != "" && !s.allowNS(r.Context(), subject, ns, authz.OpRead) {
+				continue
+			}
 			ev := brainEvent{TS: time.Now().UTC().Format(time.RFC3339), Kind: e.Kind, Namespace: ns, Key: key, Data: e.Data}
 			if ev.Data == nil {
 				ev.Data = map[string]string{}
