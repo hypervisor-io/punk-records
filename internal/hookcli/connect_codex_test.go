@@ -2,6 +2,7 @@ package hookcli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -554,5 +555,312 @@ func TestDedupeCodexHookScopesSameFileNoOp(t *testing.T) {
 	after, _ := os.ReadFile(p)
 	if string(before) != string(after) {
 		t.Fatal("one hooks file must never be deduped against itself")
+	}
+}
+
+// TestCodexHookPinInspectsInstalledHooks pins the inspector contract
+// verify relies on: the --ns flag is read back from the hooks.json that
+// will actually drive capture, an unpinned punk command reports
+// installed-but-unpinned, and a file with no punk-managed group (or no
+// file at all) reports not installed - never a guessed pin.
+func TestCodexHookPinInspectsInstalledHooks(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "hooks.json")
+	if pin, installed, err := CodexHookPin(missing, "/bin/punk"); err != nil || installed || pin != "" {
+		t.Fatalf("missing file: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	unpinned := filepath.Join(dir, "unpinned-hooks.json")
+	if _, err := ConnectCodexHooks(unpinned, "/bin/punk", "http://punk.test", ""); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexHookPin(unpinned, "/bin/punk"); err != nil || !installed || pin != "" {
+		t.Fatalf("unpinned hooks: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	pinned := filepath.Join(dir, "pinned-hooks.json")
+	if _, err := ConnectCodexHooks(pinned, "/bin/punk", "http://punk.test", "agent-billing-1a2b3c"); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexHookPin(pinned, "/bin/punk"); err != nil || !installed || pin != "agent-billing-1a2b3c" {
+		t.Fatalf("pinned hooks: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	// Hooks written by a punk binary at another path are still ours (the
+	// isPunkManaged relocation fallback), and their pin reads back too.
+	if pin, installed, err := CodexHookPin(pinned, "/other/path/punk"); err != nil || !installed || pin != "agent-billing-1a2b3c" {
+		t.Fatalf("relocated punk path: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	// A file holding only user hooks has no punk group to inspect.
+	userOnly := filepath.Join(dir, "user-hooks.json")
+	if err := os.WriteFile(userOnly, []byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexHookPin(userOnly, "/bin/punk"); err != nil || installed || pin != "" {
+		t.Fatalf("user-only hooks: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+}
+
+// TestCodexMCPPinInspectsInstalledEntry pins the config.toml half: the
+// X-Punk-Namespace header is read back scoped to the [mcp_servers.punk]
+// table, an entry without the header is installed-but-unpinned, a config
+// without the punk table is not installed, and another server's
+// http_headers are never attributed to punk's entry. CRLF files parse
+// the same as LF.
+func TestCodexMCPPinInspectsInstalledEntry(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "config.toml")
+	if pin, installed, err := CodexMCPPin(missing); err != nil || installed || pin != "" {
+		t.Fatalf("missing file: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	pinned := filepath.Join(dir, "pinned-config.toml")
+	if _, err := ConnectCodexConfig(pinned, MCPEntryOpts{ServerURL: "http://punk.test", Namespace: "agent-billing-1a2b3c"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexMCPPin(pinned); err != nil || !installed || pin != "agent-billing-1a2b3c" {
+		t.Fatalf("pinned entry: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	unpinned := filepath.Join(dir, "unpinned-config.toml")
+	if _, err := ConnectCodexConfig(unpinned, MCPEntryOpts{ServerURL: "http://punk.test", Agent: "alice@laptop"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexMCPPin(unpinned); err != nil || !installed || pin != "" {
+		t.Fatalf("unpinned entry: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	// Another server's table pinning the same header name must not leak
+	// into punk's entry, whichever order the tables appear in.
+	foreign := filepath.Join(dir, "foreign-config.toml")
+	body := "[mcp_servers.other]\nurl = \"http://elsewhere.test/mcp\"\nhttp_headers = { \"X-Punk-Namespace\" = \"agent-foreign-999999\" }\n"
+	if err := os.WriteFile(foreign, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexMCPPin(foreign); err != nil || installed || pin != "" {
+		t.Fatalf("foreign-only config: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+	both := filepath.Join(dir, "both-config.toml")
+	if _, err := ConnectCodexConfig(both, MCPEntryOpts{ServerURL: "http://punk.test"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(both, append(raw, []byte(body)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexMCPPin(both); err != nil || !installed || pin != "" {
+		t.Fatalf("punk entry must stay unpinned beside a pinned foreign table: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	crlf := filepath.Join(dir, "crlf-config.toml")
+	if _, err := ConnectCodexConfig(crlf, MCPEntryOpts{ServerURL: "http://punk.test", Namespace: "agent-crlf-00aa11"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	rawCRLF, err := os.ReadFile(crlf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crlf, []byte(strings.ReplaceAll(string(rawCRLF), "\n", "\r\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pin, installed, err := CodexMCPPin(crlf); err != nil || !installed || pin != "agent-crlf-00aa11" {
+		t.Fatalf("CRLF config: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+}
+
+// TestCodexMCPPinLiteralStringHeadersStayPinned is the reviewer's
+// round-3 red proof (TestReviewerC05LiteralTOMLPinMustNotBecomeUnpinned):
+// TOML literal strings (single quotes) are as valid as basic strings, so
+// an inline table written as { 'X-Punk-Namespace' = 'agent-custom' } is
+// a known explicit pin. A basic-string-only regex misread it as
+// installed-but-unpinned, converting a known pin into false unpinned
+// evidence; the faithful parse must read it back (or refuse the
+// representation outright - never guess unpinned).
+func TestCodexMCPPinLiteralStringHeadersStayPinned(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	b := `[mcp_servers.punk]
+url = 'http://localhost:9090/mcp?toolset=agent'
+http_headers = { 'X-Punk-Namespace' = 'agent-custom' }
+`
+	if err := os.WriteFile(p, []byte(b), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ns, installed, err := CodexMCPPin(p)
+	if err == nil && installed && ns != "agent-custom" {
+		t.Fatalf("valid custom TOML pin reported as known %q rather than agent-custom or unverified", ns)
+	}
+	if err != nil || !installed || ns != "agent-custom" {
+		t.Fatalf("literal-string inline table must parse faithfully: pin=%q installed=%v err=%v", ns, installed, err)
+	}
+}
+
+// TestCodexMCPPinFaithfulTOMLRepresentations pins the round-3 TOML
+// fidelity contract: the supported representations - headers as a
+// [mcp_servers.punk.http_headers] subtable, quoted table spellings,
+// comments (a commented-out punk table contributes nothing), trailing
+// comments after values, and multi-line inline tables - parse
+// faithfully, and an unsupported representation of a real punk entry
+// (here a dotted http_headers key) returns an error instead of the
+// false installed-but-unpinned evidence.
+func TestCodexMCPPinFaithfulTOMLRepresentations(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	sub := write("subtable.toml", "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n[mcp_servers.punk.http_headers]\n'X-Punk-Namespace' = 'agent-subtable'\n")
+	if pin, installed, err := CodexMCPPin(sub); err != nil || !installed || pin != "agent-subtable" {
+		t.Fatalf("http_headers subtable: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	quoted := write("quoted.toml", "[mcp_servers.\"punk\"]\nurl = 'http://localhost:9090/mcp?toolset=agent'\nhttp_headers = { \"X-Punk-Namespace\" = \"agent-quoted\" }\n")
+	if pin, installed, err := CodexMCPPin(quoted); err != nil || !installed || pin != "agent-quoted" {
+		t.Fatalf("quoted table name: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	commented := write("commented.toml", "# [mcp_servers.punk]\n# url = \"http://dead.invalid/mcp\"\n# http_headers = { \"X-Punk-Namespace\" = \"agent-commented\" }\n\n[mcp_servers.other]\nurl = \"http://elsewhere.test/mcp\"\nhttp_headers = { \"X-Punk-Namespace\" = \"agent-foreign\" }\n")
+	if pin, installed, err := CodexMCPPin(commented); err != nil || installed || pin != "" {
+		t.Fatalf("commented-out punk table must not count: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	trailing := write("trailing.toml", "[mcp_servers.punk] # the punk entry\nurl = \"http://localhost:9090/mcp?toolset=agent\" # the server\nhttp_headers = { \"X-Punk-Namespace\" = \"agent-trailing\" } # the pin\n")
+	if pin, installed, err := CodexMCPPin(trailing); err != nil || !installed || pin != "agent-trailing" {
+		t.Fatalf("trailing comments: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	multiline := write("multiline.toml", "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\nhttp_headers = {\n  \"X-Punk-Namespace\" = \"agent-multiline\",\n}\n")
+	if pin, installed, err := CodexMCPPin(multiline); err != nil || !installed || pin != "agent-multiline" {
+		t.Fatalf("multi-line inline table: pin=%q installed=%v err=%v", pin, installed, err)
+	}
+
+	dotted := write("dotted.toml", "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\nhttp_headers.\"X-Punk-Namespace\" = \"agent-dotted\"\n")
+	if pin, installed, err := CodexMCPPin(dotted); err == nil {
+		t.Fatalf("a dotted http_headers key is not supported and must be refused, got pin=%q installed=%v (never guess unpinned)", pin, installed)
+	}
+
+	dup := write("dup.toml", "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n[mcp_servers.punk]\nurl = \"http://localhost:9091/mcp?toolset=agent\"\n")
+	if pin, installed, err := CodexMCPPin(dup); err == nil {
+		t.Fatalf("a duplicated punk table must be refused, got pin=%q installed=%v", pin, installed)
+	}
+}
+
+// TestEnumerateCodexMCPScopesSurfacesEndpointAndBearerEnvName pins the
+// round-3 endpoint/credential-identity contract: the inspector surfaces
+// the installed endpoint (the MCP table's url) and the credential
+// identity as the env var NAME it reads the bearer token from - the
+// var's value is never read into the result. Aliased same-file scope
+// paths are deduped.
+func TestEnumerateCodexMCPScopesSurfacesEndpointAndBearerEnvName(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	t.Setenv("PUNK_TEST_TOKEN", "s3cret-value-that-must-never-surface")
+	if _, err := ConnectCodexConfig(p, MCPEntryOpts{ServerURL: "http://localhost:9090", APIKey: "prk_ignored", APIKeyEnv: "PUNK_TEST_TOKEN", Namespace: "agent-x-1"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	scopes := EnumerateCodexMCPScopes(p)
+	if len(scopes) != 1 {
+		t.Fatalf("scopes = %+v", scopes)
+	}
+	sc := scopes[0]
+	if sc.Err != nil || !sc.Installed {
+		t.Fatalf("scope = %+v", sc)
+	}
+	if sc.Endpoint != "http://localhost:9090/mcp?toolset=agent" {
+		t.Fatalf("endpoint = %q", sc.Endpoint)
+	}
+	if sc.BearerEnv != "PUNK_TEST_TOKEN" {
+		t.Fatalf("bearer env name = %q", sc.BearerEnv)
+	}
+	if sc.Pin != "agent-x-1" {
+		t.Fatalf("pin = %q", sc.Pin)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", sc), "s3cret-value-that-must-never-surface") {
+		t.Fatalf("the env var's value must never be surfaced: %+v", sc)
+	}
+
+	// A symlinked alias of the same file contributes exactly once.
+	link := filepath.Join(dir, "alias-config.toml")
+	if err := os.Symlink(p, link); err != nil {
+		t.Fatal(err)
+	}
+	if scopes := EnumerateCodexMCPScopes(link, p); len(scopes) != 1 || scopes[0].File != link {
+		t.Fatalf("aliased same file must be deduped: %+v", scopes)
+	}
+}
+
+// TestEnumerateCodexHookScopesReportsEveryScope pins the round-3
+// layered-scope contract at the inspector: Codex appends hook
+// registrations from every applicable config layer, so both a global
+// and a project hooks.json contribute registrations - each with its own
+// pin AND endpoint (--url) - and a project path aliasing the global
+// file (a CODEX_HOME symlink) contributes exactly once.
+func TestEnumerateCodexHookScopesReportsEveryScope(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "global", "hooks.json")
+	project := filepath.Join(dir, "project", "hooks.json")
+	if _, err := ConnectCodexHooks(global, "/bin/punk", "http://localhost:9090", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCodexHooks(project, "/bin/punk", "http://localhost:9090", "agent-proj-1"); err != nil {
+		t.Fatal(err)
+	}
+	scopes := EnumerateCodexHookScopes("/bin/punk", project, global)
+	if len(scopes) != 2 {
+		t.Fatalf("both scopes must be reported: %+v", scopes)
+	}
+	for i, want := range []struct {
+		file string
+		pin  string
+	}{{project, "agent-proj-1"}, {global, ""}} {
+		sc := scopes[i]
+		if sc.Err != nil || !sc.Installed || sc.File != want.file {
+			t.Fatalf("scope %d = %+v (err %v)", i, sc, sc.Err)
+		}
+		if len(sc.Registrations) != len(codexHookEvents) {
+			t.Fatalf("scope %d: registrations = %+v, want one per event", i, sc.Registrations)
+		}
+		for _, r := range sc.Registrations {
+			if r.Pin != want.pin || r.Endpoint != "http://localhost:9090" {
+				t.Fatalf("scope %d: registration = %+v, want pin %q endpoint http://localhost:9090", i, r, want.pin)
+			}
+		}
+	}
+
+	// Aliased: a symlinked project path naming the global file is deduped.
+	link := filepath.Join(dir, "alias-hooks.json")
+	if err := os.Symlink(global, link); err != nil {
+		t.Fatal(err)
+	}
+	if scopes := EnumerateCodexHookScopes("/bin/punk", link, global); len(scopes) != 1 || scopes[0].File != link {
+		t.Fatalf("aliased same file must be deduped: %+v", scopes)
+	}
+}
+
+// TestCodexHookPinRefusesDisagreeingRegistrations: a file whose punk
+// registrations disagree about the pin has no single honest answer -
+// the single-pin view must error instead of hiding a capture namespace
+// behind the first group found (alignment checks enumerate every
+// registration instead).
+func TestCodexHookPinRefusesDisagreeingRegistrations(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "hooks.json")
+	body := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex --ns agent-a"}]}],"Stop":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex --ns agent-b"}]}]}}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, installed, err := CodexHookPin(p, "/bin/punk")
+	if err == nil {
+		t.Fatalf("disagreeing pins must not collapse to %q (installed=%v)", pin, installed)
+	}
+	if !installed {
+		t.Fatal("the file is installed; only the single-pin view is refused")
 	}
 }

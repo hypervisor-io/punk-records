@@ -2516,32 +2516,314 @@ func cmdConnect(args []string) error {
 
 // cmdConnectVerify proves an MCP session to the server works: connect,
 // tools/list, whoami. Standalone or invoked by the connect commands'
-// --verify flag.
+// --verify flag. Standalone it cannot inspect any client config, so the
+// two sides' pins are independent inputs (--ns for the MCP entry's
+// X-Punk-Namespace, --hook-ns for the hook command's --ns) and the
+// result is labeled as comparing supplied pins, never as proof about
+// what is installed.
 func cmdConnectVerify(args []string) error {
 	fs := flag.NewFlagSet("connect verify", flag.ContinueOnError)
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	nsFlag := fs.String("ns", "", "namespace pin the MCP entry carries (X-Punk-Namespace), as written by punk connect --project")
+	hookNSFlag := fs.String("hook-ns", "", "namespace pin the hook command carries (--ns), as written by punk connect --project")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
-	return printVerify(context.Background(), serverURL, apiKey)
+	sides := verifySides{
+		hook: verifySide{ns: *hookNSFlag, known: *hookNSFlag != "", assumed: true, from: "--hook-ns"},
+		mcp:  verifySide{ns: *nsFlag, known: true, assumed: true, from: "--ns"},
+	}
+	if *hookNSFlag == "" {
+		sides.hook.from = "no --hook-ns given, and standalone verify cannot inspect the installed hook config"
+	}
+	return printVerify(context.Background(), serverURL, apiKey, sides)
 }
 
-// printVerify runs VerifyMCP against the agent-toolset MCP endpoint and
-// prints a one-line summary. The process working directory is advertised
-// as the client root so whoami reports the namespace a session started
-// here would use, not the server default.
-func printVerify(ctx context.Context, serverURL, apiKey string) error {
+// verifySide is one side of the connection verify compares: the
+// namespace pin it carries ("" = unpinned, the namespace derives from
+// the hook payload's cwd or the client's advertised roots) and where
+// that value came from. known is false when the side's installed config
+// could not be inspected (nothing installed, an unreadable file, or a
+// client verify cannot inspect) - verify never invents a pin for an
+// unknown side. assumed marks a value supplied on the command line
+// rather than one read from the installed config, so the result is
+// labeled an assumption, not proof. from names the origin: a config
+// file, a flag, or - when known is false - the reason the side is
+// unknown.
+type verifySide struct {
+	ns      string
+	known   bool
+	assumed bool
+	from    string
+}
+
+// verifySides pairs the hook (capture) side with the MCP (retrieval)
+// side printVerify compares.
+type verifySides struct{ hook, mcp verifySide }
+
+// pinOrUnpinned renders a side's pin for verify output.
+func pinOrUnpinned(ns string) string {
+	if ns == "" {
+		return "unpinned"
+	}
+	return ns
+}
+
+// connectVerifySides builds the verify sides for a connect command that
+// installed the connection itself: each side carries the pin this
+// invocation wrote, with the file it was written to as the origin. A
+// side skipped by a --no-* flag is left unknown - whatever a previous
+// invocation installed was not inspected, so verify must not invent its
+// pin.
+func connectVerifySides(hookNS, hooksFrom string, noHooks bool, mcpNS, mcpFrom string, noMCP bool) verifySides {
+	var s verifySides
+	if noHooks {
+		s.hook = verifySide{from: "--no-hooks left the hook config untouched and it was not inspected"}
+	} else {
+		s.hook = verifySide{ns: hookNS, known: true, from: hooksFrom}
+	}
+	if noMCP {
+		s.mcp = verifySide{from: "--no-mcp left the MCP entry untouched and it was not inspected"}
+	} else {
+		s.mcp = verifySide{ns: mcpNS, known: true, from: mcpFrom}
+	}
+	return s
+}
+
+// codexVerifyScopes enumerates the installed Codex configuration verify
+// compares: every applicable hooks.json scope and every config.toml
+// scope, highest layer first. The project scope is ALWAYS considered,
+// even for a global invocation - native Codex appends hook registrations
+// from all applicable config layers (upstream codex-rs discovery loops
+// the layers and appends hook events), so a global invocation verified
+// inside a repository is still captured by that repository's project
+// hooks.json alongside the global one, and a verify that inspected only
+// the scope this invocation wrote would claim alignment for captures
+// that actually land in another namespace. Scope paths aliasing the same
+// file are deduped inside the enumerators.
+func codexVerifyScopes(codexHome, punkPath string) ([]hookcli.CodexHookScope, []hookcli.CodexMCPScope) {
+	hookPaths := []string{filepath.Join(".codex", "hooks.json"), filepath.Join(codexHome, "hooks.json")}
+	mcpPaths := []string{filepath.Join(".codex", "config.toml"), filepath.Join(codexHome, "config.toml")}
+	return hookcli.EnumerateCodexHookScopes(punkPath, hookPaths...),
+		hookcli.EnumerateCodexMCPScopes(mcpPaths...)
+}
+
+// codexAuthProblem compares the EFFECTIVE MCP entry's credential
+// identity against the credential this verify probed with. Only names
+// are ever reported; an env var's value is compared but never printed,
+// and an Authorization header travels as presence only - its value is
+// never handled. An identity that cannot be established safely makes
+// the alignment unverified instead of proving it through a different
+// connection: the entry authenticating from an Authorization header
+// (static or env-resolved) whose credential verify cannot compare -
+// including one a lower config layer's header fragment contributes to
+// the merged entry - , the entry reading its bearer token from a var
+// this environment does not carry (inherited from a lower layer just
+// the same; Codex REJECTS a configured bearer_token_env_var that is
+// missing or empty - upstream codex-rs codex-mcp/src/rmcp_client.rs
+// resolve_bearer_token - so a missing var is never "consistent
+// unauthenticated", regardless of the probe key), or the two sides
+// holding different credentials.
+func codexAuthProblem(entry *hookcli.CodexMCPEffective, apiKey string) string {
+	if entry.HeaderAuth {
+		return fmt.Sprintf("the effective MCP entry authenticates through an Authorization header (static or env-resolved) contributed by %s, whose credential this verify cannot compare safely - the installed connection's identity cannot be established", entry.HeaderAuthFrom)
+	}
+	if entry.BearerEnv == "" {
+		if apiKey != "" {
+			return "the effective MCP entry configures no bearer token in any config layer, but this verify probed with an API key - the installed connection would authenticate differently"
+		}
+		return ""
+	}
+	v := os.Getenv(entry.BearerEnv)
+	switch {
+	case v == "":
+		return fmt.Sprintf("the effective MCP entry authenticates from $%s (set in %s), which is missing or empty in this environment - Codex rejects a configured bearer variable that is not set, so the installed connection's credential cannot be established", entry.BearerEnv, entry.BearerEnvFrom)
+	case apiKey != "" && v == apiKey:
+		return "" // the same credential on both sides (compared, never printed)
+	case apiKey == "":
+		return fmt.Sprintf("the effective MCP entry authenticates from $%s (set in %s), which is set in this environment, but this verify probed without an API key - the installed connection would authenticate differently", entry.BearerEnv, entry.BearerEnvFrom)
+	default:
+		return fmt.Sprintf("the effective MCP entry authenticates from $%s (set in %s), which holds a different credential than the one this verify probed with - the installed connection's identity cannot be established", entry.BearerEnv, entry.BearerEnvFrom)
+	}
+}
+
+// printCodexVerify proves an MCP session to the server works and - only
+// when every effective side of the installed connection is known AND
+// points at this server - that the namespaces the hooks capture into
+// and MCP sessions resolve are the same. Every hook scope contributes
+// capture destinations (Codex appends hook registrations from all
+// applicable config layers, so a global registration fires alongside a
+// project one and both capture), and every config.toml scope
+// contributes MCP entry FIELDS: Codex recursively merges MCP table
+// fields across config layers rather than replacing whole entries
+// (upstream config/src/merge.rs:58-132, state.rs:343), so the entry
+// compared is the field-wise merge of every contributing scope - an
+// enabled = false, http_headers_helper, bearer_token_env_var or
+// Authorization-header fragment inherited from a lower layer is part
+// of the effective connection, and a top-entry-only view would miss it
+// and claim a false alignment. The endpoint plus credential identity
+// read back from the installed files are compared against the
+// endpoint and credential this verify actually probed: a pin that
+// agrees but was installed for another server proves nothing about
+// this one, so an endpoint or credential provenance that mismatches or
+// cannot be established safely reports the alignment as unverified
+// instead. Secrets are never printed - env var names yes, values no. A
+// namespace mismatch is reported, not failed: the session works, the
+// memories just land where the agent cannot see them.
+func printCodexVerify(ctx context.Context, serverURL, apiKey string, hookScopes []hookcli.CodexHookScope, mcpScopes []hookcli.CodexMCPScope) error {
 	cwd, _ := os.Getwd()
-	rep, err := hookcli.VerifyMCP(ctx, serverURL+"/mcp?toolset=agent", apiKey, cwd)
+	probeEndpoint := serverURL + "/mcp?toolset=agent"
+
+	var captures []hookcli.CaptureDestination
+	var problems []string
+	seenProblem := map[string]bool{}
+	addProblem := func(s string) {
+		if !seenProblem[s] {
+			seenProblem[s] = true
+			problems = append(problems, s)
+		}
+	}
+
+	hookInstalled := false
+	var hookFiles []string
+	for _, sc := range hookScopes {
+		hookFiles = append(hookFiles, sc.File)
+		if sc.Err != nil {
+			addProblem(fmt.Sprintf("the hook side is unknown (could not inspect %s: %v)", sc.File, sc.Err))
+			continue
+		}
+		if !sc.Installed {
+			continue
+		}
+		hookInstalled = true
+		for _, r := range sc.Registrations {
+			switch {
+			case r.Endpoint == "":
+				addProblem(fmt.Sprintf("the punk hook command registered for %s in %s carries no --url, so the server its captures reach cannot be established", r.Event, sc.File))
+			case strings.TrimRight(r.Endpoint, "/") != strings.TrimRight(serverURL, "/"):
+				addProblem(fmt.Sprintf("the punk hook command registered for %s in %s forwards captures to %s, but this verify probed %s - alignment across different servers is not proven", r.Event, sc.File, r.Endpoint, serverURL))
+			case r.Pin != "":
+				captures = append(captures, hookcli.CaptureDestination{Namespace: r.Pin, Source: "pin", Origin: sc.File})
+			default:
+				captures = append(captures, hookcli.CaptureDestination{Source: "path", Origin: sc.File})
+			}
+		}
+	}
+	if !hookInstalled && len(problems) == 0 {
+		addProblem("the hook side is unknown (no punk-managed hook command found in " + strings.Join(hookFiles, " or ") + ")")
+	}
+
+	// The MCP entry retrieval rides is the EFFECTIVE one: the field-wise
+	// merge of every contributing config layer (project over global, per
+	// upstream Codex merge semantics), never just the top installed
+	// entry - fields the top entry lacks inherit from lower layers, and
+	// a header fragment in a layer without its own [mcp_servers.punk]
+	// table still contributes. A scope that cannot be inspected,
+	// fragment fields with no layer defining the table, a cross-layer
+	// case-variant pin conflict or no punk config at all make the
+	// effective entry unknown.
+	merged := hookcli.MergeCodexMCPScopes(mcpScopes)
+	if merged.Unknown != "" {
+		addProblem("the MCP side is unknown (" + merged.Unknown + ")")
+	}
+	mcpNS := ""
+	if merged.Unknown == "" {
+		mcpNS = merged.Pin
+		if merged.Disabled {
+			addProblem(fmt.Sprintf("the effective MCP entry carries enabled = false from %s; Codex does not open disabled entries, so the installed connection is not a working one and no alignment can be proven through it", merged.DisabledFrom))
+		}
+		if merged.HeadersHelper {
+			addProblem(fmt.Sprintf("the effective MCP entry carries http_headers_helper from %s, whose dynamically resolved headers this verify never executes - the entry's effective namespace pin and credentials cannot be established", merged.HeadersHelperFrom))
+		}
+		switch {
+		case merged.Endpoint == "":
+			addProblem(fmt.Sprintf("the effective MCP entry merged from %s carries no url, so the connection Codex actually opens cannot be established", strings.Join(merged.Contributing, " and ")))
+		case merged.Endpoint != probeEndpoint:
+			addProblem(fmt.Sprintf("the effective MCP entry points at %s (from %s), but this verify probed %s - alignment proven through a different connection is not alignment of the installed one", merged.Endpoint, merged.EndpointFrom, probeEndpoint))
+		}
+		if reason := codexAuthProblem(&merged, apiKey); reason != "" {
+			addProblem(reason)
+		}
+	}
+
+	al, err := hookcli.CheckNamespaceAlignmentCaptures(ctx, probeEndpoint, apiKey, cwd, captures, mcpNS)
 	if err != nil {
 		return err
 	}
+	rep := al.Roots
 	instructions := "no"
 	if rep.Instructions {
 		instructions = "yes"
 	}
 	fmt.Printf("punk: verified: %d tools, namespace %s (%s), instructions %s\n", len(rep.Tools), rep.Namespace, rep.Source, instructions)
+	if al.Mismatch() {
+		for _, w := range al.Warnings() {
+			fmt.Println("punk: warning - " + w)
+		}
+	}
+	if len(problems) > 0 {
+		fmt.Printf("punk: namespace alignment not verified: %s; verify compares only the pins, endpoints and credential identities it inspected or was handed, it never assumes one\n", strings.Join(problems, "; "))
+		return nil
+	}
+	if al.Mismatch() {
+		return nil
+	}
+	fmt.Printf("punk: namespace alignment ok: hooks and MCP sessions both resolve %s\n", al.Capture)
+	return nil
+}
+
+// printVerify proves an MCP session to the server works and - only when
+// both sides of the connection are known - that the namespace the hooks
+// capture into for the current directory is the one MCP sessions
+// resolve. A side read from the installed client config counts as
+// inspected; a side supplied on the command line is labeled an
+// assumption; an unknown side makes verify report the alignment as
+// unverified rather than inventing a pin. A namespace mismatch is
+// reported, not failed: the session works, the memories just land where
+// the agent cannot see them.
+func printVerify(ctx context.Context, serverURL, apiKey string, sides verifySides) error {
+	cwd, _ := os.Getwd()
+	hookNS, mcpNS := "", ""
+	if sides.hook.known {
+		hookNS = sides.hook.ns
+	}
+	if sides.mcp.known {
+		mcpNS = sides.mcp.ns
+	}
+	al, err := hookcli.CheckNamespaceAlignment(ctx, serverURL+"/mcp?toolset=agent", apiKey, cwd, hookNS, mcpNS)
+	if err != nil {
+		return err
+	}
+	rep := al.Roots
+	instructions := "no"
+	if rep.Instructions {
+		instructions = "yes"
+	}
+	fmt.Printf("punk: verified: %d tools, namespace %s (%s), instructions %s\n", len(rep.Tools), rep.Namespace, rep.Source, instructions)
+	var unknown []string
+	if !sides.hook.known {
+		unknown = append(unknown, "the hook side is unknown ("+sides.hook.from+")")
+	}
+	if !sides.mcp.known {
+		unknown = append(unknown, "the MCP side is unknown ("+sides.mcp.from+")")
+	}
+	if len(unknown) > 0 {
+		fmt.Printf("punk: namespace alignment not verified: %s; verify compares only pins it inspected or was handed, it never assumes one\n", strings.Join(unknown, " and "))
+		return nil
+	}
+	if al.Mismatch() {
+		for _, w := range al.Warnings() {
+			fmt.Println("punk: warning - " + w)
+		}
+		return nil
+	}
+	if sides.hook.assumed || sides.mcp.assumed {
+		fmt.Printf("punk: namespace alignment ok for the supplied pins (hook %s via %s, MCP %s via %s); the installed client config was not inspected, so this proves the supplied pins agree, not what is installed\n",
+			pinOrUnpinned(sides.hook.ns), sides.hook.from, pinOrUnpinned(sides.mcp.ns), sides.mcp.from)
+		return nil
+	}
+	fmt.Printf("punk: namespace alignment ok: hooks and MCP sessions both resolve %s\n", al.Capture)
 	return nil
 }
 
@@ -2613,11 +2895,11 @@ func cmdConnectClaudeCode(args []string) error {
 	} else {
 		fmt.Printf("punk: %s already has punk's Claude Code hooks up to date\n", settingsPath)
 	}
+	mcpPath := filepath.Join(".mcp.json")
+	if !*project {
+		mcpPath = filepath.Join(home, ".claude.json")
+	}
 	if !*noMCP {
-		mcpPath := filepath.Join(".mcp.json")
-		if !*project {
-			mcpPath = filepath.Join(home, ".claude.json")
-		}
 		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
 		if err != nil {
@@ -2635,7 +2917,7 @@ func cmdConnectClaudeCode(args []string) error {
 		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, settingsPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -2805,8 +3087,8 @@ func cmdConnectCursor(args []string) error {
 	}
 
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	mcpPath := filepath.Join(cursorDir, "mcp.json")
 	if !*noMCP {
-		mcpPath := filepath.Join(cursorDir, "mcp.json")
 		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
 		if err != nil {
@@ -2818,7 +3100,7 @@ func cmdConnectCursor(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
 		if *verify {
-			if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+			if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 				return err
 			}
 		}
@@ -2828,7 +3110,7 @@ func cmdConnectCursor(args []string) error {
 		return nil
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -2939,7 +3221,7 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", pluginPath, false, "", configPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3116,17 +3398,17 @@ func cmdConnectAntigravity(args []string) error {
 	}
 	fmt.Println("punk: note - PreToolUse (permission gating) and PostInvocation are deliberately not wired; punk only observes PostToolUse, PreInvocation (session start + once-per-conversation context injection), and Stop")
 	fmt.Println("punk: note - Antigravity's own hook payloads carry no prompt text, so there is no UserPromptSubmit capture for Antigravity")
-	if !*noMCP {
-		mcpPath := ""
-		if *project {
-			mcpPath = filepath.Join(".agents", "mcp_config.json")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("resolve home directory: %w", err)
-			}
-			mcpPath = filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	mcpPath := ""
+	if *project {
+		mcpPath = filepath.Join(".agents", "mcp_config.json")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
 		}
+		mcpPath = filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	}
+	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectAntigravityMCP(mcpPath,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
 		if err != nil {
@@ -3138,7 +3420,9 @@ func cmdConnectAntigravity(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		// ConnectAntigravity has no namespace-pin variant: the hooks are
+		// always unpinned, so only the MCP side carries projNS.
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3244,19 +3528,19 @@ func cmdConnectCopilot(args []string) error {
 		fmt.Printf("punk: %s already has punk's Copilot hooks up to date\n", hooksPath)
 	}
 	fmt.Println("punk: note - restart Copilot CLI (hook configuration is loaded when the CLI starts) to pick up this file")
-	if !*noMCP {
-		mcpPath := ""
-		if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
-			mcpPath = filepath.Join(copilotHome, "mcp-config.json")
-		} else if *project {
-			mcpPath = filepath.Join(".copilot", "mcp-config.json")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("resolve home directory: %w", err)
-			}
-			mcpPath = filepath.Join(home, ".copilot", "mcp-config.json")
+	mcpPath := ""
+	if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
+		mcpPath = filepath.Join(copilotHome, "mcp-config.json")
+	} else if *project {
+		mcpPath = filepath.Join(".copilot", "mcp-config.json")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
 		}
+		mcpPath = filepath.Join(home, ".copilot", "mcp-config.json")
+	}
+	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectCopilotMCP(mcpPath,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
 		if err != nil {
@@ -3268,7 +3552,7 @@ func cmdConnectCopilot(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", hooksPath, false, "", mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3364,7 +3648,7 @@ func cmdConnectHermes(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", path, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", path, false, "", path, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3456,7 +3740,7 @@ func cmdConnectOpenClaw(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", configPath, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", pluginDir, false, "", configPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3553,7 +3837,8 @@ func cmdConnectCodex(args []string) error {
 		fmt.Println("punk: note - Codex asks once to trust the punk hook command; accept it, or hooks stay disabled")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey); err != nil {
+		hookScopes, mcpScopes := codexVerifyScopes(codexHome, punkPath)
+		if err := printCodexVerify(context.Background(), serverURL, apiKey, hookScopes, mcpScopes); err != nil {
 			return err
 		}
 	}

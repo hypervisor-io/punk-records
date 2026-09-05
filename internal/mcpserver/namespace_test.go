@@ -97,6 +97,37 @@ func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
 	}
 }
 
+// TestWhoamiPinnedNamespaceWithoutRoots is the server half of the C05
+// contract: punk connect --project pins X-Punk-Namespace into the MCP
+// entry precisely so a client that cannot advertise workspace roots
+// (Codex's native MCP client) still resolves the project's
+// remote-derived namespace instead of falling back to the server
+// default - and whoami's source says the pin, not an accidental
+// fallback, resolved it.
+func TestWhoamiPinnedNamespaceWithoutRoots(t *testing.T) {
+	srv := newTestServerForHTTP(t)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil) // no roots advertised
+	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL,
+		HTTPClient: &http.Client{Transport: headerRT{h: http.Header{"X-Punk-Namespace": {"agent-billing-1a2b3c"}}}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := text(t, res)
+	if !strings.Contains(got, `"namespace":"agent-billing-1a2b3c"`) || !strings.Contains(got, `"source":"header"`) {
+		t.Fatalf("pinned roots-less whoami = %s", got)
+	}
+}
+
 func TestClaimWorkDefaultsHolderToIdentity(t *testing.T) {
 	srv := newTestServerForHTTP(t)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
