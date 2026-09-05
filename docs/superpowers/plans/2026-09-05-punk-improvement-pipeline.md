@@ -3,6 +3,7 @@
 Design brief: [design](../specs/2026-09-05-punk-improvement-pipeline-design.md).
 Worker instructions: [worker prompt](2026-09-05-punk-improvement-pipeline-WORKER-PROMPT.md).
 Integrator instructions: [review prompt](2026-09-05-punk-improvement-pipeline-REVIEWER-PROMPT.md).
+Cognee workstream refinement: [borrowing plan](2026-09-06-cognee-borrowing.md).
 Machine-readable task contracts: [manifest](2026-09-05-punk-improvement-pipeline.tasks.json).
 
 Namespace: `punk-punkrecords-improvement`. Integration branch: `feat/punk-improvement-pipeline`.
@@ -34,10 +35,10 @@ Testing-only tasks must prove their test detects a reverted/broken boundary in a
 | C05 | Verify hook and MCP namespace alignment | C03 |
 | C07 | Bound repeated memory guidance in agent context | C03 |
 | C06 | Gate the complete Codex 0.153.4 integration | C01, C02, C03, C04, C05, C07 |
-| E01 | Create reproducible retrieval baselines and ablations | C06 |
+| E01 | Create reproducible retrieval baselines and ablations | none |
 | E02 | Evaluate answer quality and citation support | E01 |
-| A01 | Add an explicit namespace authorization model | E01 |
-| A02 | Enforce namespace permissions at every external memory boundary | A01, C05 |
+| A01 | Add an explicit namespace authorization model | none |
+| A02 | Enforce namespace permissions at every external memory boundary | A01 |
 | G01 | Add typed entities and optional domain vocabulary | E01, A02 |
 | G02 | Resolve aliases with reversible, type-aware merge proposals | G01, E02 |
 | I01 | Preserve document and chunk source provenance | E01, A02 |
@@ -49,9 +50,9 @@ Testing-only tasks must prove their test detects a reverted/broken boundary in a
 | P01 | Persist enrichment stage status and retry lineage | E01, A02 |
 | P02 | Preview ingestion and enrichment work before execution | P01, I02, G02 |
 | H01 | Build opt-in source-linked hierarchical summaries | E02, P01, G02, R01 |
-| Z01 | Run cross-feature acceptance and publish the local evidence report | A02, G02, I02, S02, R02, P02, H01 |
+| Z01 | Run cross-feature acceptance and publish the local evidence report | C06, A02, G02, I02, S02, R02, P02, H01 |
 
-C01, C02 and C03 are initially ready; their shared files require claims. C02 needs source-level and native-host evidence and can block C06 without blocking other Codex diagnostic tasks. Improvement work starts only after the Codex gate. Later lanes may run concurrently in distinct worktrees when ready and files do not overlap.
+Scheduling revision 2026-09-06: E01 and A01 have no dependencies and can start while C02 remains blocked and C05 is reviewed. A02 depends only on A01; selecting a namespace and authorizing it are separate concerns. Keep the C-series dependencies unchanged. Z01 explicitly depends on C06, so combined completion still requires native Codex evidence. E01 and A01 share cmd/punk/main.go: serialize that file using exact claims. Ready tasks may run concurrently in distinct worktrees when files do not overlap.
 
 ## Source borrowing
 
@@ -178,20 +179,22 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 ## Task E01: Create reproducible retrieval baselines and ablations
 
-**Dependencies:** C06.
+**Dependencies:** none.
 **Files:** `internal/membench/membench.go`, `internal/membench/membench_test.go`, `internal/membench/locomo.go`, `internal/membench/report.go (new)`, `scenarios/membench/`, `cmd/punk/main.go`.
 
-**Contract and implementation boundary:** Extend the existing benchmark with a versioned run manifest: corpus hash, seed, commit, embedding/reranker IDs, retrieval settings and warm/cold mode. Persist per-query rankings, latency and aggregate recall/MRR. Add deterministic cases for corrections, exact identifiers, multi-hop evidence, aliases, time windows and missing answers. Keep LoCoMo evidence recall explicitly distinct from answer accuracy.
+**Contract and implementation boundary:** Extend the existing benchmark with a versioned run manifest: corpus hash, seed, commit, embedding/reranker IDs, retrieval settings and warm/cold mode. Persist per-query rankings, latency and aggregate recall/MRR. Add deterministic cases for corrections, exact identifiers, multi-hop evidence, aliases, time windows and missing answers. Keep LoCoMo evidence recall explicitly distinct from answer accuracy. The legacy RecallAtK currently means any-hit rate; preserve compatibility explicitly and expose correctly named hit_at_k, evidence recall_at_k and mrr in a versioned report. Evidence recall is retrieved unique expected IDs divided by all unique expected IDs. Empty-gold/unanswerable cases have a separate denominator; report retrieval errors and unavailable ablations explicitly. Exclude run IDs, wall-clock timestamps, measured cost and timing from stable-manifest comparisons.
 
-**Red proof:** A fixed fixture and seed must yield reproducible rankings and manifest content except timing fields; changing corpus or strategy must change the recorded manifest.
+**Red proof:** A fixed fixture and seed must yield reproducible rankings and manifest content excluding documented volatile fields; changing corpus or strategy must change the recorded manifest. Include two required facts with only one retrieved: hit_at_k=1 and evidence recall_at_k=0.5; duplicate results cannot inflate recall. Unanswerable cases must not cause division by zero or disappear from the report.
 
-**Acceptance:** One command writes machine-readable results for baseline and ablations. No default paid model calls. Fixtures avoid cross-namespace leakage; failed queries are counted rather than silently dropped.
+**Acceptance:** One command writes machine-readable results for baseline and ablations. No default paid model calls. Fixtures avoid cross-namespace leakage; failed queries are counted rather than silently dropped. Use k=5 and fixed seed 1 for the initial offline fixture report; fixtures include every category named in the contract. Legacy output semantics remain documented, and no feature is called an improvement from the legacy any-hit metric alone.
 
 **Checks:** `go test ./internal/membench ./internal/memory ./cmd/punk -count=1`. Use existing package test helpers and temporary DBs. PostgreSQL coverage is required whenever SQL/schema changes.
 
 **Commit:** `feat(membench): record reproducible retrieval baselines`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/eval_framework/run_eval.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/eval_framework/run_eval.py), [cognee/eval_framework/evaluation/metrics/context_coverage.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/eval_framework/evaluation/metrics/context_coverage.py). Priority P0; see the borrowing plan for rollout boundaries.
 
 ## Task E02: Evaluate answer quality and citation support
 
@@ -210,29 +213,33 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/eval_framework/evaluation/evaluator_adapters.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/eval_framework/evaluation/evaluator_adapters.py), [cognee/eval_framework/evaluation/metrics/exact_match.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/eval_framework/evaluation/metrics/exact_match.py). Priority P0; see the borrowing plan for rollout boundaries.
+
 ## Task A01: Add an explicit namespace authorization model
 
-**Dependencies:** E01.
-**Files:** `internal/authz/ (new)`, `internal/api/auth.go`, `internal/api/auth_test.go`, `internal/config/config.go`, `internal/config/config_test.go`, `internal/store/migrations/{sqlite,postgres}/`.
+**Dependencies:** none.
+**Files:** `internal/authz/ (new)`, `internal/api/auth.go`, `internal/api/auth_test.go`, `internal/config/config.go`, `internal/config/config_test.go`, `internal/store/migrations/{sqlite,postgres}/`, `cmd/punk/main.go`.
 
-**Contract and implementation boundary:** Introduce subject-to-namespace read/write/admin grants with an explicit enforcement mode. Existing trusted single-user deployments remain compatible when enforcement is off; when enabled use deny-by-default. Derive identity from verified credentials, never a user-controlled namespace/header or agent label. Specify local stdio trust separately. Allocate the next free matching migration number on both dialects.
+**Contract and implementation boundary:** Introduce subject-to-namespace read/write/admin grants with an explicit enforcement mode. Existing trusted single-user deployments remain compatible when enforcement is off; when enabled use deny-by-default. Derive identity from verified credentials, never a user-controlled namespace/header or agent label. Specify local stdio trust separately. Allocate the next free matching migration number on both dialects. First version uses exact namespace grants only (no wildcard/prefix matching). Read, write and admin are distinct operations; no implicit inheritance. Enabled mode denies an empty verified subject and zero-key bootstrap; disabled mode keeps existing trusted bootstrap behavior. Administrative grant provisioning must be usable through an explicit local CLI/config path without deploying it to the live server; document recovery and local stdio trust.
 
-**Red proof:** An authenticated subject with only namespace A read permission is denied namespace B and denied A writes when enforcement is enabled; compatibility mode preserves current bootstrap behavior.
+**Red proof:** An authenticated subject with only namespace A read permission is denied namespace B and denied A writes when enforcement is enabled; compatibility mode preserves current bootstrap behavior. Test zero-key bootstrap with enforcement enabled, an empty subject, exact-name confusion, explicit admin grants, and revocation.
 
-**Acceptance:** Policy decisions cover wildcard/prefix rules only if deliberately specified, grant revocation, empty subject and admin. Migration up/down and default behavior are tested in SQLite and PostgreSQL. No live grant or configuration changes.
+**Acceptance:** Policy decisions cover exact namespace grants, rejection of wildcard/prefix patterns, grant revocation, empty subject and distinct admin operations. Migration up/down and default behavior are tested in SQLite and PostgreSQL. No live grant or configuration changes.
 
-**Checks:** `go test ./internal/authz ./internal/api ./internal/config ./internal/store -count=1`. Use existing package test helpers and temporary DBs. PostgreSQL coverage is required whenever SQL/schema changes.
+**Checks:** `go test ./internal/authz ./internal/api ./internal/config ./internal/store ./cmd/punk -count=1`. Use existing package test helpers and temporary DBs. PostgreSQL coverage is required whenever SQL/schema changes.
 
 **Commit:** `feat(authz): add namespace permission grants`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py). Priority P0; see the borrowing plan for rollout boundaries.
+
 ## Task A02: Enforce namespace permissions at every external memory boundary
 
-**Dependencies:** A01, C05.
+**Dependencies:** A01.
 **Files:** `internal/api/server.go`, `internal/api/memory_handlers.go`, `internal/api/agent_handlers.go`, `internal/api/brain_handlers.go`, `internal/api/task_board_handlers.go`, `internal/mcpserver/server.go`, `internal/mcpserver/tasks.go`, `internal/mcpserver/namespace.go`.
 
-**Contract and implementation boundary:** Apply the common authorizer before reads/writes across REST, HTTP MCP, subscriptions/SSE, hook context/capture, task board, claims, brain snapshots, exports/imports and cross-region operations. Produce an endpoint/tool permission inventory. Do not let roots, ns headers or explicit tool arguments grant access; prevent unauthorized resource enumeration and subscription delivery.
+**Contract and implementation boundary:** Apply the common authorizer before reads/writes across REST, HTTP MCP, subscriptions/SSE, hook context/capture, task board, claims, brain snapshots, exports/imports and cross-region operations. Produce an endpoint/tool permission inventory. Do not let roots, ns headers or explicit tool arguments grant access; prevent unauthorized resource enumeration and subscription delivery. Namespace selection diagnostics in C05 are not an implementation dependency: authorize the final resolved namespace using verified identity at each actual request boundary. Include inherited MCP session identity, case-insensitive headers and subscription reauthorization in the inventory.
 
 **Red proof:** Table-driven REST/MCP tests use a valid A-only credential to attempt B access on every inventory entry, including query overrides and resource subscriptions.
 
@@ -243,6 +250,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(authz): enforce memory permissions across interfaces`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py). Priority P0; see the borrowing plan for rollout boundaries.
 
 ## Task G01: Add typed entities and optional domain vocabulary
 
@@ -261,6 +270,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/tasks/memify/consolidate_entities.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/tasks/memify/consolidate_entities.py). Priority P1; see the borrowing plan for rollout boundaries.
+
 ## Task G02: Resolve aliases with reversible, type-aware merge proposals
 
 **Dependencies:** G01, E02.
@@ -277,6 +288,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(memory): propose reversible entity alias merges`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/tasks/memify/consolidate_entities.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/tasks/memify/consolidate_entities.py). Priority P1; see the borrowing plan for rollout boundaries.
 
 ## Task I01: Preserve document and chunk source provenance
 
@@ -295,6 +308,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/infrastructure/loaders](https://github.com/topoteretes/cognee/tree/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/infrastructure/loaders). Priority P1; see the borrowing plan for rollout boundaries.
+
 ## Task I02: Add optional text and document loader adapters
 
 **Dependencies:** I01.
@@ -311,6 +326,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(ingest): add optional source loader adapters`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/infrastructure/loaders](https://github.com/topoteretes/cognee/tree/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/infrastructure/loaders). Priority P1; see the borrowing plan for rollout boundaries.
 
 ## Task S01: Discover procedural skills without loading full procedures
 
@@ -329,6 +346,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/modules/retrieval/skills_retriever.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/retrieval/skills_retriever.py). Priority P1; see the borrowing plan for rollout boundaries.
+
 ## Task S02: Record skill outcomes and propose versioned improvements
 
 **Dependencies:** S01, E02.
@@ -345,6 +364,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(skills): propose improvements from run outcomes`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/modules/memify/skill_improvement.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/memify/skill_improvement.py). Priority P1; see the borrowing plan for rollout boundaries.
 
 ## Task R01: Route retrieval with explicit, inspectable strategies
 
@@ -363,6 +384,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/api/v1/recall/query_router.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/api/v1/recall/query_router.py). Priority P1; see the borrowing plan for rollout boundaries.
+
 ## Task R02: Add optional budgeted evidence expansion to reflect
 
 **Dependencies:** R01, E02.
@@ -379,6 +402,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(reflect): bound iterative evidence expansion`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/modules/retrieval/graph_completion_context_extension_retriever.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/retrieval/graph_completion_context_extension_retriever.py). Priority P2; see the borrowing plan for rollout boundaries.
 
 ## Task P01: Persist enrichment stage status and retry lineage
 
@@ -397,6 +422,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/modules/pipelines/operations/log_pipeline_run_progress.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/pipelines/operations/log_pipeline_run_progress.py), [cognee/modules/pipelines/operations/get_pipeline_status.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/pipelines/operations/get_pipeline_status.py). Priority P1; see the borrowing plan for rollout boundaries.
+
 ## Task P02: Preview ingestion and enrichment work before execution
 
 **Dependencies:** P01, I02, G02.
@@ -413,6 +440,8 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 **Commit:** `feat(ingest): preview enrichment work and cost`.
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
+
+**Borrowing evidence:** [cognee/modules/cognify/estimator.py](https://github.com/topoteretes/cognee/blob/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/modules/cognify/estimator.py). Priority P1; see the borrowing plan for rollout boundaries.
 
 ## Task H01: Build opt-in source-linked hierarchical summaries
 
@@ -431,12 +460,14 @@ Use Cognee commit 78ff576559a7f75f65884c5bd90b22cdc790016e as the research basel
 
 **Handoff:** status review with exact worker branch/SHA and check results. Reviewer marks done only after integration; all dependencies refer to integrated done states.
 
+**Borrowing evidence:** [cognee/tasks/memify/global_context_index](https://github.com/topoteretes/cognee/tree/78ff576559a7f75f65884c5bd90b22cdc790016e/cognee/tasks/memify/global_context_index). Priority P2; see the borrowing plan for rollout boundaries.
+
 ## Task Z01: Run cross-feature acceptance and publish the local evidence report
 
-**Dependencies:** A02, G02, I02, S02, R02, P02, H01.
+**Dependencies:** C06, A02, G02, I02, S02, R02, P02, H01.
 **Files:** `docs/CONFIG.md`, `README.md`, `CHANGELOG.md`, `docs/reports/punk-improvement-pipeline.md (new)`, `scenarios/membench/`.
 
-**Contract and implementation boundary:** Review the integrated branch against the brief. Run fresh migrations and upgrades from the baseline on both databases, native Codex 0.153.4 acceptance, authorization inventory, deterministic and opt-in retrieval modes, restart/retry scenarios and benchmark ablations. Document historical retention, approximate token budgets and citation-existence limits accurately. Report actual results and remaining limitations; do not claim Cognee superiority without a controlled comparative run.
+**Contract and implementation boundary:** Review the integrated branch against the brief. Run fresh migrations and upgrades from the baseline on both databases, native Codex 0.153.4 acceptance, authorization inventory, deterministic and opt-in retrieval modes, restart/retry scenarios and benchmark ablations. Document historical retention, approximate token budgets and citation-existence limits accurately. Report actual results and remaining limitations; do not claim Cognee superiority without a controlled comparative run. C06 is an explicit combined-acceptance dependency even though independent borrowing work can now proceed. If C02/C06 remains blocked, publish only clearly scoped component evidence; do not mark Z01 or the whole pipeline complete.
 
 **Red proof:** Revert representative boundary fixes in a disposable test checkout to verify the acceptance harness detects missing prompt capture, cross-namespace access and duplicate stage output; never revert the shared integration branch.
 

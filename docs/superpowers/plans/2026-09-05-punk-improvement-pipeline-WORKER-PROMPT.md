@@ -19,12 +19,13 @@ Use httptest and t.TempDir wherever possible. A manual dev server uses a fresh t
    - docs/superpowers/specs/2026-09-05-punk-improvement-pipeline-design.md
    - docs/superpowers/plans/2026-09-05-punk-improvement-pipeline.md
    - docs/superpowers/plans/2026-09-05-punk-improvement-pipeline.tasks.json
+   - docs/superpowers/plans/2026-09-06-cognee-borrowing.md
 4. Inspect git status and worktree list. Never switch branches in someone else's checkout. Confirm local feat/punk-improvement-pipeline exists. The initial plan is local; do not assume origin has it. If on a different machine without it, request the plan/branch artifact instead of fabricating a branch from stale origin/main.
 5. These are authorized implementation tasks when the user gives you this prompt. Complete the selected contract; do not restart brainstorming about the entire pipeline. Ask only for concrete missing input that blocks the task.
 
 ## Pick work safely
 
-6. Call list_tasks(namespace="punk-punkrecords-improvement"). Pick next or another ready task. Respect the Codex-first gate. A dependency is satisfied only by reviewer-marked done with a commit present in the integration branch.
+6. Call list_tasks(namespace="punk-punkrecords-improvement"). Pick next or another ready task. Use the revised dependencies: E01/A01 can start independently of C02/C06, and A02 depends on A01. C06 remains mandatory for combined acceptance Z01. A dependency is satisfied only by reviewer-marked done with a commit present in the integration branch.
 7. Claim /tasks/<id> with your agent identity as holder and ttl_seconds=3600; only the successful claimant works it. Recall that exact task and its plan section.
 8. Read /answers/<id> and any existing /reviews/<id>/submission first; a returned pending task may already have a worker branch that needs correction. Reuse/rebase that work only after checking ownership and recording the new holder; do not lose the prior patch. Create an isolated git worktree and task branch based on the current integration branch, named work/punk-improve-<task-id>-<unique-worker-suffix>. Keep the worktree outside the primary checkout. Record the branch and absolute path in task status.
 9. Expand directory/glob/new-file entries into concrete files you will edit and claim each normalized repository-relative path under /files/<repo-relative-path> in sorted order before edits. Punk claims match exact keys: a directory claim does NOT protect child files. All schema tasks additionally claim the identical allocation mutex /coordination/migrations; keep it until the task's migration filenames are settled and submitted. If one claim fails, release acquired file claims and wait/reselect; do not hold a partial set and deadlock another worker. Migration numbers must be checked again against the integration tip before integration. Add newly discovered files to the complete sorted claim set without holding a partial conflicting set.
@@ -41,7 +42,7 @@ Use httptest and t.TempDir wherever possible. A manual dev server uses a fresh t
 
 ## Submit and continue
 
-17. Set task status review, including worker branch, full commit SHA, exact checks, red/green evidence and deviations. Use /reviews/<id>/submission for details that do not fit in the status line. Release your task and file claims. Do NOT mark done just because your private branch passed tests.
+17. Write /reviews/<id>/submission FIRST with worker branch, full commit SHA, exact checks, red/green evidence and deviations. Then set task status review pointing at that evidence. Release your task and file claims. Do NOT mark done just because your private branch passed tests.
 18. The reviewer integrates the accepted commit and marks done with the integrated SHA; this is what unlocks dependencies. Inspect /answers/<id> for requested corrections. Reclaim before editing and amend/recreate the task commit as the reviewer directs.
 19. If blocked, write the precise question, evidence and attempted resolution under /questions/<id>, set status blocked and release claims. Check /answers/<id> before retrying. A missing external UI reproduction is a real blocker; unrelated ready work may continue.
 20. Re-read list_tasks before taking another task. If nothing is ready, use await_tasks(timeout_seconds=55) and inspect its fresh board. Do not busy-poll.

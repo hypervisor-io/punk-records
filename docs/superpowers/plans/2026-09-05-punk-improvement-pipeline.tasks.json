@@ -144,9 +144,7 @@
     {
       "id": "E01",
       "title": "Create reproducible retrieval baselines and ablations",
-      "deps": [
-        "C06"
-      ],
+      "deps": [],
       "files": [
         "internal/membench/membench.go",
         "internal/membench/membench_test.go",
@@ -155,11 +153,18 @@
         "scenarios/membench/",
         "cmd/punk/main.go"
       ],
-      "contract": "Extend the existing benchmark with a versioned run manifest: corpus hash, seed, commit, embedding/reranker IDs, retrieval settings and warm/cold mode. Persist per-query rankings, latency and aggregate recall/MRR. Add deterministic cases for corrections, exact identifiers, multi-hop evidence, aliases, time windows and missing answers. Keep LoCoMo evidence recall explicitly distinct from answer accuracy.",
-      "red": "A fixed fixture and seed must yield reproducible rankings and manifest content except timing fields; changing corpus or strategy must change the recorded manifest.",
-      "accept": "One command writes machine-readable results for baseline and ablations. No default paid model calls. Fixtures avoid cross-namespace leakage; failed queries are counted rather than silently dropped.",
+      "contract": "Extend the existing benchmark with a versioned run manifest: corpus hash, seed, commit, embedding/reranker IDs, retrieval settings and warm/cold mode. Persist per-query rankings, latency and aggregate recall/MRR. Add deterministic cases for corrections, exact identifiers, multi-hop evidence, aliases, time windows and missing answers. Keep LoCoMo evidence recall explicitly distinct from answer accuracy. The legacy RecallAtK currently means any-hit rate; preserve compatibility explicitly and expose correctly named hit_at_k, evidence recall_at_k and mrr in a versioned report. Evidence recall is retrieved unique expected IDs divided by all unique expected IDs. Empty-gold/unanswerable cases have a separate denominator; report retrieval errors and unavailable ablations explicitly. Exclude run IDs, wall-clock timestamps, measured cost and timing from stable-manifest comparisons.",
+      "red": "A fixed fixture and seed must yield reproducible rankings and manifest content excluding documented volatile fields; changing corpus or strategy must change the recorded manifest. Include two required facts with only one retrieved: hit_at_k=1 and evidence recall_at_k=0.5; duplicate results cannot inflate recall. Unanswerable cases must not cause division by zero or disappear from the report.",
+      "accept": "One command writes machine-readable results for baseline and ablations. No default paid model calls. Fixtures avoid cross-namespace leakage; failed queries are counted rather than silently dropped. Use k=5 and fixed seed 1 for the initial offline fixture report; fixtures include every category named in the contract. Legacy output semantics remain documented, and no feature is called an improvement from the legacy any-hit metric alone.",
       "tests": "go test ./internal/membench ./internal/memory ./cmd/punk -count=1",
-      "commit": "feat(membench): record reproducible retrieval baselines"
+      "commit": "feat(membench): record reproducible retrieval baselines",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/eval_framework/run_eval.py",
+        "cognee/eval_framework/evaluation/metrics/context_coverage.py"
+      ],
+      "priority": "P0"
     },
     {
       "id": "E02",
@@ -178,34 +183,45 @@
       "red": "An answer citing a real but unrelated fact must pass ID-existence and fail support in a labeled fixture; an unanswerable question answered confidently must fail abstention.",
       "accept": "Report answer accuracy, evidence metrics and cost separately with per-case artifacts. Model-backed runs require explicit endpoint/model/budget configuration and never use the live memory namespace. No unsupported cross-product winner claim.",
       "tests": "go test ./internal/membench ./internal/reflect -count=1",
-      "commit": "feat(membench): evaluate answers and citation support"
+      "commit": "feat(membench): evaluate answers and citation support",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/eval_framework/evaluation/evaluator_adapters.py",
+        "cognee/eval_framework/evaluation/metrics/exact_match.py"
+      ],
+      "priority": "P0"
     },
     {
       "id": "A01",
       "title": "Add an explicit namespace authorization model",
-      "deps": [
-        "E01"
-      ],
+      "deps": [],
       "files": [
         "internal/authz/ (new)",
         "internal/api/auth.go",
         "internal/api/auth_test.go",
         "internal/config/config.go",
         "internal/config/config_test.go",
-        "internal/store/migrations/{sqlite,postgres}/"
+        "internal/store/migrations/{sqlite,postgres}/",
+        "cmd/punk/main.go"
       ],
-      "contract": "Introduce subject-to-namespace read/write/admin grants with an explicit enforcement mode. Existing trusted single-user deployments remain compatible when enforcement is off; when enabled use deny-by-default. Derive identity from verified credentials, never a user-controlled namespace/header or agent label. Specify local stdio trust separately. Allocate the next free matching migration number on both dialects.",
-      "red": "An authenticated subject with only namespace A read permission is denied namespace B and denied A writes when enforcement is enabled; compatibility mode preserves current bootstrap behavior.",
-      "accept": "Policy decisions cover wildcard/prefix rules only if deliberately specified, grant revocation, empty subject and admin. Migration up/down and default behavior are tested in SQLite and PostgreSQL. No live grant or configuration changes.",
-      "tests": "go test ./internal/authz ./internal/api ./internal/config ./internal/store -count=1",
-      "commit": "feat(authz): add namespace permission grants"
+      "contract": "Introduce subject-to-namespace read/write/admin grants with an explicit enforcement mode. Existing trusted single-user deployments remain compatible when enforcement is off; when enabled use deny-by-default. Derive identity from verified credentials, never a user-controlled namespace/header or agent label. Specify local stdio trust separately. Allocate the next free matching migration number on both dialects. First version uses exact namespace grants only (no wildcard/prefix matching). Read, write and admin are distinct operations; no implicit inheritance. Enabled mode denies an empty verified subject and zero-key bootstrap; disabled mode keeps existing trusted bootstrap behavior. Administrative grant provisioning must be usable through an explicit local CLI/config path without deploying it to the live server; document recovery and local stdio trust.",
+      "red": "An authenticated subject with only namespace A read permission is denied namespace B and denied A writes when enforcement is enabled; compatibility mode preserves current bootstrap behavior. Test zero-key bootstrap with enforcement enabled, an empty subject, exact-name confusion, explicit admin grants, and revocation.",
+      "accept": "Policy decisions cover exact namespace grants, rejection of wildcard/prefix patterns, grant revocation, empty subject and distinct admin operations. Migration up/down and default behavior are tested in SQLite and PostgreSQL. No live grant or configuration changes.",
+      "tests": "go test ./internal/authz ./internal/api ./internal/config ./internal/store ./cmd/punk -count=1",
+      "commit": "feat(authz): add namespace permission grants",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py"
+      ],
+      "priority": "P0"
     },
     {
       "id": "A02",
       "title": "Enforce namespace permissions at every external memory boundary",
       "deps": [
-        "A01",
-        "C05"
+        "A01"
       ],
       "files": [
         "internal/api/server.go",
@@ -217,11 +233,17 @@
         "internal/mcpserver/tasks.go",
         "internal/mcpserver/namespace.go"
       ],
-      "contract": "Apply the common authorizer before reads/writes across REST, HTTP MCP, subscriptions/SSE, hook context/capture, task board, claims, brain snapshots, exports/imports and cross-region operations. Produce an endpoint/tool permission inventory. Do not let roots, ns headers or explicit tool arguments grant access; prevent unauthorized resource enumeration and subscription delivery.",
+      "contract": "Apply the common authorizer before reads/writes across REST, HTTP MCP, subscriptions/SSE, hook context/capture, task board, claims, brain snapshots, exports/imports and cross-region operations. Produce an endpoint/tool permission inventory. Do not let roots, ns headers or explicit tool arguments grant access; prevent unauthorized resource enumeration and subscription delivery. Namespace selection diagnostics in C05 are not an implementation dependency: authorize the final resolved namespace using verified identity at each actual request boundary. Include inherited MCP session identity, case-insensitive headers and subscription reauthorization in the inventory.",
       "red": "Table-driven REST/MCP tests use a valid A-only credential to attempt B access on every inventory entry, including query overrides and resource subscriptions.",
       "accept": "All external surfaces are inventoried and enforced in enabled mode; trusted disabled mode is compatible. Revocation affects subsequent subscription deliveries according to documented policy. Cross-region calls check source and destination separately.",
       "tests": "go test -race ./internal/authz ./internal/api ./internal/mcpserver ./internal/region -count=1",
-      "commit": "feat(authz): enforce memory permissions across interfaces"
+      "commit": "feat(authz): enforce memory permissions across interfaces",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/pipelines/layers/resolve_authorized_user_datasets.py"
+      ],
+      "priority": "P0"
     },
     {
       "id": "G01",
@@ -241,7 +263,13 @@
       "red": "Same display name for a person and service remains distinct; legacy string extractor remains supported; malformed structured results do not write partial invalid entities.",
       "accept": "Disabled mode is unchanged. New entities retain provenance and declared types, unknown types have an explicit policy, batching and fallback remain correct. Compare fixture retrieval against E01.",
       "tests": "go test ./internal/memory ./internal/config ./cmd/punk -count=1",
-      "commit": "feat(memory): add typed entity extraction"
+      "commit": "feat(memory): add typed entity extraction",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/tasks/memify/consolidate_entities.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "G02",
@@ -261,7 +289,13 @@
       "red": "Alice/Alice Chen may resolve with supporting identity evidence; two different services sharing a short name do not merge; proposal replay is idempotent; rejected proposals leave data untouched.",
       "accept": "Measure false merges and missed aliases on labeled fixtures. Types constrain matching, source provenance survives, old references resolve, undo or supersession is defined and tested.",
       "tests": "go test ./internal/memory ./internal/membench -count=1",
-      "commit": "feat(memory): propose reversible entity alias merges"
+      "commit": "feat(memory): propose reversible entity alias merges",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/tasks/memify/consolidate_entities.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "I01",
@@ -281,7 +315,13 @@
       "red": "Insert a paragraph at the beginning of a document and assert unchanged later chunks preserve IDs/provenance; deleting a section tombstones only owned chunks; legacy input still behaves compatibly.",
       "accept": "Reingestion is idempotent; provenance points to exact retained source revisions, old fact citations remain resolvable within retention, and export/import round-trips source metadata.",
       "tests": "go test ./internal/memory ./internal/api ./internal/mcpserver -count=1",
-      "commit": "feat(ingest): preserve stable chunk provenance"
+      "commit": "feat(ingest): preserve stable chunk provenance",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/infrastructure/loaders"
+      ],
+      "priority": "P1"
     },
     {
       "id": "I02",
@@ -299,7 +339,13 @@
       "red": "Fixtures preserve Markdown headings, HTML text order and incident fields with source locations; unavailable PDF adapter yields an actionable error without a partial successful ingest.",
       "accept": "Static binary remains useful without external loaders. Repeated ingestion writes no unchanged chunks. Unsupported formats and extraction errors are visible, and all writes pass defense/provenance handling.",
       "tests": "go test ./internal/ingest ./internal/memory ./cmd/punk -count=1",
-      "commit": "feat(ingest): add optional source loader adapters"
+      "commit": "feat(ingest): add optional source loader adapters",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/infrastructure/loaders"
+      ],
+      "priority": "P1"
     },
     {
       "id": "S01",
@@ -319,7 +365,13 @@
       "red": "Searching for a procedure returns metadata without procedure text; loading its ID/version returns the matching body; inactive/unauthorized skills are excluded and no-embedder search works.",
       "accept": "Existing authored and mined skills are discoverable. Missing skill collection is a normal empty result, permission checks hold, and discovery payload stays within an explicit measured size bound.",
       "tests": "go test ./internal/skillmine ./internal/spec ./internal/memory ./internal/mcpserver -count=1",
-      "commit": "feat(skills): add scoped procedural discovery"
+      "commit": "feat(skills): add scoped procedural discovery",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/retrieval/skills_retriever.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "S02",
@@ -338,7 +390,13 @@
       "red": "A run references the original version after a new version is proposed; an unapproved draft cannot replace the active procedure; applying the same approved proposal twice has one effect.",
       "accept": "Versions and run lineage are queryable; regressions can revert to a prior version; proposals cite actual runs and pass E02-style outcome checks before activation.",
       "tests": "go test ./internal/skillmine ./internal/memory ./internal/task ./internal/policy -count=1",
-      "commit": "feat(skills): propose improvements from run outcomes"
+      "commit": "feat(skills): propose improvements from run outcomes",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/memify/skill_improvement.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "R01",
@@ -359,7 +417,13 @@
       "red": "Version/error strings containing years route as identifiers; explicit mode wins; ambiguous language falls back predictably; missing embeddings degrade to lexical retrieval.",
       "accept": "All strategies preserve namespace and token budgets. E01 reports routing mistakes and quality/cost per strategy. Auto routing adds no model call.",
       "tests": "go test ./internal/memory ./internal/api ./internal/mcpserver ./internal/membench -count=1",
-      "commit": "feat(search): add inspectable retrieval strategies"
+      "commit": "feat(search): add inspectable retrieval strategies",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/api/v1/recall/query_router.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "R02",
@@ -378,7 +442,13 @@
       "red": "A multi-hop fixture needs a second evidence hop; repeated identical retrieval stops early; fabricated relation IDs are rejected; budget exhaustion returns a partial/abstained result with reason.",
       "accept": "Compare against existing reflect on E02 under equal model/context budgets. Feature stays opt-in unless the final gate demonstrates a justified default change. No unlimited recursion or new agent framework.",
       "tests": "go test ./internal/reflect ./internal/memory ./internal/membench -count=1",
-      "commit": "feat(reflect): bound iterative evidence expansion"
+      "commit": "feat(reflect): bound iterative evidence expansion",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/retrieval/graph_completion_context_extension_retriever.py"
+      ],
+      "priority": "P2"
     },
     {
       "id": "P01",
@@ -399,7 +469,14 @@
       "red": "Crash after stage output but before acknowledgment, then retry: no duplicate derived entities/links. Stage failure remains visible and a changed source revision gets a new run.",
       "accept": "Restart recovery and stale-worker handling are tested. Status endpoints honor authorization. Stage errors and durations are inspectable without exposing secrets. Paired SQLite/Postgres migrations preserve old data.",
       "tests": "go test -race ./internal/memory ./internal/api ./internal/store ./cmd/punk -count=1",
-      "commit": "feat(memory): track enrichment stages and retries"
+      "commit": "feat(memory): track enrichment stages and retries",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/pipelines/operations/log_pipeline_run_progress.py",
+        "cognee/modules/pipelines/operations/get_pipeline_status.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "P02",
@@ -420,7 +497,13 @@
       "red": "A spy store/client sees zero writes and model calls during preview; an unchanged document estimates zero changed-chunk enrichment; unsupported input is never counted as a cheap URL/string.",
       "accept": "Estimates distinguish measured input from heuristic output, include exclusions, and compare predicted versus recorded P01 work on fixtures. Missing prices return unknown, never zero-cost certainty.",
       "tests": "go test ./internal/ingest ./internal/memory ./internal/cost ./cmd/punk -count=1",
-      "commit": "feat(ingest): preview enrichment work and cost"
+      "commit": "feat(ingest): preview enrichment work and cost",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/modules/cognify/estimator.py"
+      ],
+      "priority": "P1"
     },
     {
       "id": "H01",
@@ -442,12 +525,19 @@
       "red": "Editing/deleting one leaf invalidates only its ancestors; untouched branches do no model work; a corpus beyond the old cap retains full coverage and an empty subtree disappears.",
       "accept": "Feature stays off by default. E02 broad-question cases measure benefit and extra cost. Sources remain traceable and compaction cannot silently present an unsupported summary as current.",
       "tests": "go test ./internal/memory ./internal/reflect ./internal/membench -count=1",
-      "commit": "feat(memory): add incremental summary hierarchies"
+      "commit": "feat(memory): add incremental summary hierarchies",
+      "workstream": "cognee-borrowing",
+      "source_commit": "78ff576559a7f75f65884c5bd90b22cdc790016e",
+      "source_paths": [
+        "cognee/tasks/memify/global_context_index"
+      ],
+      "priority": "P2"
     },
     {
       "id": "Z01",
       "title": "Run cross-feature acceptance and publish the local evidence report",
       "deps": [
+        "C06",
         "A02",
         "G02",
         "I02",
@@ -463,11 +553,14 @@
         "docs/reports/punk-improvement-pipeline.md (new)",
         "scenarios/membench/"
       ],
-      "contract": "Review the integrated branch against the brief. Run fresh migrations and upgrades from the baseline on both databases, native Codex 0.153.4 acceptance, authorization inventory, deterministic and opt-in retrieval modes, restart/retry scenarios and benchmark ablations. Document historical retention, approximate token budgets and citation-existence limits accurately. Report actual results and remaining limitations; do not claim Cognee superiority without a controlled comparative run.",
+      "contract": "Review the integrated branch against the brief. Run fresh migrations and upgrades from the baseline on both databases, native Codex 0.153.4 acceptance, authorization inventory, deterministic and opt-in retrieval modes, restart/retry scenarios and benchmark ablations. Document historical retention, approximate token budgets and citation-existence limits accurately. Report actual results and remaining limitations; do not claim Cognee superiority without a controlled comparative run. C06 is an explicit combined-acceptance dependency even though independent borrowing work can now proceed. If C02/C06 remains blocked, publish only clearly scoped component evidence; do not mark Z01 or the whole pipeline complete.",
       "red": "Revert representative boundary fixes in a disposable test checkout to verify the acceptance harness detects missing prompt capture, cross-namespace access and duplicate stage output; never revert the shared integration branch.",
       "accept": "All task commits integrated and reviewed; full gates pass with actual logs. The report records SHAs, commands, configurations, results, no unexplained regressions and rollout/rollback steps. No deployment, release, tagging or merge to main is part of this task.",
       "tests": "go test ./...; go test -race ./internal/hookcli ./internal/api ./internal/mcpserver ./internal/memory ./internal/reflect; go vet ./...; go build ./...; make test-ui; PostgreSQL and native Codex acceptance from brief",
-      "commit": "docs: record improvement pipeline acceptance"
+      "commit": "docs: record improvement pipeline acceptance",
+      "workstream": "combined-acceptance"
     }
-  ]
+  ],
+  "planning_revision": "2026-09-06-cognee-borrowing",
+  "borrowing_plan": "docs/superpowers/plans/2026-09-06-cognee-borrowing.md"
 }

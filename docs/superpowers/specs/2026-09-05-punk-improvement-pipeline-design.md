@@ -1,6 +1,6 @@
 # Punkrecords improvement pipeline design
 
-Date: 2026-09-05. Status: implementation handoff prepared; no product fixes implemented.
+Date: 2026-09-05; scheduling revised 2026-09-06. Status: implementation underway; consult the live task board for reviewed/integrated work.
 Coordination namespace: `punk-punkrecords-improvement`.
 Repository: `/mnt/d/Hypervisor_Code/punkrecords`.
 Integration branch: `feat/punk-improvement-pipeline` (local; do not assume a remote branch exists).
@@ -53,7 +53,13 @@ C02 now prioritizes a four-way title on/off versus Punk hooks on/off experiment 
 
 The screenshot remains user-owned and untracked; the planning commit records the visual observation rather than adding the image.
 
+## Scheduling update: 2026-09-06
+
+The user requested continued Cognee borrowing work. Independent evaluation and authorization work may proceed while the native terminal issue awaits host evidence. E01 and A01 have no task dependencies; A02 depends on A01, not C05. Existing C-series dependencies and acceptance remain intact; Z01 explicitly depends on C06 as well as all memory feature gates. This changes scheduling, not the definition of a fixed Codex integration or a completed pipeline. Details: [Cognee borrowing plan](../plans/2026-09-06-cognee-borrowing.md).
+
 ## Scope and phases
+
+The workstreams below describe scope, not a global sequential barrier.
 
 1. C01-C07: native Codex compatibility, spam diagnosis/fix, duplicate managed installations, delivery deduplication with explicit acknowledgement semantics, namespace alignment and measured guidance duplication. C06 gates the complete integration.
 2. E01-E02: reproducible retrieval and answer/citation evaluation.

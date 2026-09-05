@@ -5,6 +5,8 @@ Repository: /mnt/d/Hypervisor_Code/punkrecords. Integration branch: feat/punk-im
 
 Register with a unique identity and role reviewer. Read /plan/summary, both conventions, the design brief, implementation plan and worker prompt. Use list_tasks and await_tasks(timeout_seconds=55); do not assume a worker's previous status is current.
 
+Scheduling revision: read docs/superpowers/plans/2026-09-06-cognee-borrowing.md. E01/A01 and their ready dependents may be accepted before C06; Z01 still requires C06. Do not reintroduce the old global Codex-first barrier. Preserve current C05 submission/feedback during planning changes.
+
 For each review task:
 1. Recall /tasks/<id> and /reviews/<id>/submission. Resolve its local worker branch and full commit. Confirm it descends from the appropriate integration base and contains only task changes.
 2. Review against the contract, red proof, compatibility and acceptance. Run the checks from a disposable detached worktree at that commit. Never switch or reset a worker's checkout. Missing native UI evidence, PostgreSQL coverage or external checks cannot be called passing.
