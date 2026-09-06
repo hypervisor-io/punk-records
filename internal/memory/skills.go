@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/store"
 )
@@ -751,4 +752,385 @@ func rrfFuseSkills(arms ...[]Fact) []Fact {
 		return out[a].Key < out[b].Key
 	})
 	return out
+}
+
+// Task S02: run outcomes, version lineage and regression revert. A run
+// outcome is recorded as a FOURTH key per run, pinned to the exact
+// version it executed:
+//
+//   /skill-runs/<name>/<version>/<run-id>
+//
+// where run-id is "<taskID>-<seq>" and seq is the per-task sequence
+// number of the skill_run ledger event that carries the originating
+// evidence, so the record is deterministic and re-recording the same
+// run collapses to the single live revision. The body is a small digest
+// line (outcome, score, evidence pointer, capped error/summary text) -
+// NEVER procedure bytes, matching the digest-only identity rows. The
+// record cites the version's /skill-identities/ content address, and
+// recording REQUIRES that row to exist: an outcome can only bind to
+// content that actually shipped, which is what makes the pin hold after
+// later versions are proposed or the version is unpublished.
+//
+// Run records are retention-exempt by the same construction as identity
+// rows: one live revision per key, no expiration, and the skill
+// lifecycle never tombstones them, so SweepRetention and Consolidate -
+// which keep every key's latest live revision - leave the lineage
+// intact while the version's own discovery and body rows come and go.
+//
+// The /skill-runs/ prefix is deliberately disjoint from /skills/:
+// discovery reads only /skills/%, so run rows can never surface as
+// skills and the strict prefix separation keeps the projections apart.
+
+// Skill run outcome values for SkillRunInput.Outcome.
+const (
+	RunOutcomeSuccess = "success" // the procedure achieved its goal
+	RunOutcomeFailed  = "failed"  // the procedure ran and failed its checks
+	RunOutcomeError   = "error"   // the run errored before it could be judged
+)
+
+// Per-field caps for the run digest, mirroring the S01 field limits so
+// a run record's payload stays a closed-form bound.
+const (
+	skillRunErrorTypeMaxRunes     = 64
+	skillRunErrorMessageMaxRunes  = 1024
+	skillRunResultSummaryMaxRunes = 1024
+	skillRunTaskIDMaxRunes        = 128
+)
+
+// ErrSkillIdentityMissing: recording a run outcome requires the
+// version's published identity record, and the version has none (it
+// never shipped).
+var ErrSkillIdentityMissing = errors.New("memory: skill version has no published identity")
+
+func skillRunKey(name, version, runID string) string {
+	return "/skill-runs/" + name + "/" + version + "/" + runID
+}
+
+// SkillRunInput is one run outcome to pin against an exact published
+// skill version. ExecutionID, when set, is the caller's stable identity
+// for one real execution: the run id derives from it instead of the
+// event sequence, so retries of the same execution keep one run record
+// and distinct executions with identical outputs stay separate rows.
+type SkillRunInput struct {
+	SkillName     string
+	SkillVersion  string
+	TaskID        string // originating ledger task (evidence anchor)
+	TaskSeq       int64  // sequence of the run's evidence event on that task
+	ExecutionID   string // optional stable per-execution identity (task-scoped)
+	Outcome       string // RunOutcomeSuccess | RunOutcomeFailed | RunOutcomeError
+	SuccessScore  float64
+	ErrorType     string
+	ErrorMessage  string
+	ResultSummary string
+	Actor         string
+}
+
+// SkillRunRecord is one recorded run outcome, projected back from its
+// stored digest row. SkillIdentity is the content address of the exact
+// version the run executed.
+type SkillRunRecord struct {
+	RunID         string    `json:"run_id"`
+	SkillName     string    `json:"skill_name"`
+	SkillVersion  string    `json:"skill_version"`
+	SkillIdentity string    `json:"skill_identity"`
+	TaskID        string    `json:"task_id"`
+	TaskSeq       int64     `json:"task_seq"`
+	ExecutionID   string    `json:"execution_id,omitempty"`
+	Outcome       string    `json:"outcome"`
+	SuccessScore  float64   `json:"success_score"`
+	ErrorType     string    `json:"error_type,omitempty"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	ResultSummary string    `json:"result_summary,omitempty"`
+	Actor         string    `json:"actor,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+func validateSkillRunInput(in *SkillRunInput) error {
+	if len(in.SkillName) > skillNameMaxRunes || !skillNameRE.MatchString(in.SkillName) {
+		return fmt.Errorf("memory: skill run name %q: 1-%d chars, lowercase alphanumerics and hyphens", in.SkillName, skillNameMaxRunes)
+	}
+	if in.SkillVersion == "" || len(in.SkillVersion) > skillVersionMaxRunes || strings.ContainsAny(in.SkillVersion, "/ \t\n") {
+		return fmt.Errorf("memory: skill run version %q: 1-%d chars, no slashes or whitespace", in.SkillVersion, skillVersionMaxRunes)
+	}
+	if in.TaskID == "" {
+		return errors.New("memory: skill run requires a task id")
+	}
+	if len(in.TaskID) > skillRunTaskIDMaxRunes {
+		return fmt.Errorf("memory: skill run task id exceeds %d chars", skillRunTaskIDMaxRunes)
+	}
+	if in.ExecutionID != "" && (len([]rune(in.ExecutionID)) > skillRunTaskIDMaxRunes || strings.ContainsAny(in.ExecutionID, "/ \t\n")) {
+		return fmt.Errorf("memory: skill run execution id %q: 1-%d chars, no slashes or whitespace", in.ExecutionID, skillRunTaskIDMaxRunes)
+	}
+	switch in.Outcome {
+	case RunOutcomeSuccess, RunOutcomeFailed, RunOutcomeError:
+	default:
+		return fmt.Errorf("memory: skill run outcome %q: want success, failed or error", in.Outcome)
+	}
+	if in.SuccessScore < 0 {
+		in.SuccessScore = 0
+	} else if in.SuccessScore > 1 {
+		in.SuccessScore = 1
+	}
+	for _, c := range []struct {
+		name string
+		val  string
+		max  int
+	}{
+		{"error type", in.ErrorType, skillRunErrorTypeMaxRunes},
+		{"error message", in.ErrorMessage, skillRunErrorMessageMaxRunes},
+		{"result summary", in.ResultSummary, skillRunResultSummaryMaxRunes},
+	} {
+		if len([]rune(c.val)) > c.max {
+			return fmt.Errorf("memory: skill run %s exceeds %d chars", c.name, c.max)
+		}
+	}
+	return nil
+}
+
+// ValidateSkillRunInput applies RecordSkillRun's validation (and score
+// clamping) without writing anything, so callers that stage multi-step
+// recordings can reject bad input before their first side effect.
+func ValidateSkillRunInput(in SkillRunInput) error {
+	return validateSkillRunInput(&in)
+}
+
+// RecordSkillRun pins one run outcome to the exact published version:
+// the version's identity record must exist (the outcome binds to
+// shipped content, not to a name), the digest row lands under
+// /skill-runs/<name>/<version>/<taskID>-<seq> with the identity digest
+// as an attribute, and the same run recorded twice with identical
+// content collapses to the single live revision. The key is never
+// tombstoned or expired by the skill lifecycle, so the lineage is
+// retention-exempt (see the S02 section comment).
+func (s *Store) RecordSkillRun(ctx context.Context, ns string, in SkillRunInput) (*SkillRunRecord, error) {
+	if err := validateSkillRunInput(&in); err != nil {
+		return nil, err
+	}
+	idfs, err := s.liveByKeys(ctx, ns, []string{skillIdentityKey(in.SkillName, in.SkillVersion)})
+	if err != nil {
+		return nil, err
+	}
+	if len(idfs) == 0 {
+		return nil, fmt.Errorf("record skill run %s@%s: %w", in.SkillName, in.SkillVersion, ErrSkillIdentityMissing)
+	}
+	identity := idfs[0].Body
+	runID := fmt.Sprintf("%s-%d", in.TaskID, in.TaskSeq)
+	if in.ExecutionID != "" {
+		runID = fmt.Sprintf("%s-%s", in.TaskID, in.ExecutionID)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "skill-run %s@%s %s score=%.2f task=%s seq=%d",
+		in.SkillName, in.SkillVersion, in.Outcome, in.SuccessScore, in.TaskID, in.TaskSeq)
+	if in.ErrorType != "" || in.ErrorMessage != "" {
+		b.WriteString("\nerror: " + in.ErrorType + ": " + in.ErrorMessage)
+	}
+	if in.ResultSummary != "" {
+		b.WriteString("\nsummary: " + in.ResultSummary)
+	}
+
+	f, err := s.Write(ctx, WriteInput{
+		Namespace: ns, Key: skillRunKey(in.SkillName, in.SkillVersion, runID),
+		Body: b.String(),
+		Attributes: map[string]any{
+			"skill_name":         in.SkillName,
+			"skill_version":      in.SkillVersion,
+			"skill_identity":     identity,
+			"run_id":             runID,
+			"task_id":            in.TaskID,
+			"task_seq":           in.TaskSeq,
+			"execution_id":       in.ExecutionID,
+			"run_outcome":        in.Outcome,
+			"run_score":          in.SuccessScore,
+			"run_error_type":     in.ErrorType,
+			"run_error_message":  in.ErrorMessage,
+			"run_result_summary": in.ResultSummary,
+			"actor":              in.Actor,
+		},
+		Writer: "skill-run", Author: in.Actor, TaskID: in.TaskID,
+		SourceRef: "skill-run:" + runID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("record skill run %s@%s: %w", in.SkillName, in.SkillVersion, err)
+	}
+	rec, ok := skillRunRecordFromFact(*f)
+	if !ok {
+		return nil, fmt.Errorf("record skill run %s@%s: stored digest did not project back", in.SkillName, in.SkillVersion)
+	}
+	return &rec, nil
+}
+
+// skillRunRecordFromFact projects a live run-record fact back to
+// SkillRunRecord. Facts without the run attribute set are not run
+// records: ok=false.
+func skillRunRecordFromFact(f Fact) (SkillRunRecord, bool) {
+	a := f.Attributes
+	if a == nil {
+		return SkillRunRecord{}, false
+	}
+	name, _ := a["skill_name"].(string)
+	version, _ := a["skill_version"].(string)
+	runID, _ := a["run_id"].(string)
+	if name == "" || version == "" || runID == "" {
+		return SkillRunRecord{}, false
+	}
+	asInt := func(v any) int64 {
+		switch n := v.(type) {
+		case float64:
+			return int64(n)
+		case int64:
+			return n
+		case int:
+			return int64(n)
+		}
+		return 0
+	}
+	asFloat := func(v any) float64 {
+		switch n := v.(type) {
+		case float64:
+			return n
+		case int64:
+			return float64(n)
+		case int:
+			return float64(n)
+		}
+		return 0
+	}
+	asString := func(v any) string {
+		s, _ := v.(string)
+		return s
+	}
+	rec := SkillRunRecord{
+		RunID:         runID,
+		SkillName:     name,
+		SkillVersion:  version,
+		SkillIdentity: asString(a["skill_identity"]),
+		TaskID:        asString(a["task_id"]),
+		TaskSeq:       asInt(a["task_seq"]),
+		ExecutionID:   asString(a["execution_id"]),
+		Outcome:       asString(a["run_outcome"]),
+		SuccessScore:  asFloat(a["run_score"]),
+		ErrorType:     asString(a["run_error_type"]),
+		ErrorMessage:  asString(a["run_error_message"]),
+		ResultSummary: asString(a["run_result_summary"]),
+		Actor:         asString(a["actor"]),
+		RecordedAt:    f.CreatedAt,
+	}
+	return rec, true
+}
+
+// ListSkillRuns returns the recorded run outcomes for one skill,
+// newest last, optionally pinned to one exact version (empty version =
+// every version). Unknown names or versions are an empty result, not an
+// error; the lineage survives unpublishing and retention sweeps.
+func (s *Store) ListSkillRuns(ctx context.Context, ns, name, version string) ([]SkillRunRecord, error) {
+	if !skillNameRE.MatchString(name) {
+		return []SkillRunRecord{}, nil
+	}
+	prefix := "/skill-runs/" + name + "/"
+	if version != "" {
+		prefix += version + "/"
+	}
+	facts, err := s.Recall(ctx, ns, prefix, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := []SkillRunRecord{}
+	for _, f := range facts {
+		if r, ok := skillRunRecordFromFact(f); ok {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].RecordedAt.Equal(out[j].RecordedAt) {
+			return out[i].RecordedAt.Before(out[j].RecordedAt)
+		}
+		return out[i].RunID < out[j].RunID
+	})
+	return out, nil
+}
+
+// ListSkillVersions returns the metadata of every live version of one
+// skill name, inactive ones included (version lineage includes what a
+// regression reverted away from), ordered by version ascending. An
+// unknown name is an empty result.
+func (s *Store) ListSkillVersions(ctx context.Context, ns, name string) ([]SkillMeta, error) {
+	all, err := s.ListSkillsAll(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	out := []SkillMeta{}
+	for _, m := range all {
+		if m.Name == name {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	return out, nil
+}
+
+// SkillIdentity returns the content address minted when name@version
+// first shipped. The version must be exact; an unknown or never-shipped
+// version is ErrSkillNotFound. The record is retention-exempt, so the
+// digest outlives the version's discovery document and body.
+func (s *Store) SkillIdentity(ctx context.Context, ns, name, version string) (string, error) {
+	if version == "" {
+		return "", fmt.Errorf("memory: skill version is required: %w", ErrSkillNotFound)
+	}
+	idfs, err := s.liveByKeys(ctx, ns, []string{skillIdentityKey(name, version)})
+	if err != nil {
+		return "", err
+	}
+	if len(idfs) == 0 {
+		return "", fmt.Errorf("memory: %s@%s: %w", name, version, ErrSkillNotFound)
+	}
+	return idfs[0].Body, nil
+}
+
+// SkillBody returns the stored procedure body for one exact version
+// regardless of its active flag: apply-time revalidation compares a
+// proposal's draft against the version it improves even when that base
+// version has already been deactivated by an earlier apply.
+func (s *Store) SkillBody(ctx context.Context, ns, name, version string) (string, error) {
+	if version == "" {
+		return "", fmt.Errorf("memory: skill version is required: %w", ErrSkillNotFound)
+	}
+	bodies, err := s.liveByKeys(ctx, ns, []string{skillBodyKey(name, version)})
+	if err != nil {
+		return "", err
+	}
+	if len(bodies) == 0 {
+		return "", fmt.Errorf("memory: %s@%s body: %w", name, version, ErrSkillNotFound)
+	}
+	return bodies[0].Body, nil
+}
+
+// RevertSkillVersion rolls a regression back: the regressed version is
+// deactivated and the prior one reactivated. Both must be published
+// versions (unknown ones are ErrSkillNotFound, a same-version revert is
+// refused); bodies never mutate, so the revert is two visibility flips
+// and the regressed version stays published for audit and exact loads.
+// Both versions are validated before any mutation, so a rejected revert
+// (an unknown target, say) leaves the currently active version active.
+// The deactivation still runs first after validation, so a crash
+// between the two flips leaves every version inactive for unversioned
+// loads rather than two active ones; running the revert again heals it
+// (both flips are idempotent).
+func (s *Store) RevertSkillVersion(ctx context.Context, ns, name, from, to string) error {
+	if from == to {
+		return fmt.Errorf("memory: revert skill %s: from and to are both %q", name, from)
+	}
+	if _, _, err := s.loadSkillFact(ctx, ns, name, from); err != nil {
+		return fmt.Errorf("revert skill %s: deactivate %s: %w", name, from, err)
+	}
+	if _, _, err := s.loadSkillFact(ctx, ns, name, to); err != nil {
+		return fmt.Errorf("revert skill %s: activate %s: %w", name, to, err)
+	}
+	if err := s.SetSkillActive(ctx, ns, name, from, false); err != nil {
+		return fmt.Errorf("revert skill %s: deactivate %s: %w", name, from, err)
+	}
+	if err := s.SetSkillActive(ctx, ns, name, to, true); err != nil {
+		return fmt.Errorf("revert skill %s: activate %s: %w", name, to, err)
+	}
+	return nil
 }

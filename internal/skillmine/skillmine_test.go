@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,9 +17,17 @@ import (
 // fakeClock mirrors internal/task/ledger_test.go's fakeClock: List orders
 // by created_at, so tests need strictly increasing, deterministic
 // timestamps rather than relying on time.Now()'s real-clock granularity.
-type fakeClock struct{ t time.Time }
+// The mutex keeps concurrent-outcome tests (e.g.
+// TestConcurrentDuplicateRecordingsAppendOnce) race-clean: goroutines
+// share one clock, and each call still gets a distinct, increasing stamp.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
 func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.t = c.t.Add(time.Millisecond)
 	return c.t
 }

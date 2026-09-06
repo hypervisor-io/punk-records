@@ -201,6 +201,164 @@ func (l *Ledger) Append(ctx context.Context, taskID, typ, actor string, payload 
 	return seq, err
 }
 
+// EventSkillRun anchors one procedural-skill run outcome to its
+// originating task (S02): the event's per-task sequence number becomes
+// part of the run id the memory-plane record is pinned under, so the
+// ledger stays the citable evidence for every recorded outcome.
+//
+// Placement note: event constants conventionally live in task.go, but
+// the S02 contract's file boundary is ledger.go, so the constant, its
+// payload struct and the append helper live here (recorded as a
+// deviation candidate in the task prep).
+const EventSkillRun = "skill_run"
+
+// SkillRunPayload is the payload of every skill_run event. ExecutionID
+// is the recorder's stable identity for one real execution and
+// Namespace the memory namespace the outcome is recorded for: the
+// event's anchor identity is (namespace, task, execution id), where an
+// event appended without a namespace (a direct ledger writer) matches
+// any namespace, so it can never be bypassed by a retry. Retries of the
+// same execution reuse the event's sequence only when the whole payload
+// agrees; distinct executions with identical outputs stay separate
+// events.
+type SkillRunPayload struct {
+	SkillName     string  `json:"skill_name"`
+	SkillVersion  string  `json:"skill_version"`
+	Namespace     string  `json:"namespace,omitempty"`
+	ExecutionID   string  `json:"execution_id,omitempty"`
+	Outcome       string  `json:"outcome"` // success | failed | error
+	SuccessScore  float64 `json:"success_score,omitempty"`
+	ErrorType     string  `json:"error_type,omitempty"`
+	ErrorMessage  string  `json:"error_message,omitempty"`
+	ResultSummary string  `json:"result_summary,omitempty"`
+}
+
+// AppendSkillRun appends one skill_run event and returns its sequence
+// number (the run id's evidence anchor). It is the raw writer: no
+// anchor resolution. RecordRunOutcome uses AppendSkillRunOnce.
+func (l *Ledger) AppendSkillRun(ctx context.Context, taskID, actor string, p SkillRunPayload) (int64, error) {
+	return l.Append(ctx, taskID, EventSkillRun, actor, p)
+}
+
+// ErrSkillRunConflict: a skill_run event already anchors this execution
+// identity - (namespace, task, execution id) - with different semantic
+// content (recording actor, skill, version, outcome, score, error or
+// summary text). A retry can heal a partial write; it can never change
+// a recorded outcome, and the conflict is refused without appending new
+// evidence.
+var ErrSkillRunConflict = errors.New("task: skill_run execution already anchored with different content")
+
+// sameSkillRunExecution reports whether a stored skill_run payload
+// carries the same execution identity as an incoming recording: a
+// matching execution id and a compatible namespace. Two set, different
+// namespaces are two distinct executions that happen to share an id
+// string; an event appended without a namespace matches any namespace,
+// so an unnamespaced anchor can never be silently skipped by a retry.
+func sameSkillRunExecution(stored, in SkillRunPayload) bool {
+	if stored.ExecutionID == "" || stored.ExecutionID != in.ExecutionID {
+		return false
+	}
+	return stored.Namespace == "" || in.Namespace == "" || stored.Namespace == in.Namespace
+}
+
+// sameSkillRunContent reports whether two payloads of one execution
+// identity agree on every outcome-relevant field. Namespace is not
+// compared here: it is identity, handled by sameSkillRunExecution.
+func sameSkillRunContent(stored, in SkillRunPayload) bool {
+	return stored.SkillName == in.SkillName && stored.SkillVersion == in.SkillVersion &&
+		stored.Outcome == in.Outcome && stored.SuccessScore == in.SuccessScore &&
+		stored.ErrorType == in.ErrorType && stored.ErrorMessage == in.ErrorMessage &&
+		stored.ResultSummary == in.ResultSummary
+}
+
+// AppendSkillRunOnce appends one skill_run event unless the task
+// already carries an event for the same execution identity, in which
+// case that event's sequence is returned (reused=true) instead of
+// stacking a duplicate. Reuse requires the stored payload to agree on
+// EVERY outcome-relevant field plus the recording actor; any difference
+// is ErrSkillRunConflict - a retry heals a partial write (an appended
+// event whose memory-plane pin never landed), it never re-anchors a
+// recorded execution to different content, and the conflict is refused
+// without appending anything.
+//
+// The scan and the append run in ONE transaction, the ledger's actual
+// writer boundary: on postgres the task row is locked FOR UPDATE first,
+// so concurrent appends on one task serialize and the second writer
+// observes the first writer's event before deciding; on sqlite the
+// store runs a single writer connection per process (in-process
+// transactions fully serialize) and WAL snapshot conflicts surface
+// cross-process as errors, never as a silent second event for one
+// execution. No process-level mutex is claimed to protect cross-process
+// writers - the transaction is the boundary.
+func (l *Ledger) AppendSkillRunOnce(ctx context.Context, taskID, actor string, p SkillRunPayload) (int64, bool, error) {
+	if p.ExecutionID == "" {
+		return 0, false, errors.New("task: AppendSkillRunOnce requires an execution id")
+	}
+	var seq int64
+	var reused bool
+	err := l.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if l.db.Driver == "postgres" {
+			var id string
+			if err := tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id = $1 FOR UPDATE`, taskID).Scan(&id); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("task %s not found", taskID)
+				}
+				return err
+			}
+		}
+		type skillRunAnchor struct {
+			seq   int64
+			actor string
+			p     SkillRunPayload
+		}
+		rows, err := tx.QueryContext(ctx, l.db.Rebind(`
+			SELECT seq, actor, payload FROM task_events
+			WHERE task_id = $1 AND type = $2 ORDER BY seq`), taskID, EventSkillRun)
+		if err != nil {
+			return err
+		}
+		var anchors []skillRunAnchor
+		for rows.Next() {
+			var a skillRunAnchor
+			var payload string
+			if err := rows.Scan(&a.seq, &a.actor, &payload); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if json.Unmarshal([]byte(payload), &a.p) != nil {
+				continue // unparseable payload: no comparable anchor
+			}
+			anchors = append(anchors, a)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+		for _, a := range anchors {
+			if !sameSkillRunExecution(a.p, p) {
+				continue
+			}
+			if a.actor != actor || !sameSkillRunContent(a.p, p) {
+				return fmt.Errorf("skill_run execution %s on task %s (seq %d): %w",
+					p.ExecutionID, taskID, a.seq, ErrSkillRunConflict)
+			}
+			if !reused || a.seq > seq {
+				seq, reused = a.seq, true
+			}
+		}
+		if reused {
+			return nil
+		}
+		seq, err = l.appendTxSeq(ctx, tx, taskID, EventSkillRun, actor, p)
+		return err
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return seq, reused, nil
+}
+
 // SetStatus is the single path for status changes: validates the
 // transition, updates the row, appends the status_change event, same tx.
 func (l *Ledger) SetStatus(ctx context.Context, taskID, to, actor, reason string) error {
