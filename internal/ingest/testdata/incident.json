@@ -1,0 +1,18 @@
+{
+  "id": "INC-2041",
+  "title": "Postgres connection pool exhausted",
+  "status": "resolved",
+  "severity": "sev2",
+  "summary": "The primary database ran out of client connections during the deploy.",
+  "impact": "API returned 5xx for 8 minutes.",
+  "root_cause": "A leaked transaction held connections open.",
+  "started_at": "2026-08-14T14:02:00Z",
+  "resolved_at": "2026-08-14T14:10:00Z",
+  "timeline": [
+    {"time": "2026-08-14T14:02:00Z", "event": "Alerts fired on connection saturation."},
+    {"time": "2026-08-14T14:10:00Z", "event": "Pool recovered after restart."}
+  ],
+  "action_items": [
+    {"description": "Add connection leak detection", "owner": "dba-team"}
+  ]
+}

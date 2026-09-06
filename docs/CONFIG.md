@@ -34,6 +34,7 @@ defaults. Validation runs at load: bad values refuse to boot.
 | credentials | `PUNK_CREDENTIALS` | `~/.punk/credentials.json` | file `punk login` writes (mode 0600); override the path, not the file's role |
 | server URL | `PUNK_URL` | - | server base URL; flag > this env > credentials file > `http://localhost:9090` |
 | API key | `PUNK_API_KEY` | - | bearer token; flag/env wins over the credentials file |
+| PDF extractor adapter | `PUNK_INGEST_PDF_ADAPTER` | empty | command `punk ingest` runs for `application/pdf` (flag `--pdf-adapter` wins); empty = PDF unsupported, all other loaders work |
 | request headers | - | - | the MCP server reads `X-Punk-Namespace` and `X-Punk-Agent` from clients; `X-Punk-Subject` is set by the auth middleware from the verified API key and any client-supplied value is deleted |
 | `ai.embeddings.max_input_tokens` | - | `0` | model input window in tokens; 0 = unknown (diagnose skips oversize accounting) |
 | `budgets.global_daily_usd` | - | `0` | burn-rate projection alerts; 0 disables |
@@ -53,6 +54,7 @@ punk apikey revoke --name ci
 punk backup --out snap.db        # sqlite VACUUM INTO snapshot
 punk export --ns repo-main > m.jsonl  # region memory, derived data
 punk import --ns repo-main < m.jsonl  # idempotent restore
+punk ingest --ns repo-main --prefix /docs/rb runbook.md  # document with source provenance; repeat runs rewrite only changed chunks
 punk region branch --ns repo-main --dir /tmp/exp --branch exp-1
 punk replay --task <id> --k 3    # golden-ledger eval, pass^k
 punk embed-backfill --ns <ns>    # embed pre-existing facts
@@ -60,6 +62,38 @@ punk topo import --file catalog.yaml   # import a Backstage catalog
 punk skill install --agent <name>      # punk-memory and punk-plan skills for an agent (install|print|paths; --name picks one)
 kill -HUP <pid>                       # force spec reload (watcher also does this)
 ```
+
+## Document ingest
+
+`punk ingest --ns NS --prefix P [flags] <file>` loads one document into
+memory with source provenance: every chunk records the source id/URI,
+revision, media type, section name/page and byte offsets, and repeated
+ingestion rewrites only changed chunks (I01 delta ingest). There is no
+REST surface for this; MCP `remember_document` remains the agent path.
+
+Loaders: `text`, `markdown` (sections split at ATX headings), `html`
+(document-order text, sections at h1/h2), `incident-json` (strictly
+validated incident object: `id`, `title`, `status`, `severity`,
+`summary`, `impact`, `root_cause`, `started_at`, `resolved_at`,
+`timeline: [{time, event}]`, `action_items: [{description, owner}]` -
+each populated field becomes a section named after its JSON field).
+Detection order: `--format`, file extension, served content type, then
+byte signature; undetectable input is an error, not a guess. Flags:
+`--url URL` (explicit remote fetch; private/loopback/link-local targets
+are refused by the SSRF guard, proxy env vars are ignored, redirects
+re-validate), `--source-id`, `--revision`, `--author`, `--max-bytes`
+(16 MiB default), `--timeout` (30s default). A whitespace-only input is
+refused so an empty file can never wipe a prefix's chunks.
+
+PDF is delegated to an optional external adapter - punk does not bundle
+a PDF/OCR stack. Adapter contract: punk writes the PDF to a temp file
+and runs `<adapter...> <file>` under the timeout; on exit 0 stdout must
+be one JSON object
+`{"revision":"...", "sections":[{"name":"...", "page":1, "text":"..."}]}`
+(`revision`, `name`, `page` optional). stdout is capped at
+`--max-bytes`, stderr (bounded) and the exit status appear in errors,
+and the timeout kills the process. No adapter, a nonzero exit or
+unparsable/empty output fails the ingest before any write.
 
 ## Deployment shapes
 

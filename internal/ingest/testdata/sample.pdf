@@ -1,0 +1,4 @@
+%PDF-1.4
+% fake fixture: byte-level extraction is the external adapter's job,
+% the loader contract only checks the magic and hands bytes over.
+%%EOF

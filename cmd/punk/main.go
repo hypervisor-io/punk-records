@@ -34,6 +34,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/cost"
 	"github.com/hypervisor-io/punk-records/internal/embedlocal"
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
+	"github.com/hypervisor-io/punk-records/internal/ingest"
 	"github.com/hypervisor-io/punk-records/internal/itbench"
 	"github.com/hypervisor-io/punk-records/internal/llm"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -93,6 +94,8 @@ Usage:
                       --report <path> writes the versioned baseline+ablation report (run manifests, per-query rankings) for --file scenarios
   punk      export    write a namespace's memory history as JSONL to stdout
   punk      import    read a JSONL export from stdin into a namespace
+  punk      ingest    load a document file or explicit URL into memory with source provenance (ingest --ns NS --prefix P [flags] <file>)
+                      loaders: text, markdown, html, incident-json; pdf via an external adapter (--pdf-adapter, docs/CONFIG.md#document-ingest)
   punk      seed      seed memory from a code-knowledge tool (seed rinnegan [--ns NS] [--dir DIR] < map.json)
   punk      skills    propose SKILL.md drafts mined from completed task ledgers (propose --min-count N --out DIR); distill a namespace's memory into proposed CLAUDE.md additions (insights --ns NS --out DIR)
   punk      hook      run as an agent hook: forward stdin payload, inject context on SessionStart (--url URL, --from AGENT)
@@ -127,6 +130,8 @@ func run(args []string) error {
 		return cmdExport(args[1:])
 	case "import":
 		return cmdImport(args[1:])
+	case "ingest":
+		return cmdIngest(args[1:])
 	case "seed":
 		return cmdSeed(args[1:])
 	case "apikey":
@@ -1357,6 +1362,67 @@ func cmdImport(args []string) error {
 		return err
 	}
 	fmt.Printf("imported %d, skipped %d, blocked %d\n", imported, skipped, blocked)
+	return nil
+}
+
+// cmdIngest loads one document file (or an explicit --url fetch) into
+// memory through the internal/ingest loaders and I01's source-aware
+// write path: unchanged chunks are never rewritten, every chunk carries
+// source provenance, and the namespace's write-time defense applies.
+// PDF extraction needs an external adapter (--pdf-adapter or
+// PUNK_INGEST_PDF_ADAPTER); without one a PDF ingest fails with the
+// configuration instructions and writes nothing.
+func cmdIngest(args []string) error {
+	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
+	cfgPath := fs.String("config", "config.yaml", "path to config file")
+	ns := fs.String("ns", "", "namespace to ingest into (required)")
+	prefix := fs.String("prefix", "", "key prefix the document's chunks live under (required)")
+	urlFlag := fs.String("url", "", "fetch the document from this URL instead of a file (explicit remote fetch; private/loopback/link-local targets are refused)")
+	format := fs.String("format", "", "force a loader: text|markdown|html|incident-json|pdf (default: detect from name, content type or bytes)")
+	sourceID := fs.String("source-id", "", "stable source identity owning the chunks (default: the file/URL itself)")
+	revision := fs.String("revision", "", "source revision label (git SHA, etag)")
+	author := fs.String("author", "punk-ingest", "writer recorded on the chunks")
+	maxBytes := fs.Int64("max-bytes", ingest.DefaultMaxBytes, "size cap on input and adapter output")
+	timeout := fs.Duration("timeout", ingest.DefaultTimeout, "time cap on loading, fetching and external adapters")
+	pdfAdapter := fs.String("pdf-adapter", os.Getenv("PUNK_INGEST_PDF_ADAPTER"), "external PDF extractor command (adapter contract: docs/CONFIG.md#document-ingest)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pos := fs.Args()
+	if *ns == "" {
+		return errors.New("ingest: --ns is required")
+	}
+	if *prefix == "" {
+		return errors.New("ingest: --prefix is required")
+	}
+	switch {
+	case *urlFlag != "" && len(pos) > 0:
+		return errors.New("ingest: pass a file path or --url, not both")
+	case *urlFlag == "" && len(pos) == 0:
+		return errors.New("usage: punk ingest --ns NS --prefix P [flags] <file>  (or --url URL)")
+	case len(pos) > 1:
+		return fmt.Errorf("ingest: one file at a time, got %d paths", len(pos))
+	}
+	spec := ingest.Spec{
+		URL: *urlFlag, Format: *format, SourceID: *sourceID,
+		Revision: *revision, MaxBytes: *maxBytes, Timeout: *timeout,
+	}
+	if len(pos) == 1 {
+		spec.Path = pos[0]
+	}
+	if *pdfAdapter != "" {
+		spec.PDFAdapter = strings.Fields(*pdfAdapter)
+	}
+	mem, closeDB, err := openMemory(*cfgPath)
+	if err != nil {
+		return err
+	}
+	defer closeDB()
+	w, u, r, b, err := ingest.Ingest(context.Background(), mem, *ns, *prefix, *author, spec)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("ingested %s: %d written, %d unchanged, %d removed, %d blocked\n", *prefix, w, u, r, b)
 	return nil
 }
 
