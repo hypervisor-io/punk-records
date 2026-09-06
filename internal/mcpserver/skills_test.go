@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 )
 
@@ -160,6 +161,58 @@ func TestSkillToolsEnforceNamespaceGrant(t *testing.T) {
 	}
 	if out, denied, _ := call(t, cs, "load_skill", map[string]any{"namespace": "ns-a", "name": "nope", "version": "1"}); denied {
 		t.Fatalf("load_skill on ns-a: %s", out)
+	}
+}
+
+// TestSkillToolsEmptyNamespaceRequiresIndexGrant pins finding I1: the
+// empty-namespace branch in skillToolNamespace targets
+// Deps.SkillIndexNamespace() (agent-default in this rig) and authorizes
+// there, so a subject with grants elsewhere (alice: ns-a read+write
+// only, nothing on agent-default) must still be denied when it omits
+// namespace - the same "namespace grant required" shape as an explicit
+// ungranted namespace, not a silent fallback that skips authorization.
+func TestSkillToolsEmptyNamespaceRequiresIndexGrant(t *testing.T) {
+	g := mcpAuthzRigNew(t, true)
+	cs := g.connect(t)
+
+	if out, denied, _ := call(t, cs, "search_skills", map[string]any{"query": "anything"}); !denied {
+		t.Fatalf("empty-namespace search_skills without an index grant: denied=%v out=%s", denied, out)
+	}
+	if out, denied, _ := call(t, cs, "load_skill", map[string]any{"name": "anything", "version": "1"}); !denied {
+		t.Fatalf("empty-namespace load_skill without an index grant: denied=%v out=%s", denied, out)
+	}
+}
+
+// TestSkillToolsEmptyNamespaceGrantIgnoresRoots pins the other half of
+// I1: once the subject holds read on the skill index namespace, an
+// empty-namespace call succeeds regardless of what the client's
+// workspace roots would otherwise resolve to - the roots-derived
+// namespace ("agent-ns-b" here) carries no grant at all, proving
+// skillToolNamespace never routes an omitted namespace through
+// roots-based resolution the way every other tool does.
+func TestSkillToolsEmptyNamespaceGrantIgnoresRoots(t *testing.T) {
+	g := mcpAuthzRigNew(t, true)
+	ctx := context.Background()
+	if err := g.az.Grant(ctx, "alice", "agent-default", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.mem.IndexSkill(ctx, "agent-default", memory.SkillMeta{
+		Name: "index-visible-procedure", Version: "1.0.0",
+		Description: "found via the skill index grant",
+		Source:      memory.SkillSourceAuthored, Active: true,
+	}, "index body"); err != nil {
+		t.Fatal(err)
+	}
+	// Roots resolve to agent-ns-b (see api.AgentNamespace), a namespace
+	// alice holds no grant on whatsoever.
+	cs := g.connectOpts(t, nil, []string{"file:///work/ns-b"}, nil)
+
+	out, denied, _ := call(t, cs, "search_skills", map[string]any{"query": "index grant"})
+	if denied {
+		t.Fatalf("empty-namespace search_skills with an index grant was denied: %s", out)
+	}
+	if !strings.Contains(out, "index-visible-procedure") {
+		t.Fatalf("empty-namespace search_skills missed the granted index namespace: %s", out)
 	}
 }
 

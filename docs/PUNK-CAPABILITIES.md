@@ -98,7 +98,7 @@ A database specialist and procedures are included as a starting pack; other spec
 - Configure per-namespace secret detection with redaction or rejection modes.
 - **Integrated:** explicit namespace read/write/admin grants tied to verified identities, with enforcement across credential-verified HTTP access paths, including HTTP MCP, when enabled.
 
-These controls depend on configuration. Namespace authorization enforcement is opt-in; a namespace name alone is not an access-control boundary. Local CLI and stdio MCP access use the local operating-system authority. Data sent to a configured external model, embedding service, or tool follows that service's deployment and data-handling arrangement.
+These controls depend on configuration. Namespace authorization enforcement is opt-in; a namespace name alone is not an access-control boundary. Local CLI and stdio MCP access use the local operating-system authority. Data sent to a configured external model, embedding service, or tool follows that service's deployment and data-handling arrangement. Under `authz.enforcement: deny`, calling `search_skills` or `load_skill` with an omitted namespace requires a read grant on the skill index namespace (`SkillNamespace`, falling back to `DefaultNamespace`, default `agent-default`), independent of any grant on the caller's workspace-root namespace.
 
 ## 8. Consolidation and evidence-grounded answers — Core; model-dependent
 

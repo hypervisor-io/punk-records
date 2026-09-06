@@ -43,7 +43,8 @@ func TestAPIKeySubjectDefaultsToName(t *testing.T) {
 	}{
 		{"ci", "", "ci"},
 		{"ci", "alice", "alice"},
-		{"ci", "  ", "ci"}, // blank is as good as empty
+		{"ci", "  ", "ci"},   // blank is as good as empty
+		{"  ci  ", "", "ci"}, // padded name falls back trimmed
 	}
 	for _, c := range cases {
 		if got := apiKeySubject(c.name, c.subject); got != c.want {

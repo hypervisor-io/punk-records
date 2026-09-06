@@ -76,6 +76,7 @@ Usage:
   punk      validate  validate agent/skill/policy specs in a directory
   punk      apikey    manage API keys (create|revoke --name <name>)
   punk      authz     manage namespace grants (grant|revoke|list --subject S [--namespace N --op read|write|admin])
+                      under enforcement: deny, search_skills/load_skill with no namespace argument need a read grant on the skill index namespace (default agent-default)
   punk      mcp       serve the MCP interface on stdio
   punk      backup    snapshot the SQLite database (--out file)
   punk      embed-backfill  embed facts written before embeddings were enabled (--ns) [--force]
@@ -1517,7 +1518,7 @@ func cmdSeed(args []string) error {
 // ungrantable. An explicit, non-blank subject always wins.
 func apiKeySubject(name, subject string) string {
 	if strings.TrimSpace(subject) == "" {
-		return name
+		return strings.TrimSpace(name)
 	}
 	return subject
 }
@@ -1549,10 +1550,11 @@ func cmdAPIKey(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 	keys := api.NewKeys(db, nil)
+	effectiveName := strings.TrimSpace(*name)
 	switch action {
 	case "create":
 		effectiveSubject := apiKeySubject(*name, *subject)
-		token, err := keys.Create(context.Background(), *name, effectiveSubject)
+		token, err := keys.Create(context.Background(), effectiveName, effectiveSubject)
 		if err != nil {
 			return err
 		}
@@ -1563,7 +1565,7 @@ func cmdAPIKey(args []string) error {
 		}
 		return nil
 	case "revoke":
-		return keys.Revoke(context.Background(), *name)
+		return keys.Revoke(context.Background(), effectiveName)
 	default:
 		return fmt.Errorf("apikey: want create or revoke, got %q", action)
 	}

@@ -432,13 +432,20 @@ const judgeSystemPrompt = `You grade one benchmark answer. Reply with ONLY a JSO
 
 // stripJSONFence strips an optional Markdown code fence around a judge
 // reply (mirrors the fence-strip in cmd/punk/main.go's obsSummarizer and
-// sibling LLM adapters): find the first "```", drop it and an optional
-// "json" language tag, cut at the next "```", then trim. A reply with no
-// fence passes through unchanged (after trimming).
+// sibling LLM adapters): when the trimmed content starts with "```",
+// drop it and an optional "json" language tag, cut at the next "```",
+// then trim. Stripping only triggers on a leading fence, not merely the
+// presence of "```" anywhere in the string - a bare JSON payload whose
+// justification text happens to contain a literal "```" must not be
+// mangled. This also means prose preceding an opening fence (e.g. "Here
+// you go:\n```json\n...") is deliberately left unstripped: guessing
+// where the real payload starts inside free-form prose is out of scope
+// here, so that shape passes through unchanged and fails to parse as
+// JSON downstream, same as any other malformed reply.
 func stripJSONFence(s string) string {
 	s = strings.TrimSpace(s)
-	if i := strings.Index(s, "```"); i >= 0 {
-		s = s[i+3:]
+	if strings.HasPrefix(s, "```") {
+		s = s[3:]
 		s = strings.TrimPrefix(s, "json")
 		if j := strings.Index(s, "```"); j >= 0 {
 			s = s[:j]

@@ -436,11 +436,14 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 	// path below and handleAgentTurnContext also write per-session
 	// bookkeeping (recordInjectedIDs). A read-only subject must not
 	// cause that write; the context itself is still returned either
-	// way, only the bookkeeping is skipped for them.
-	canWrite := s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite)
+	// way, only the bookkeeping is skipped for them. The write grant is
+	// costly to check (a query per request), so it is computed lazily,
+	// only immediately before a branch that would actually write - never
+	// eagerly here, which would pay for it even on the mode=turn early
+	// returns below that touch no bookkeeping at all.
 	sid := sanitizeID(r.URL.Query().Get("sid"))
 	if r.URL.Query().Get("mode") == "turn" {
-		s.handleAgentTurnContext(w, r, ns, sid, canWrite)
+		s.handleAgentTurnContext(w, r, ns, sid)
 		return
 	}
 	maxTokens := queryMaxTokens(r)
@@ -636,7 +639,7 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 	// the hook told us its session id, remember which fact IDs this block
 	// carried so mode=turn never re-injects them. Merging with any prior
 	// record keeps resumed sessions (SessionStart source=resume) additive.
-	if canWrite && sid != "" && len(ids) > 0 && context != "" {
+	if sid != "" && len(ids) > 0 && context != "" && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
 		s.recordInjectedIDs(r.Context(), ns, sid, s.readInjectedIDs(r.Context(), ns, sid), ids)
 	}
 
@@ -657,7 +660,7 @@ const agentTurnContextHeader = "## Relevant memory\n"
 // A disabled feature (turnTokens 0), an empty q, or zero surviving facts
 // all answer an empty Context so hook clients skip injection; only a
 // genuine store failure is a 500.
-func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, ns, sid string, canWrite bool) {
+func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, ns, sid string) {
 	q := r.URL.Query().Get("q")
 	if s.turnTokens <= 0 || q == "" {
 		writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: "", FactIDs: []string{}})
@@ -710,7 +713,7 @@ func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, 
 	context := b.String()
 	if len(facts) == 0 {
 		context = ""
-	} else if canWrite && sid != "" {
+	} else if sid != "" && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
 		s.recordInjectedIDs(r.Context(), ns, sid, seen, ids)
 	}
 	writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: context, FactIDs: ids})

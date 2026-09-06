@@ -157,6 +157,14 @@ func (s *Store) ensureNamespace(ctx context.Context, tx *sql.Tx, name string) (i
 	// on the first ':' (see internal/api splitBusKey): a namespace
 	// containing ':' would be indistinguishable on the bus from a
 	// different, shorter namespace sharing its prefix (task A02 review).
+	// This ban only prevents such a namespace from ever being created;
+	// writePrepare's defense-audit outbox publish can still enqueue a
+	// "ns:key" bus event for a blocked write before ensureNamespace ever
+	// runs for ns. Both SSE consumers additionally drop those events:
+	// handleMemoryEvents filters on e.Kind != "memory" (a defense event
+	// never matches), and handleBrainEvents applies its normal allowNS
+	// read check to the split namespace, so a subject without read on ns
+	// never sees the event either.
 	if strings.Contains(name, ":") {
 		return 0, fmt.Errorf("memory: namespace %q must not contain ':'", name)
 	}

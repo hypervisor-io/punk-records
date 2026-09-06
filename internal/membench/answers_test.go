@@ -668,6 +668,11 @@ func TestLLMJudgeParsesVerdictAndRecordsTokens(t *testing.T) {
 // TestStripJSONFence pins the unexported fence-strip helper directly:
 // a fenced ```json block, a fenced block with no language tag, and a
 // bare (unfenced) body all reduce to the same trimmed JSON payload.
+// Stripping is guarded on the trimmed content actually starting with
+// "```" (not merely containing it anywhere): a bare JSON payload whose
+// justification string happens to contain a literal "```" must not be
+// mangled, and prose preceding an opening fence is deliberately left
+// unstripped too, rather than guessing where the real payload starts.
 func TestStripJSONFence(t *testing.T) {
 	cases := []struct {
 		name, in, want string
@@ -676,6 +681,16 @@ func TestStripJSONFence(t *testing.T) {
 		{"fenced without language tag", "```\n{\"a\":1}\n```", `{"a":1}`},
 		{"bare json passes through", `{"a":1}`, `{"a":1}`},
 		{"surrounding whitespace trimmed", "  \n```json\n{\"a\":1}\n```\n  ", `{"a":1}`},
+		{
+			"bare json with backticks inside a string is not mangled",
+			`{"a":1,"justification":"the code used ` + "```" + ` fences"}`,
+			`{"a":1,"justification":"the code used ` + "```" + ` fences"}`,
+		},
+		{
+			"prose before an opening fence is not stripped",
+			"Here you go:\n```json\n{\"a\":1}\n```",
+			"Here you go:\n```json\n{\"a\":1}\n```",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
