@@ -17,6 +17,23 @@ func (e errExtractor) Extract(_ context.Context, _ string) ([]string, error) {
 	return nil, e.err
 }
 
+// countingStructuredFake implements StructuredEntityExtractor and
+// records the size of every ExtractStructured call, in order, so a test
+// can pin exactly how recovery chunked its batches (see structuredFake
+// in entity_typed_test.go for the same shape without the size history).
+type countingStructuredFake struct {
+	calls []int
+}
+
+func (f *countingStructuredFake) Extract(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (f *countingStructuredFake) ExtractStructured(_ context.Context, sources []EntitySource) ([]ExtractedEntity, error) {
+	f.calls = append(f.calls, len(sources))
+	return nil, nil
+}
+
 func testLog() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // findRun returns the single run matching stage+key, or fails.
@@ -221,6 +238,42 @@ func TestPipelineEntityCrashBeforeAckRetry(t *testing.T) {
 	}
 	if mentions != 2 {
 		t.Fatalf("mentions edges = %d, want 2", mentions)
+	}
+}
+
+// TestRecoverPipelineRunsChunksEntityBatch is the 2c red proof: recovery
+// used to hand every pending entity key of a namespace to a single
+// flushEntityStage call, so the model saw one unbounded batch instead of
+// the entityBatchKeys-sized batches the normal live path always
+// produces. 20 stale (crashed, never acknowledged) entity runs in one
+// namespace must recover as three batches of 8, 8 and 4.
+func TestRecoverPipelineRunsChunksEntityBatch(t *testing.T) {
+	s, _, clk := newTest(t)
+	fake := &countingStructuredFake{}
+	s.SetEntityExtractor(fake)
+	ctx := t.Context()
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("/k%02d", i)
+		if _, err := s.Write(ctx, WriteInput{Namespace: "ns", Key: key, Body: fmt.Sprintf("fact %d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, claimed, err := s.claimPipelineWork(ctx, "ns", StageEntities, entitiesStageVersion, key); err != nil || !claimed {
+			t.Fatalf("claim %s: claimed %v err %v", key, claimed, err)
+		}
+		// CRASH: none of these runs are ever finished, so they stay
+		// "running" and become recoverable once their lease expires.
+	}
+
+	clk.Set(time.Date(2026, 7, 6, 1, 0, 0, 0, time.UTC)) // past pipelineRunLease
+	s.recoverPipelineRuns(ctx, testLog())
+
+	if len(fake.calls) != 3 {
+		t.Fatalf("ExtractStructured calls = %d %v, want 3 batches", len(fake.calls), fake.calls)
+	}
+	if fake.calls[0] != 8 || fake.calls[1] != 8 || fake.calls[2] != 4 {
+		t.Fatalf("batch sizes = %v, want [8 8 4]", fake.calls)
 	}
 }
 

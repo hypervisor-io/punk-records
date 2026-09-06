@@ -590,15 +590,27 @@ func (s *Store) ListSkills(ctx context.Context, ns string) ([]SkillMeta, error) 
 // deactivated ones. Lifecycle sync (skillmine.SyncBundle/SyncDrafts)
 // sweeps against this complete view so an inactive skill whose source
 // vanished is still unpublished rather than lingering forever.
+//
+// Recall(ns, "/skills/", 0) caps at 1000 rows, so it would silently
+// drop versions past that count; ListKeys has no such cap, and
+// liveByKeys is paged in bounded batches (the liveChunkFacts pattern in
+// document_source.go), so this stays complete above a thousand
+// versions.
 func (s *Store) ListSkillsAll(ctx context.Context, ns string) ([]SkillMeta, error) {
-	facts, err := s.Recall(ctx, ns, "/skills/", 0)
+	keys, err := s.ListKeys(ctx, ns, "/skills/")
 	if err != nil {
 		return nil, err
 	}
 	out := []SkillMeta{}
-	for _, f := range facts {
-		if m, ok := skillMetaFromFact(f); ok {
-			out = append(out, m)
+	for i := 0; i < len(keys); i += 500 {
+		facts, err := s.liveByKeys(ctx, ns, keys[i:min(i+500, len(keys))])
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range facts {
+			if m, ok := skillMetaFromFact(f); ok {
+				out = append(out, m)
+			}
 		}
 	}
 	return out, nil

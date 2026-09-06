@@ -86,6 +86,54 @@ func TestSearchSkillsToolMetadataOnly(t *testing.T) {
 	}
 }
 
+// TestSearchSkillsDefaultsToSkillIndexNamespace is the 2b red proof:
+// the skill catalog is published into Deps.SkillIndexNamespace()
+// (agent-default here), but a session's roots resolve omitted-namespace
+// calls to the caller's workspace (agent-x). Before the fix, an omitted
+// namespace routed through the same roots resolution as every other
+// tool and found nothing; search_skills and load_skill must instead
+// target the skill index namespace by default, while an explicit
+// namespace argument keeps the normal roots-based resolution.
+func TestSearchSkillsDefaultsToSkillIndexNamespace(t *testing.T) {
+	cs, mem := sessionWithStore(t, func(c *mcp.Client) {
+		c.AddRoots(&mcp.Root{URI: "file:///work/x", Name: "ws"})
+	})
+	ctx := context.Background()
+	meta := memory.SkillMeta{
+		Name:        "index-default-skill",
+		Version:     "1.0.0",
+		Description: "lives in the skill index namespace, not the caller's workspace root",
+		Source:      memory.SkillSourceAuthored,
+		Active:      true,
+	}
+	if err := mem.IndexSkill(ctx, "agent-default", meta, "the procedure body"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Confirm the session's roots really do resolve to agent-x, so a
+	// miss below can only be explained by the namespace routing.
+	whoamiOut := callTool(t, cs, "whoami", map[string]any{})
+	if !strings.Contains(whoamiOut, `"namespace":"agent-x"`) {
+		t.Fatalf("whoami = %s, want roots resolving to agent-x", whoamiOut)
+	}
+
+	out := callTool(t, cs, "search_skills", map[string]any{"query": "skill index namespace"})
+	if !strings.Contains(out, meta.Name) {
+		t.Fatalf("empty-namespace search_skills missed the skill index namespace: %s", out)
+	}
+	loaded := callTool(t, cs, "load_skill", map[string]any{"name": meta.Name, "version": meta.Version})
+	if !strings.Contains(loaded, "the procedure body") {
+		t.Fatalf("empty-namespace load_skill missed the skill index namespace: %s", loaded)
+	}
+
+	// An explicit namespace still resolves normally (here: agent-x, which
+	// never had the skill indexed) and must not fall back to the index.
+	out = callTool(t, cs, "search_skills", map[string]any{"namespace": "agent-x", "query": "skill index namespace"})
+	if strings.Contains(out, meta.Name) {
+		t.Fatalf("explicit agent-x search_skills leaked the skill index namespace: %s", out)
+	}
+}
+
 func TestSkillToolsEnforceNamespaceGrant(t *testing.T) {
 	g := mcpAuthzRigNew(t, true)
 	ctx := context.Background()

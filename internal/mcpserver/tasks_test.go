@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/bus"
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -139,4 +140,25 @@ func TestAwaitTasksWakesOnStatusWrite(t *testing.T) {
 
 func memoryWriteForTest(ns, key, body string) memory.WriteInput {
 	return memory.WriteInput{Namespace: ns, Key: key, Body: body, Writer: "test"}
+}
+
+// TestAwaitTasksRechecksAuthzAfterWait is the 2a red proof: await_tasks
+// authorizes read once up front, then blocks in taskboard.WaitForChange
+// for up to the timeout. A grant revoked mid-wait must not let the call
+// return a board once the wait unblocks - the namespace read grant is
+// rechecked right after WaitForChange returns, before touch and Build,
+// and its error (no board) wins over whatever the wait produced.
+func TestAwaitTasksRechecksAuthzAfterWait(t *testing.T) {
+	g := mcpAuthzRigNew(t, true)
+	cs := g.connect(t)
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = g.az.Revoke(context.Background(), "alice", "ns-a", authz.OpRead)
+	}()
+
+	out, denied, err := call(t, cs, "await_tasks", map[string]any{"namespace": "ns-a", "timeout_seconds": 1})
+	if !denied {
+		t.Fatalf("await_tasks after mid-wait revoke: denied=%v err=%v out=%s", denied, err, out)
+	}
 }

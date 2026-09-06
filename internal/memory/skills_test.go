@@ -802,3 +802,30 @@ func TestSkillSearchLimitCapped(t *testing.T) {
 		t.Fatalf("list = %d, want every active skill", len(listed))
 	}
 }
+
+// TestListSkillsAllPagesPastRecallCap is the 2d red proof: ListSkillsAll
+// used Recall(ctx, ns, "/skills/", 0), which caps at 1000 rows, so the
+// lifecycle sweep (skillmine's tombstone reconciliation) silently missed
+// every skill version past the first 1000. Indexing 1005 versions must
+// make every one of them visible.
+func TestListSkillsAllPagesPastRecallCap(t *testing.T) {
+	s, _, _ := newTest(t)
+	ctx := context.Background()
+	const n = 1005
+	for i := 0; i < n; i++ {
+		m := SkillMeta{
+			Name:        fmt.Sprintf("cap-skill-%04d", i),
+			Version:     "1",
+			Description: "small body, past the 1000-row recall cap",
+			Source:      SkillSourceAuthored, Active: true,
+		}
+		indexFixture(t, s, "ns", m, "b")
+	}
+	all, err := s.ListSkillsAll(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != n {
+		t.Fatalf("ListSkillsAll = %d, want %d (past the 1000-row Recall cap)", len(all), n)
+	}
+}

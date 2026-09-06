@@ -189,6 +189,12 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}
 			timeout := awaitTimeout(in.TimeoutSeconds)
 			keys := taskboard.WaitForChange(ctx, d.Bus, ns, timeout)
+			// The wait can block up to 300s; the caller's grant may have
+			// been revoked while it slept. Recheck before building the
+			// board so a closed grant returns the deny error, not a board.
+			if err := authorizeNS(ctx, ns, authz.OpRead); err != nil {
+				return nil, awaitOut{}, err
+			}
 			touch(ctx, d, nsr, req, ns, "")
 			b, err := taskboard.Build(ctx, d.Mem, d.Region, ns)
 			if err != nil {

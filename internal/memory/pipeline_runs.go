@@ -536,8 +536,13 @@ func (s *Store) recoverPipelineRuns(ctx context.Context, log *slog.Logger) {
 	for _, w := range entityWork {
 		byNs[w.ns] = append(byNs[w.ns], w.key)
 	}
+	// Chunk at entityBatchKeys so recovery never hands the extractor a
+	// larger batch than the normal live path ever produces (RunEnricher
+	// flushes as soon as pending keys reach entityBatchKeys).
 	for ns, keys := range byNs {
-		s.flushEntityStage(ctx, ns, keys, log)
+		for i := 0; i < len(keys); i += entityBatchKeys {
+			s.flushEntityStage(ctx, ns, keys[i:min(i+entityBatchKeys, len(keys))], log)
+		}
 	}
 }
 

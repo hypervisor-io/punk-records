@@ -54,7 +54,11 @@ type Deps struct {
 // ingest) is published into and that search_skills/load_skill read by
 // default: SkillNamespace, then DefaultNamespace, then "agent-default".
 // The mapping is explicit and fixed per server so reload syncs and
-// discovery reads always meet in the same place.
+// discovery reads always meet in the same place. search_skills and
+// load_skill target this namespace directly whenever their namespace
+// argument is omitted, instead of the caller's workspace-root
+// namespace: the catalog lives here regardless of which repo a client
+// has open, so root-based resolution would otherwise miss it.
 func (d Deps) SkillIndexNamespace() string {
 	if d.SkillNamespace != "" {
 		return d.SkillNamespace
@@ -1066,14 +1070,31 @@ type loadSkillOut struct {
 	Body  string           `json:"body"`
 }
 
+// skillToolNamespace resolves the namespace search_skills/load_skill
+// read: an omitted namespace targets Deps.SkillIndexNamespace()
+// directly (see its doc comment) and is authorized there, since that is
+// where the catalog is published regardless of the caller's workspace
+// root; an explicit namespace keeps the normal A02 resolution
+// (explicit > header > roots > default).
+func skillToolNamespace(ctx context.Context, d Deps, nsr *nsResolver, req *mcp.CallToolRequest, explicit string) (string, error) {
+	if strings.TrimSpace(explicit) == "" {
+		ns := d.SkillIndexNamespace()
+		if err := authorizeNS(ctx, ns, authz.OpRead); err != nil {
+			return "", err
+		}
+		return ns, nil
+	}
+	return nsr.resolveAuthed(ctx, req, explicit, authz.OpRead)
+}
+
 // registerSkillTools exposes task S01's procedural-memory tier: scoped
 // discovery over skill metadata (never procedure text) plus on-demand
 // loading of one exact versioned body. Both are namespace reads (A02).
 func registerSkillTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "search_skills",
-		Description: "Discover procedural skills (SKILL.md procedures) by metadata: name, description, declared tools, scope. Hits never contain the procedure itself; load one with load_skill by name and exact version."},
+		Description: "Discover skills (SKILL.md procedures) by metadata: name, description, tools, scope. Hits never contain the procedure; load with load_skill by name and version. Empty namespace = skill index."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in searchSkillsIn) (*mcp.CallToolResult, searchSkillsOut, error) {
-			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			ns, err := skillToolNamespace(ctx, d, nsr, req, in.Namespace)
 			if err != nil {
 				return nil, searchSkillsOut{}, err
 			}
@@ -1084,9 +1105,9 @@ func registerSkillTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			return nil, searchSkillsOut{Skills: trimSkillPayload(skills, skillDiscoveryPayloadBound)}, nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "load_skill",
-		Description: "Load one skill's exact versioned procedure body on demand, after search_skills identified it. Inactive and ungranted skills refuse to load."},
+		Description: "Load one skill's exact versioned procedure body, found via search_skills. Inactive and ungranted skills refuse to load. Empty namespace = skill index."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in loadSkillIn) (*mcp.CallToolResult, loadSkillOut, error) {
-			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			ns, err := skillToolNamespace(ctx, d, nsr, req, in.Namespace)
 			if err != nil {
 				return nil, loadSkillOut{}, err
 			}
