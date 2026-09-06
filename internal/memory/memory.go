@@ -202,6 +202,52 @@ func (s *Store) writeNoOutbox(ctx context.Context, in WriteInput) (*Fact, error)
 }
 
 func (s *Store) write(ctx context.Context, in WriteInput, outbox bool) (*Fact, error) {
+	p, err := s.writePrepare(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	deduped := false
+	err = s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		d, err := s.writeTx(ctx, tx, p, outbox)
+		deduped = d
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if deduped {
+		// return the existing live fact rather than a phantom new one
+		facts, rerr := s.Recall(ctx, p.in.Namespace, p.in.Key, 1)
+		if rerr == nil && len(facts) == 1 {
+			return &facts[0], nil
+		}
+	}
+	return p.fact, nil
+}
+
+// writePlan is everything write's transaction needs that can be computed
+// without the transaction: the (possibly scrubbed) input, the fact row,
+// marshaled attributes, the write-time embedding, and the content hash.
+// Stage applies precompute one per derived write so their fence
+// transaction never holds a connection across a model call (the same
+// reason links.go embeds before its tx).
+type writePlan struct {
+	in          WriteInput
+	fact        *Fact
+	attrsJSON   string
+	embedded    []byte
+	hash        string
+	taskID      any
+	expires     any
+	auditLabels []string
+	auditFPs    []string
+}
+
+// writePrepare validates a write and precomputes its plan: key
+// validation, the defense scrub, attribute marshaling, the fact row, and
+// the embedding. The block defense mode fails here, before any
+// transaction opens, exactly as write always has.
+func (s *Store) writePrepare(ctx context.Context, in WriteInput) (*writePlan, error) {
 	if err := ValidateKey(in.Key); err != nil {
 		return nil, err
 	}
@@ -259,86 +305,108 @@ func (s *Store) write(ctx context.Context, in WriteInput, outbox bool) (*Fact, e
 			embedded = nil
 		}
 	}
-	var taskID, expires any
+	p := &writePlan{
+		in: in, fact: f, attrsJSON: attrsJSON, embedded: embedded,
+		hash: contentHash(in.Key, in.Body, attrsJSON),
+	}
 	if in.TaskID != "" {
-		taskID = in.TaskID
+		p.taskID = in.TaskID
 	}
 	if in.ExpiresAt != nil {
-		expires = store.TimeToDB(*in.ExpiresAt)
+		p.expires = store.TimeToDB(*in.ExpiresAt)
 	}
-	hash := contentHash(in.Key, in.Body, attrsJSON)
-	deduped := false
-	err := s.db.WithTx(ctx, func(tx *sql.Tx) error {
-		nsID, err := s.ensureNamespace(ctx, tx, in.Namespace)
-		if err != nil {
-			return err
-		}
-		// idempotent: if the current live revision has this exact content,
-		// this is a duplicate concurrent write - do nothing but bump
-		// reinforcements (B3: duplicate content is
-		// independent corroboration, not a no-op).
-		var liveID, liveHash, liveAction string
-		herr := tx.QueryRowContext(ctx, s.db.Rebind(`
-			SELECT id, content_hash, action FROM memories
-			WHERE namespace_id = $1 AND key = $2
-			ORDER BY created_at DESC, id DESC LIMIT 1`), nsID, in.Key).Scan(&liveID, &liveHash, &liveAction)
-		if herr == nil && liveHash == hash && liveAction != "tombstone" {
-			deduped = true
-			_, err := tx.ExecContext(ctx, s.db.Rebind(
-				`UPDATE memories SET reinforcements = reinforcements + 1 WHERE id = $1`), liveID)
-			return err
-		}
-		action, err := s.liveAction(ctx, tx, nsID, in.Key)
-		if err != nil {
-			return err
-		}
-		f.Action = action
-		// invalidate the predecessor's validity window
-		if _, err := tx.ExecContext(ctx, s.db.Rebind(`
-			UPDATE memories SET invalid_at = $1
-			WHERE namespace_id = $2 AND key = $3 AND invalid_at IS NULL`),
-			store.TimeToDB(now), nsID, in.Key); err != nil {
-			return fmt.Errorf("invalidate predecessor: %w", err)
-		}
-		_, err = tx.ExecContext(ctx, s.db.Rebind(
-			`INSERT INTO memories (id, namespace_id, key, action, body, attributes, author, created_at,
-			                       writer, task_id, source_ref, confidence, valid_at, expiration_date, embedding, content_hash, importance)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`),
-			f.ID, nsID, in.Key, action, in.Body, attrsJSON, in.Author, store.TimeToDB(now),
-			in.Writer, taskID, in.SourceRef, in.Confidence, store.TimeToDB(now), expires, embedded, hash, in.Importance)
-		if err != nil {
-			return fmt.Errorf("insert memory: %w", err)
-		}
-		if outbox {
-			payload := map[string]any{
-				"namespace": in.Namespace, "key": in.Key, "action": action, "writer": in.Writer,
-			}
-			if st, ok := in.Attributes["state"].(string); ok && st != "" {
-				payload["state"] = st
-			}
-			if err := s.outboxTx(ctx, tx, "memory", in.Namespace+":"+in.Key, payload); err != nil {
-				return err
-			}
-		}
-		if len(auditLabels) > 0 {
-			return s.outboxTx(ctx, tx, "defense", in.Namespace+":"+in.Key, map[string]any{
-				"namespace": in.Namespace, "key": in.Key,
-				"labels": strings.Join(auditLabels, ","), "fingerprints": strings.Join(auditFPs, ","),
-			})
-		}
-		return nil
-	})
+	p.auditLabels, p.auditFPs = auditLabels, auditFPs
+	return p, nil
+}
+
+// writeTx is write's transaction body against a caller-owned
+// transaction: dedup check, predecessor invalidation, the revision
+// insert, and the outbox/audit rows. Fenced stage applies ride their
+// fence transaction through here so a derived entity write commits - or
+// rolls back - atomically with the ownership check.
+func (s *Store) writeTx(ctx context.Context, tx *sql.Tx, p *writePlan, outbox bool) (bool, error) {
+	in := p.in
+	nsID, err := s.ensureNamespace(ctx, tx, in.Namespace)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	if deduped {
-		// return the existing live fact rather than a phantom new one
-		facts, rerr := s.Recall(ctx, in.Namespace, in.Key, 1)
-		if rerr == nil && len(facts) == 1 {
-			return &facts[0], nil
+	// idempotent: if the current live revision has this exact content,
+	// this is a duplicate concurrent write - do nothing but bump
+	// reinforcements (B3: duplicate content is
+	// independent corroboration, not a no-op).
+	var liveID, liveHash, liveAction string
+	herr := tx.QueryRowContext(ctx, s.db.Rebind(`
+		SELECT id, content_hash, action FROM memories
+		WHERE namespace_id = $1 AND key = $2
+		ORDER BY created_at DESC, id DESC LIMIT 1`), nsID, in.Key).Scan(&liveID, &liveHash, &liveAction)
+	if herr == nil && liveHash == p.hash && liveAction != "tombstone" {
+		_, err := tx.ExecContext(ctx, s.db.Rebind(
+			`UPDATE memories SET reinforcements = reinforcements + 1 WHERE id = $1`), liveID)
+		return true, err
+	}
+	action, err := s.liveAction(ctx, tx, nsID, in.Key)
+	if err != nil {
+		return false, err
+	}
+	p.fact.Action = action
+	now := store.TimeToDB(p.fact.CreatedAt)
+	// invalidate the predecessor's validity window
+	if _, err := tx.ExecContext(ctx, s.db.Rebind(`
+		UPDATE memories SET invalid_at = $1
+		WHERE namespace_id = $2 AND key = $3 AND invalid_at IS NULL`),
+		now, nsID, in.Key); err != nil {
+		return false, fmt.Errorf("invalidate predecessor: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, s.db.Rebind(
+		`INSERT INTO memories (id, namespace_id, key, action, body, attributes, author, created_at,
+		                       writer, task_id, source_ref, confidence, valid_at, expiration_date, embedding, content_hash, importance)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`),
+		p.fact.ID, nsID, in.Key, action, in.Body, p.attrsJSON, in.Author, now,
+		in.Writer, p.taskID, in.SourceRef, in.Confidence, now, p.expires, p.embedded, p.hash, in.Importance)
+	if err != nil {
+		return false, fmt.Errorf("insert memory: %w", err)
+	}
+	if outbox {
+		payload := map[string]any{
+			"namespace": in.Namespace, "key": in.Key, "action": action, "writer": in.Writer,
+		}
+		if st, ok := in.Attributes["state"].(string); ok && st != "" {
+			payload["state"] = st
+		}
+		if err := s.outboxTx(ctx, tx, "memory", in.Namespace+":"+in.Key, payload); err != nil {
+			return false, err
 		}
 	}
-	return f, nil
+	if len(p.auditLabels) > 0 {
+		if err := s.outboxTx(ctx, tx, "defense", in.Namespace+":"+in.Key, map[string]any{
+			"namespace": in.Namespace, "key": in.Key,
+			"labels": strings.Join(p.auditLabels, ","), "fingerprints": strings.Join(p.auditFPs, ","),
+		}); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// preserveEntityAttrs overlays enrichment-derived attrs onto a clone of
+// an existing entity fact's attributes: derived keys win (enrichment
+// owns entity_type, mention_count, source_facts, aliases and
+// declared_type), and every other attribute the fact carried - merge
+// undo lineage like G02's merges/merge_base, or any other durable
+// attribute another feature owns - survives the derived revision
+// instead of being dropped by a selective attrs rebuild. Shared by the
+// typed entity apply paths so ordinary enrichment can never erase
+// foreign lineage (the P01 durable path uses it here; the direct typed
+// path adopts the same rule via the G02 lineage work).
+func preserveEntityAttrs(prior, derived map[string]any) map[string]any {
+	out := make(map[string]any, len(prior)+len(derived))
+	for k, v := range prior {
+		out[k] = v
+	}
+	for k, v := range derived {
+		out[k] = v
+	}
+	return out
 }
 
 // TouchAccess bumps access_count for search hits. Best-effort ranking

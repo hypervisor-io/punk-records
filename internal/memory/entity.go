@@ -2,9 +2,11 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/store"
 )
@@ -280,10 +282,23 @@ func (s *Store) enrichEntitiesTyped(ctx context.Context, ns string, live []Fact,
 // Each name cites the exact revision ID of the fact it came from, so
 // fallback provenance is revision-precise like the structured path.
 func (s *Store) enrichEntitiesTypedFallback(ctx context.Context, ns string, live []Fact) (int, error) {
+	ents, err := s.legacyExtractionAsStructured(ctx, live)
+	if err != nil {
+		return 0, err
+	}
+	return s.applyTypedEntities(ctx, ns, s.validateExtracted(ents, live))
+}
+
+// legacyExtractionAsStructured runs the legacy name-only extractor over
+// live and adapts each name to an untyped ExtractedEntity citing the
+// exact revision ID of the fact it came from. Shared by the typed
+// fallback above and the pipeline's entity stage, which needs the same
+// degradation before its fenced apply.
+func (s *Store) legacyExtractionAsStructured(ctx context.Context, live []Fact) ([]ExtractedEntity, error) {
 	var ents []ExtractedEntity
 	lists, err := s.extractNamesBatched(ctx, live)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if lists != nil {
 		for i, f := range live {
@@ -291,18 +306,18 @@ func (s *Store) enrichEntitiesTypedFallback(ctx context.Context, ns string, live
 				ents = append(ents, ExtractedEntity{Name: n, SourceFacts: []string{f.ID}})
 			}
 		}
-	} else {
-		for _, f := range live {
-			names, err := s.entityExtractor.Extract(ctx, f.Body)
-			if err != nil {
-				return 0, err
-			}
-			for _, n := range names {
-				ents = append(ents, ExtractedEntity{Name: n, SourceFacts: []string{f.ID}})
-			}
+		return ents, nil
+	}
+	for _, f := range live {
+		names, err := s.entityExtractor.Extract(ctx, f.Body)
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range names {
+			ents = append(ents, ExtractedEntity{Name: n, SourceFacts: []string{f.ID}})
 		}
 	}
-	return s.applyTypedEntities(ctx, ns, s.validateExtracted(ents, live))
+	return ents, nil
 }
 
 // validateExtracted filters malformed structured results so they never
@@ -753,23 +768,31 @@ func (s *Store) applyEntities(ctx context.Context, ns, key string, names []strin
 // relation is discoverable via Neighbors(key, "out") from either entity
 // (matching similar_to). Both rows carry the same running count.
 func (s *Store) bumpCoOccurs(ctx context.Context, ns, a, b string) error {
-	// now is captured once and reused for created_at and valid_at (same
-	// pattern as AddLinkDescribed), so a freshly-created co_occurs edge's
-	// validity window starts at its creation instant. The DO UPDATE weight
-	// bump is gated on invalid_at IS NULL (upsert-WHERE, standard on both
-	// sqlite and postgres) so a user-closed co_occurs edge stops
-	// accumulating weight instead of drifting while dead; when the guard
-	// fails the row is left untouched, same as ON CONFLICT DO NOTHING.
+	return s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.bumpCoOccursTx(ctx, tx, ns, a, b, s.now())
+	})
+}
+
+// bumpCoOccursTx is bumpCoOccurs against a caller-owned transaction, so
+// a fenced stage apply can ride the same commit as its ownership check.
+// now is captured once by the caller and reused for created_at and
+// valid_at (same pattern as AddLinkDescribed), so a freshly-created
+// co_occurs edge's validity window starts at its creation instant. The
+// DO UPDATE weight bump is gated on invalid_at IS NULL (upsert-WHERE,
+// standard on both sqlite and postgres) so a user-closed co_occurs edge
+// stops accumulating weight instead of drifting while dead; when the
+// guard fails the row is left untouched, same as ON CONFLICT DO NOTHING.
+func (s *Store) bumpCoOccursTx(ctx context.Context, tx *sql.Tx, ns, a, b string, now time.Time) error {
 	q := s.db.Rebind(`
 		INSERT INTO memory_links (namespace, from_key, to_key, link_type, weight, created_at, valid_at)
 		VALUES ($1,$2,$3,'co_occurs',1,$4,$5)
 		ON CONFLICT (namespace, from_key, to_key, link_type)
 		DO UPDATE SET weight = memory_links.weight + 1 WHERE memory_links.invalid_at IS NULL`)
-	now := store.TimeToDB(s.now())
-	if _, err := s.db.ExecContext(ctx, q, ns, a, b, now, now); err != nil {
+	dbNow := store.TimeToDB(now)
+	if _, err := tx.ExecContext(ctx, q, ns, a, b, dbNow, dbNow); err != nil {
 		return fmt.Errorf("bump co_occurs: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, q, ns, b, a, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, q, ns, b, a, dbNow, dbNow); err != nil {
 		return fmt.Errorf("bump co_occurs: %w", err)
 	}
 	return nil

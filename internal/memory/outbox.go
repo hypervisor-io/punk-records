@@ -41,6 +41,12 @@ type OutboxEvent struct {
 // DrainOutbox delivers undelivered rows oldest-first through deliver,
 // marking each delivered on success. Returns the number delivered.
 // A failed delivery stops the batch (retried next tick): ordering holds.
+// Memory events have their durable pipeline work persisted BEFORE the
+// delivery is acknowledged (P01): the bus deliver publishes to is
+// in-memory only, so without that row a crash after the delivered_at
+// mark but before any consumer claimed the work would leave restart
+// recovery with nothing to find. The persisted row, not the ephemeral
+// publish, is the delivery boundary.
 func (s *Store) DrainOutbox(ctx context.Context, limit int, deliver func(OutboxEvent) error) (int, error) {
 	if limit <= 0 {
 		limit = 100
@@ -68,6 +74,9 @@ func (s *Store) DrainOutbox(ctx context.Context, limit int, deliver func(OutboxE
 	}
 	n := 0
 	for _, e := range events {
+		if err := s.persistStageWork(ctx, e); err != nil {
+			return n, err
+		}
 		if err := deliver(e); err != nil {
 			return n, err
 		}
@@ -79,6 +88,28 @@ func (s *Store) DrainOutbox(ctx context.Context, limit int, deliver func(OutboxE
 		n++
 	}
 	return n, nil
+}
+
+// persistStageWork records the durable stage intent for one drained
+// event before its delivery is acknowledged: pending pipeline runs
+// tied to the live source revision and current stage versions for a
+// memory write, or retirement of pending work for a tombstoned key.
+// Non-memory events (defense, task) carry no pipeline stages. An error
+// stops the batch before the deliver and the delivered_at mark, so the
+// event is redelivered next tick rather than acknowledged without its
+// durable work.
+func (s *Store) persistStageWork(ctx context.Context, e OutboxEvent) error {
+	if e.Kind != "memory" {
+		return nil
+	}
+	ns, key := e.Payload["namespace"], e.Payload["key"]
+	if ns == "" || key == "" {
+		return nil
+	}
+	if e.Payload["action"] == "tombstone" {
+		return s.supersedePendingPipelineRuns(ctx, ns, key)
+	}
+	return s.persistPipelineWork(ctx, ns, key)
 }
 
 // RunOutboxTailer polls the outbox and fans events into the bus until

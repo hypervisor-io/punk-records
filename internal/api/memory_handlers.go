@@ -302,3 +302,45 @@ func (s *Server) handleDiagnose(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, d)
 }
+
+// pipelineRunJSON adds a derived duration to the stored run record.
+type pipelineRunJSON struct {
+	memory.PipelineRun
+	DurationMS int64 `json:"duration_ms,omitempty"`
+}
+
+// handlePipelineRuns reports enrichment pipeline runs for a namespace
+// (P01): per (stage, stage_version, source_key, source_revision) work
+// unit the status, attempts, timing and derived-output count. Failures
+// carry only a sanitized error class - raw error text is never stored
+// (see classifyStageError), so this surface cannot leak secrets.
+// Optional filters: ?stage= and ?status=.
+func (s *Server) handlePipelineRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.mem.ListPipelineRuns(r.Context(), chi.URLParam(r, "ns"),
+		r.URL.Query().Get("stage"), r.URL.Query().Get("status"), queryLimit(r))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]pipelineRunJSON, 0, len(runs))
+	for _, run := range runs {
+		j := pipelineRunJSON{PipelineRun: run}
+		if run.StartedAt != nil && run.FinishedAt != nil {
+			j.DurationMS = run.FinishedAt.Sub(*run.StartedAt).Milliseconds()
+		}
+		out = append(out, j)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// MountPipeline registers GET /v1/namespaces/{ns}/pipeline, the P01
+// enrichment status surface. It rides the same authMiddleware as the
+// rest of /v1, so the A01/A02 namespace gate applies (GET requires a
+// read grant on {ns} when enforcement is on). Registration lives here,
+// next to the handler, on the MountUI/MountBrain pattern.
+func (s *Server) MountPipeline() {
+	if s.mem == nil {
+		return
+	}
+	s.mux.With(s.authMiddleware).Get("/v1/namespaces/{ns}/pipeline", s.handlePipelineRuns)
+}

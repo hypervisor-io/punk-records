@@ -9,18 +9,35 @@ import (
 )
 
 // exerciseNamespaceGrants proves migration 0022 up/down on an already
-// migrated store: the grants table works at the tip, one down reverts
-// exactly 0022, and re-up restores it.
+// migrated store: the grants table works, one down from 0022 reverts
+// exactly it, and re-up restores it. Newer migrations (0023+) may sit
+// above it; step down to just above 0022 first.
 func exerciseNamespaceGrants(t *testing.T, d *DB) {
 	t.Helper()
 	ctx := context.Background()
 
-	st, err := d.MigrateStatus(ctx)
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if tip := st[len(st)-1]; tip.Version != 22 || tip.Name != "namespace_grants" {
-		t.Fatalf("migration tip = %04d_%s, want 0022_namespace_grants", tip.Version, tip.Name)
+	for {
+		st, err := d.MigrateStatus(ctx)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		// highest APPLIED version (the tip entry may be unapplied after
+		// a step down)
+		tip := MigrationStatus{}
+		for _, m := range st {
+			if m.Applied {
+				tip = m
+			}
+		}
+		if tip.Version == 22 {
+			break
+		}
+		if tip.Version < 22 {
+			t.Fatalf("0022_namespace_grants not applied (applied tip %04d_%s)", tip.Version, tip.Name)
+		}
+		if _, err := d.MigrateDown(ctx); err != nil {
+			t.Fatalf("step down past %04d_%s: %v", tip.Version, tip.Name, err)
+		}
 	}
 
 	// table is usable: grant, read back, soft-revoke shape

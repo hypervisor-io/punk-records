@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,10 +13,17 @@ import (
 )
 
 // fakeClock ticks one millisecond per call so revision ordering is
-// deterministic without sleeps.
-type fakeClock struct{ t time.Time }
+// deterministic without sleeps. The mutex makes concurrent pipeline
+// stage tests (a fenced transaction in one goroutine, a competing write
+// in another) safe under -race.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
 func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.t = c.t.Add(time.Millisecond)
 	return c.t
 }
@@ -23,7 +31,11 @@ func (c *fakeClock) Now() time.Time {
 // Set jumps the clock to t; the next Now() call ticks one millisecond
 // past it, so tests can place facts at specific past dates while
 // keeping revision ordering deterministic.
-func (c *fakeClock) Set(t time.Time) { c.t = t }
+func (c *fakeClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
 
 func newTest(t *testing.T) (*Store, *store.DB, *fakeClock) {
 	t.Helper()

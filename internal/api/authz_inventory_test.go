@@ -90,6 +90,7 @@ var routePermissionInventory = map[string]string{
 	"POST /v1/namespaces/{ns}/tasks/{id}/status": classNSPath,
 	"GET /v1/namespaces/{ns}/profile":            classNSPath,
 	"GET /v1/namespaces/{ns}/diagnose":           classNSPath,
+	"GET /v1/namespaces/{ns}/pipeline":           classNSPath,
 	"POST /v1/agent/hooks":                       classNSResolved,
 	"GET /v1/agent/context":                      classNSResolved,
 	"GET /v1/agent/namespace":                    classDiagnostic,
@@ -168,6 +169,7 @@ func inventoryServer(t *testing.T, enforce bool) (*Server, *Keys, *authz.Authori
 	s.version = "vtest"
 	s.MountUI()
 	s.MountBrain()
+	s.MountPipeline()
 	s.MountAgentCard("vtest")
 	s.MountMCP(http.NotFoundHandler())
 	return s, keys, az

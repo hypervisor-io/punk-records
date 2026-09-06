@@ -815,6 +815,7 @@ func cmdServe(args []string) error {
 	srv.Ready = db.Ping
 	srv.MountUI()
 	srv.MountBrain()
+	srv.MountPipeline()
 	srv.MountAgentCard(version)
 	srv.MountMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		if r.URL.Query().Get("toolset") == "agent" {
