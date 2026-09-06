@@ -98,3 +98,14 @@ No invented performance percentage or cross-product superiority claim. Fixed fix
 ## Completion boundary
 
 This workstream can deliver reviewed memory improvements while C02 is blocked. Combined pipeline completion still requires C06 and all Z01 prerequisites, followed by the existing full acceptance checks. Report component completion precisely; never close the Codex incident because a memory feature passed its tests.
+
+
+## C08: MCP task-wait deadline hardening (2026-09-06)
+
+Read-only OpenCode tool history confirms repeated `await_tasks(timeout_seconds=280)` failures after 59.927–59.987 seconds. Seven consecutive calls beginning 00:16:27–00:24:13 UTC failed this way; waits that received an earlier task change completed. Earlier oversized waits of 100–240 seconds show the same pattern. This establishes a client deadline mismatch for these calls; it does not diagnose every possible MCP error. The current server default is also 60 seconds, leaving no margin for a client with a 60-second deadline.
+
+Immediate worker convention: use explicit `timeout_seconds=45`, inspect the returned board and current `/answers/<id>`, and renew claims during work. Existing prompts already recommended 50–55 seconds; the coordinator's 280-second calls departed from that guidance. No live restart or client configuration change is necessary for this mitigation.
+
+C08 depends only on completed C07 and is an additional prerequisite of Z01. Its complete contract, exact candidate files, red proof and commands are in the task manifest. Implement a 45-second default, preserve explicit longer waits for clients that support them, and make the client/server deadline distinction clear in generated skills and current prompts. Test normalization, wakeup, timeout and cancellation cleanup; include a disposable StreamableHTTP no-change wait under a 60-second client deadline. Keep namespace authorization and guidance budgets intact. Submit for review; never deploy the candidate to the live coordination server.
+
+This is a local operational improvement, with no claimed Cognee source or connection to the unresolved native terminal spam.

@@ -8,7 +8,7 @@ Implement one ready task from the existing Cognee borrowing workstream. These ta
 
 The live Punk server at `127.0.0.1:9090` is for coordination only. Never restart, replace, migrate or test experimental code against it. Use temporary databases/configs/servers. Never change the user's installed binary, real Codex config or memory data. No push, main merge, release, tag or deployment.
 
-1. Use punk-memory; register a unique worker identity. Recall `/plan/summary`, `/plan/cognee-borrowing`, `/conventions/repo`, `/conventions/live-server` and `/conventions/review`.
+1. Use punk-memory; register a unique worker identity. Recall `/plan/summary`, `/plan/cognee-borrowing`, `/conventions/repo`, `/conventions/live-server` and `/conventions/review` and `/conventions/mcp-waits`.
 2. Read the current integration branch's files:
    - `docs/superpowers/plans/2026-09-06-cognee-borrowing.md`
    - `docs/superpowers/specs/2026-09-05-punk-improvement-pipeline-design.md`
@@ -21,6 +21,8 @@ The live Punk server at `127.0.0.1:9090` is for coordination only. Never restart
 6. Report `in_progress` with branch/path. Follow the task's red proof, narrow implementation and checks. Reuse Punk's existing Go/store/retrieval machinery; record pinned Cognee inspiration. No paid/model-backed runs without explicit configured budget; deterministic tests use fakes.
 7. Run relevant tests, gofmt, vet/build and required database checks. Record unavailable prerequisites honestly. Create one task commit with the master plan's message, staging only owned files.
 8. Write `/reviews/<id>/submission` FIRST: branch, full SHA, base, upstream mechanism/path, red/green checks, artifacts, compatibility and deviations. Then set status `review` and release task/file claims. A reviewer integrates and marks `done`; worker commits alone do not unlock dependents.
-9. If blocked, write `/questions/<id>` with precise evidence, set `blocked`, release claims and select independent ready work. For continued assignment, re-read the board and use `await_tasks(timeout_seconds=50)` when no work is ready. Never reuse remembered readiness.
+9. If blocked, write `/questions/<id>` with precise evidence, set `blocked`, release claims and select independent ready work. For continued assignment, re-read the board and use `await_tasks(timeout_seconds=45)` when no work is ready. Never reuse remembered readiness.
 
 Starting recommendations: one worker takes E01, another A01, subject to claims. E02 and A02 follow their respective integrated prerequisites. The manifest, not this recommendation, decides readiness.
+
+Timeout recovery: this worker client cancels MCP calls after about 60 seconds. Explicit waits of 100–280 seconds have repeatedly failed. The server maximum of 300 seconds does not override that client deadline. After a timeout, call `list_tasks` once, read `/answers/<id>` and retry with 45 seconds; do not repeat an oversized wait. C08 hardens the server default and generated guidance.
