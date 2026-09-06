@@ -122,9 +122,10 @@ func splitBusKey(key string) (string, string) {
 	return key[:i], key[i+1:]
 }
 
-// brainKeepalive is how often an SSE comment is written on an idle stream
-// so proxies and browsers do not close it.
-const brainKeepalive = 15 * time.Second
+// brainKeepalive is how often an SSE comment is written on an idle
+// stream so proxies and browsers do not close it. A var (not a const) so
+// tests can shorten it instead of waiting out the real interval.
+var brainKeepalive = 15 * time.Second
 
 func (s *Server) handleBrainEvents(w http.ResponseWriter, r *http.Request) {
 	if s.bus == nil {
@@ -168,6 +169,13 @@ func (s *Server) handleBrainEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-tick.C:
+			// A02: the credential is otherwise only rechecked when an
+			// event arrives, so a revoked key on an idle stream would
+			// keep it open indefinitely; revalidate on every keepalive
+			// tick too and end the stream once it fails.
+			if !s.credentialActive(r.Context(), keyID) {
+				return
+			}
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return
 			}

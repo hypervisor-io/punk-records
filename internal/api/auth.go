@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,6 +56,12 @@ type Keys struct {
 	db  *store.DB
 	now func() time.Time
 	az  *authz.Authorizer
+
+	// Log receives a Warn line whenever a store error (other than
+	// sql.ErrNoRows) forces a fail-closed deny in KeyActive - visibility
+	// into "the DB is unhappy" without weakening deny-by-default. Nil
+	// discards (the default). Never logs the token.
+	Log *slog.Logger
 }
 
 func NewKeys(db *store.DB, now func() time.Time) *Keys {
@@ -62,6 +69,14 @@ func NewKeys(db *store.DB, now func() time.Time) *Keys {
 		now = time.Now
 	}
 	return &Keys{db: db, now: now}
+}
+
+// warn logs msg at Warn level when Log is set; a nil Log (the default)
+// discards silently.
+func (k *Keys) warn(msg string, args ...any) {
+	if k.Log != nil {
+		k.Log.Warn(msg, args...)
+	}
 }
 
 // SetAuthorizer wires namespace authorization (config
@@ -149,7 +164,15 @@ func (k *Keys) KeyActive(ctx context.Context, id int64) bool {
 	var one int
 	err := k.db.QueryRowContext(ctx, k.db.Rebind(`
 		SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL`), id).Scan(&one)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		// Fail-closed either way; a genuine store error (not "no such
+		// key") is worth surfacing. Never log the token.
+		k.warn("api: key active check failed, denying", "key_id", id, "err", err)
+	}
+	return false
 }
 
 // AuthMiddleware guards /v1. Bootstrap mode: while ZERO active keys

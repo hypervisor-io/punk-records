@@ -622,8 +622,11 @@ func (e *queryExpander) Expand(ctx context.Context, query string) ([]string, err
 // namespace.
 func newKeys(cfg *config.Config, db *store.DB, log *slog.Logger) *api.Keys {
 	keys := api.NewKeys(db, nil)
+	keys.Log = log
 	if cfg.Authz.Enabled() {
-		keys.SetAuthorizer(authz.New(db, nil))
+		az := authz.New(db, nil)
+		az.Log = log
+		keys.SetAuthorizer(az)
 		log.Info("namespace authorization enforced", "mode", cfg.Authz.Enforcement)
 	}
 	return keys
@@ -1507,6 +1510,18 @@ func cmdSeed(args []string) error {
 	return nil
 }
 
+// apiKeySubject defaults an API key's subject to its name when --subject
+// is omitted (or blank): under authz.enforcement=deny an empty subject
+// can never be granted anything (authz.validateSubject rejects empty),
+// so a key created without --subject would otherwise be permanently
+// ungrantable. An explicit, non-blank subject always wins.
+func apiKeySubject(name, subject string) string {
+	if strings.TrimSpace(subject) == "" {
+		return name
+	}
+	return subject
+}
+
 func cmdAPIKey(args []string) error {
 	// action comes first (Go's flag parsing stops at the first non-flag):
 	// punk apikey create --name ci
@@ -1536,12 +1551,16 @@ func cmdAPIKey(args []string) error {
 	keys := api.NewKeys(db, nil)
 	switch action {
 	case "create":
-		token, err := keys.Create(context.Background(), *name, *subject)
+		effectiveSubject := apiKeySubject(*name, *subject)
+		token, err := keys.Create(context.Background(), *name, effectiveSubject)
 		if err != nil {
 			return err
 		}
 		fmt.Println(token)
 		fmt.Fprintln(os.Stderr, "store this token now; it is not shown again")
+		if strings.TrimSpace(*subject) == "" {
+			fmt.Fprintf(os.Stderr, "subject defaults to name: %s\n", effectiveSubject)
+		}
 		return nil
 	case "revoke":
 		return keys.Revoke(context.Background(), *name)

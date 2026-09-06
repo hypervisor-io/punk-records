@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -295,5 +297,59 @@ func TestNamespaceAuthzEncodedPathIsolation(t *testing.T) {
 	if rr := authedGet(t, s, token, "/v1/namespaces/%6Es-a/memories"); rr.Code != http.StatusOK ||
 		!strings.Contains(rr.Body.String(), "other-namespace-fixture") {
 		t.Fatalf("explicit grant on literal %%6Es-a = %d, want 200 with its own fixture: %s", rr.Code, rr.Body)
+	}
+}
+
+// TestKeyActiveLogsWarnOnDBErrorFailClosed pins the fix for KeyActive
+// silently swallowing DB errors as deny: a real query failure (not
+// sql.ErrNoRows) must still deny (fail-closed) but must also be visible
+// via the exported Log field, and must never log the token.
+func TestKeyActiveLogsWarnOnDBErrorFailClosed(t *testing.T) {
+	_, keys, db := authServer(t)
+	ctx := context.Background()
+	token, err := keys.Create(ctx, "ci", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, id, _, err := keys.Check(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	keys.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if keys.KeyActive(ctx, id) {
+		t.Fatal("KeyActive on a closed db should deny (fail-closed)")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "WARN") {
+		t.Fatalf("log = %q, want a warn line", logged)
+	}
+	if strings.Contains(logged, token) {
+		t.Fatalf("log = %q, must never include the token", logged)
+	}
+}
+
+// TestKeyActiveNilLogDoesNotPanic pins that a nil Log (the default)
+// discards instead of panicking.
+func TestKeyActiveNilLogDoesNotPanic(t *testing.T) {
+	_, keys, db := authServer(t)
+	ctx := context.Background()
+	token, err := keys.Create(ctx, "ci", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, id, _, err := keys.Check(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if keys.KeyActive(ctx, id) {
+		t.Fatal("KeyActive on a closed db should deny")
 	}
 }

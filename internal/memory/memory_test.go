@@ -108,6 +108,30 @@ func TestRecallUnknownNamespaceEmpty(t *testing.T) {
 	}
 }
 
+// TestWriteRejectsColonNamespace pins the A02-review fix: namespace
+// names must never contain ':' because bus keys are built as
+// namespace+":"+key and the SSE handlers split on the first ':'. A
+// namespace like "a:private" would otherwise let a subject with read on
+// "a" receive its events.
+func TestWriteRejectsColonNamespace(t *testing.T) {
+	s, _, _ := newTest(t)
+	ctx := context.Background()
+
+	if _, err := s.Write(ctx, WriteInput{Namespace: "a:private", Key: "/secrets/x", Body: "leak"}); err == nil {
+		t.Fatal("write to a namespace containing ':' should error")
+	}
+	// the namespace must not have been created either
+	if _, ok, err := s.namespaceID(ctx, "a:private"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("namespace containing ':' must not be created")
+	}
+	// a colon-free namespace is unaffected
+	if _, err := s.Write(ctx, WriteInput{Namespace: "a", Key: "/secrets/y", Body: "fine"}); err != nil {
+		t.Fatalf("colon-free namespace write: %v", err)
+	}
+}
+
 func TestForgetTombstones(t *testing.T) {
 	s, _, _ := newTest(t)
 	ctx := context.Background()

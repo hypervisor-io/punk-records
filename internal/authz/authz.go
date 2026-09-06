@@ -39,6 +39,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -75,6 +76,13 @@ type Grant struct {
 type Authorizer struct {
 	db  *store.DB
 	now func() time.Time
+
+	// Log receives a Warn line whenever a store error (other than
+	// sql.ErrNoRows) forces a fail-closed deny - visibility into "the DB
+	// is unhappy" without weakening deny-by-default. Nil discards
+	// (the default): callers that never set it see no behavior change.
+	// Never logs the subject or any credential value.
+	Log *slog.Logger
 }
 
 func New(db *store.DB, now func() time.Time) *Authorizer {
@@ -82,6 +90,14 @@ func New(db *store.DB, now func() time.Time) *Authorizer {
 		now = time.Now
 	}
 	return &Authorizer{db: db, now: now}
+}
+
+// warn logs msg at Warn level when Log is set; a nil Log (the default)
+// discards silently.
+func (a *Authorizer) warn(msg string, args ...any) {
+	if a.Log != nil {
+		a.Log.Warn(msg, args...)
+	}
 }
 
 func validateSubject(subject string) error {
@@ -101,6 +117,9 @@ func validateNamespace(namespace string) error {
 	if strings.Contains(namespace, "*") {
 		return fmt.Errorf("authz: namespace %q: wildcards are not supported, grants are exact-match", namespace)
 	}
+	if strings.Contains(namespace, ":") {
+		return fmt.Errorf("authz: namespace %q must not contain ':'", namespace)
+	}
 	return nil
 }
 
@@ -117,19 +136,15 @@ func (a *Authorizer) Grant(ctx context.Context, subject, namespace string, op Op
 	if !validOp(op) {
 		return fmt.Errorf("authz: op %q: want read, write, or admin", op)
 	}
-	var n int
-	err := a.db.QueryRowContext(ctx, a.db.Rebind(`
-		SELECT count(*) FROM namespace_grants
-		WHERE subject = $1 AND namespace = $2 AND op = $3 AND revoked_at IS NULL`),
-		subject, namespace, string(op)).Scan(&n)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	_, err = a.db.ExecContext(ctx, a.db.Rebind(`
-		INSERT INTO namespace_grants (subject, namespace, op, created_at) VALUES ($1, $2, $3, $4)`),
+	// A single upsert against the namespace_grants_active partial unique
+	// index (subject, namespace, op) WHERE revoked_at IS NULL: no
+	// conflict target, so both SQLite and Postgres infer the partial
+	// index and silently no-op on an existing active grant instead of
+	// racing a separate count-then-insert against concurrent grants of
+	// the identical tuple.
+	_, err := a.db.ExecContext(ctx, a.db.Rebind(`
+		INSERT INTO namespace_grants (subject, namespace, op, created_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING`),
 		subject, namespace, string(op), store.TimeToDB(a.now()))
 	if err != nil {
 		return fmt.Errorf("grant: %w", err)
@@ -191,6 +206,9 @@ func (a *Authorizer) Allow(ctx context.Context, subject, namespace string, op Op
 	if strings.Contains(subject, "*") || strings.Contains(namespace, "*") {
 		return false
 	}
+	if strings.Contains(namespace, ":") {
+		return false
+	}
 	if !validOp(op) {
 		return false
 	}
@@ -200,8 +218,13 @@ func (a *Authorizer) Allow(ctx context.Context, subject, namespace string, op Op
 		WHERE subject = $1 AND namespace = $2 AND op = $3 AND revoked_at IS NULL
 		LIMIT 1`),
 		subject, namespace, string(op)).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false
+	if err == nil {
+		return true
 	}
-	return err == nil
+	if !errors.Is(err, sql.ErrNoRows) {
+		// Fail-closed either way; a genuine store error (not "no grant
+		// row") is worth surfacing. Never log the subject.
+		a.warn("authz: allow query failed, denying", "op", string(op), "namespace", namespace, "err", err)
+	}
+	return false
 }

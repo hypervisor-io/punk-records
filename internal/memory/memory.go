@@ -153,6 +153,13 @@ func (s *Store) ensureNamespace(ctx context.Context, tx *sql.Tx, name string) (i
 	if name == "" {
 		return 0, errors.New("memory: empty namespace")
 	}
+	// Bus keys are built as namespace+":"+key and the SSE handlers split
+	// on the first ':' (see internal/api splitBusKey): a namespace
+	// containing ':' would be indistinguishable on the bus from a
+	// different, shorter namespace sharing its prefix (task A02 review).
+	if strings.Contains(name, ":") {
+		return 0, fmt.Errorf("memory: namespace %q must not contain ':'", name)
+	}
 	_, err := tx.ExecContext(ctx, s.db.Rebind(
 		`INSERT INTO namespaces (name, created_at) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING`),
 		name, store.TimeToDB(s.now()))

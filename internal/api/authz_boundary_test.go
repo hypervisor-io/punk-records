@@ -407,6 +407,53 @@ func TestAuthzBoundaryMemoryEventsRevocationClosesStream(t *testing.T) {
 	}
 }
 
+// TestAuthzBoundaryMemoryEventsNoColonNamespaceLeak pins the A02-review
+// fix: bus keys are namespace+":"+key and the SSE handler splits on the
+// first ':', so a namespace literally named "ns-a:private" would be
+// indistinguishable on the bus from "ns-a" under naive prefix matching
+// - a subject with read on "ns-a" only would receive its events too.
+// Two layers close it: such a namespace can never be created (no write
+// to it ever reaches the bus), and the handler itself matches by exact
+// namespace via splitBusKey, so even a hand-crafted bus event (standing
+// in for a producer that bypasses memory.Write) is denied.
+func TestAuthzBoundaryMemoryEventsNoColonNamespaceLeak(t *testing.T) {
+	g := authzBoundaryServer(t, true)
+	ctx := context.Background()
+
+	if _, err := g.mem.Write(ctx, memory.WriteInput{
+		Namespace: "ns-a:private", Key: "/secrets/x", Body: "leak",
+	}); err == nil {
+		t.Fatal("write to a namespace containing ':' should be rejected")
+	}
+
+	h := g.openStream(t, "/v1/namespaces/ns-a/events?prefix=/secrets/")
+
+	// retry-publish until the subscription proves live, then confirm the
+	// decoy (crafted directly on the bus, bypassing memory.Write) never
+	// arrives: its parsed key "private:/secrets/x" does not start with
+	// the requested "/secrets/" prefix.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		g.bus.Publish(bus.Event{Kind: "memory", Key: "ns-a:private:/secrets/x", Data: map[string]string{"action": "add"}})
+		g.bus.Publish(bus.Event{Kind: "memory", Key: "ns-a:/secrets/y", Data: map[string]string{"action": "add"}})
+		if f, ok := h.nextFrame(200 * time.Millisecond); ok {
+			if f.event != "memory" || !strings.Contains(f.data, "/secrets/y") {
+				t.Fatalf("frame = %+v, want the legitimate ns-a event", f)
+			}
+			if strings.Contains(f.data, "private") || strings.Contains(f.data, "/secrets/x") {
+				t.Fatalf("decoy namespace leaked into ns-a stream: %+v", f)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no frame delivered: subscription never went live")
+		}
+	}
+	if f, ok := h.nextFrame(300 * time.Millisecond); ok {
+		t.Fatalf("unexpected extra frame %+v: decoy must never be delivered", f)
+	}
+}
+
 // TestAuthzBoundaryTaskBoardWaitRevocation: revoking during a board
 // long-poll denies the response instead of delivering the board.
 func TestAuthzBoundaryTaskBoardWaitRevocation(t *testing.T) {
@@ -462,6 +509,62 @@ func TestAuthzBoundaryAgentContextProfileCardGated(t *testing.T) {
 	}
 	if !strings.Contains(out.Context, "About the user") {
 		t.Fatalf("profile card missing after grant: %q", out.Context)
+	}
+}
+
+// TestAuthzBoundaryAgentContextReadOnlySkipsInjectedBookkeeping pins the
+// A02-review fix: handleAgentContext is gated with OpRead, but it also
+// writes /agent-sessions/<sid>/injected bookkeeping - a read-only
+// subject must not cause that write. The context itself is still
+// returned; only the bookkeeping is skipped.
+func TestAuthzBoundaryAgentContextReadOnlySkipsInjectedBookkeeping(t *testing.T) {
+	g := authzBoundaryServer(t, true)
+	ctx := context.Background()
+	if _, err := g.mem.Write(ctx, memory.WriteInput{
+		Namespace: "ns-a", Key: "/decisions/x", Body: "auth uses jwt", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bobToken, err := g.keys.Create(ctx, "bob-key", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.az.Grant(ctx, "bob", "ns-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	bobAuth := map[string]string{"Authorization": "Bearer " + bobToken}
+
+	// read-only: context comes back with the fact, but no bookkeeping
+	// fact is written.
+	rec := g.do(t, http.MethodGet, "/v1/agent/context?ns=ns-a&sid=s1", "", bobAuth)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("context = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out agentContextOut
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.FactIDs) == 0 {
+		t.Fatalf("context returned no facts: %+v", out)
+	}
+	if facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/s1/injected", 1); err != nil {
+		t.Fatal(err)
+	} else if len(facts) != 0 {
+		t.Fatalf("read-only subject caused a bookkeeping write: %+v", facts)
+	}
+
+	// write grant: the same subject's bookkeeping write now happens.
+	if err := g.az.Grant(ctx, "bob", "ns-a", authz.OpWrite); err != nil {
+		t.Fatal(err)
+	}
+	rec = g.do(t, http.MethodGet, "/v1/agent/context?ns=ns-a&sid=s2", "", bobAuth)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("context = %d: %s", rec.Code, rec.Body.String())
+	}
+	if facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/s2/injected", 1); err != nil {
+		t.Fatal(err)
+	} else if len(facts) == 0 {
+		t.Fatal("write-granted subject should still get the bookkeeping write")
 	}
 }
 
@@ -618,6 +721,39 @@ func TestAuthzBoundaryBrainEventsKeyRevocationClosesStream(t *testing.T) {
 	f, closed := h.closedWithin(3 * time.Second)
 	if !closed {
 		t.Fatalf("stream not closed after key revocation (frame %+v)", f)
+	}
+	if f.err != io.EOF {
+		t.Fatalf("stream ended with err = %v, want io.EOF (server-side close)", f.err)
+	}
+}
+
+// TestAuthzBoundaryBrainEventsKeyRevocationOnKeepalive pins the A02-
+// review fix: handleBrainEvents only revalidated the credential when an
+// event arrived, so a revoked key on an otherwise-idle stream kept it
+// open indefinitely. The keepalive tick must revalidate too and end the
+// stream when the credential is no longer active.
+func TestAuthzBoundaryBrainEventsKeyRevocationOnKeepalive(t *testing.T) {
+	oldKeepalive := brainKeepalive
+	brainKeepalive = 50 * time.Millisecond
+	t.Cleanup(func() { brainKeepalive = oldKeepalive })
+
+	g := authzBoundaryServer(t, true)
+	ctx := context.Background()
+	if _, err := g.keys.Create(ctx, "other-key", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	h := g.openStream(t, "/v1/brain/events")
+	if f, ok := h.nextFrame(3 * time.Second); !ok || f.event != "hello" {
+		t.Fatalf("hello frame missing (ok=%v f=%+v)", ok, f)
+	}
+	if err := g.keys.Revoke(ctx, "alice-key"); err != nil {
+		t.Fatal(err)
+	}
+	// idle stream: no event published, only the keepalive ticks - the
+	// stream must still close on the next tick.
+	f, closed := h.closedWithin(3 * time.Second)
+	if !closed {
+		t.Fatalf("stream not closed after key revocation on an idle stream (frame %+v)", f)
 	}
 	if f.err != io.EOF {
 		t.Fatalf("stream ended with err = %v, want io.EOF (server-side close)", f.err)

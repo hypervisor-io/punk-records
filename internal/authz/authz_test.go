@@ -1,9 +1,12 @@
 package authz
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -138,6 +141,23 @@ func TestWildcardRejected(t *testing.T) {
 	}
 }
 
+// TestColonRejectedInNamespace pins the A02-review fix: bus keys are
+// built as namespace+":"+key and the SSE handlers split on the first
+// ':', so a namespace containing ':' would be indistinguishable on the
+// bus from a shorter namespace sharing its prefix (e.g. "a" vs
+// "a:private"). Grants and lookups must reject it outright.
+func TestColonRejectedInNamespace(t *testing.T) {
+	a := New(testDB(t), nil)
+	ctx := context.Background()
+
+	if err := a.Grant(ctx, "alice", "a:private", OpRead); err == nil {
+		t.Fatal("grant on a namespace containing ':' should be rejected")
+	}
+	if a.Allow(ctx, "alice", "a:private", OpRead) {
+		t.Fatal("allow on a namespace containing ':' should be denied")
+	}
+}
+
 func TestGrantValidationAndIdempotence(t *testing.T) {
 	a := New(testDB(t), nil)
 	ctx := context.Background()
@@ -227,6 +247,88 @@ func TestConcurrentAllowAndGrant(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestConcurrentGrantSameTupleNoRaceOneActiveRow pins the fix for
+// Grant's count-then-insert race on the namespace_grants_active partial
+// unique index: many goroutines granting the identical
+// (subject, namespace, op) concurrently must never error and must leave
+// exactly one active row.
+func TestConcurrentGrantSameTupleNoRaceOneActiveRow(t *testing.T) {
+	a := New(testDB(t), nil)
+	ctx := context.Background()
+
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = a.Grant(ctx, "concurrent", "ns-race", OpWrite)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: grant error: %v", i, err)
+		}
+	}
+	var count int
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM namespace_grants
+		WHERE subject = 'concurrent' AND namespace = 'ns-race' AND op = 'write' AND revoked_at IS NULL`,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("active rows = %d, want exactly 1", count)
+	}
+	if !a.Allow(ctx, "concurrent", "ns-race", OpWrite) {
+		t.Fatal("grant not in effect after concurrent grants")
+	}
+}
+
+// TestAllowLogsWarnOnDBErrorFailClosed pins the fix for Allow silently
+// swallowing DB errors as deny: a real query failure (not sql.ErrNoRows)
+// must still deny (fail-closed) but must also be visible via the
+// exported Log field - and must never log the subject (only op and
+// namespace).
+func TestAllowLogsWarnOnDBErrorFailClosed(t *testing.T) {
+	db := testDB(t)
+	var buf bytes.Buffer
+	a := New(db, nil)
+	a.Log = slog.New(slog.NewTextHandler(&buf, nil))
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if a.Allow(context.Background(), "secret-subject-token", "ns-a", OpRead) {
+		t.Fatal("allow on a closed db should deny (fail-closed)")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "WARN") {
+		t.Fatalf("log = %q, want a warn line", logged)
+	}
+	if !strings.Contains(logged, "ns-a") || !strings.Contains(logged, "read") {
+		t.Fatalf("log = %q, want op and namespace", logged)
+	}
+	if strings.Contains(logged, "secret-subject-token") {
+		t.Fatalf("log = %q, must never include the subject", logged)
+	}
+}
+
+// TestAllowNilLogDoesNotPanic pins that a nil Log (the default) discards
+// instead of panicking.
+func TestAllowNilLogDoesNotPanic(t *testing.T) {
+	db := testDB(t)
+	a := New(db, nil) // Log left nil
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if a.Allow(context.Background(), "alice", "ns-a", OpRead) {
+		t.Fatal("allow on a closed db should deny")
+	}
 }
 
 func TestAllowRejectsUnknownOp(t *testing.T) {

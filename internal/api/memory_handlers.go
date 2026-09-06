@@ -249,7 +249,6 @@ func (s *Server) handleMemoryEvents(w http.ResponseWriter, r *http.Request) {
 	// closes the connection instead of continuing to notify.
 	subject := verifiedSubject(r)
 	keyID := verifiedKeyID(r)
-	keyPrefix := ns + ":" + prefix
 	for {
 		select {
 		case <-r.Context().Done():
@@ -258,7 +257,14 @@ func (s *Server) handleMemoryEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if e.Kind != "memory" || !strings.HasPrefix(e.Key, keyPrefix) {
+			// Exact-namespace match (not a raw string prefix): namespaces
+			// can never contain ':' (see memory.Store.ensureNamespace), so
+			// splitBusKey unambiguously separates the event's namespace
+			// from its key, and a namespace sharing this one's textual
+			// prefix (the historical "ns" vs "ns:private" bug) can never
+			// be mistaken for it.
+			bns, key := splitBusKey(e.Key)
+			if e.Kind != "memory" || bns != ns || !strings.HasPrefix(key, prefix) {
 				continue
 			}
 			if !s.streamAllowed(r.Context(), keyID, subject, ns, authz.OpRead) {
