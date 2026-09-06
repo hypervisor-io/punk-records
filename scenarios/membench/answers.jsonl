@@ -1,0 +1,6 @@
+{"type":"fact","key":"/svc/db/primary","body":"postgres 16 primary runs on ceph-node-07, replica on ceph-node-09"}
+{"type":"fact","key":"/incidents/err-pool","body":"ERR_POOL_EXHAUSTED fires when the intake connection pool exceeds 4096"}
+{"type":"fact","key":"/deploy/api","body":"api service deploys from repo punk-api via argocd"}
+{"type":"query","q":"postgres primary ceph-node","expect":["/svc/db/primary"],"answer":"postgres 16 primary runs on ceph-node-07, replica on ceph-node-09"}
+{"type":"query","q":"ERR_POOL_EXHAUSTED intake pool","expect":["/incidents/err-pool"],"answer":"ERR_POOL_EXHAUSTED fires when the intake connection pool exceeds 4096"}
+{"type":"query","q":"quantum flux capacitor calibration"}

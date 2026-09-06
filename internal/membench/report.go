@@ -158,14 +158,26 @@ type Report struct {
 	SourceRevision string      `json:"source_revision,omitempty"`
 	GeneratedAt    string      `json:"generated_at,omitempty"`
 	Runs           []RunReport `json:"runs"`
+	// Answers carries the optional E02 answer stage (answers.go) when
+	// SuiteOptions.Answers configured it: answer accuracy, citation
+	// existence/support and abstention graded per case, kept separate
+	// from the retrieval evidence metrics above. Nil (omitted) when the
+	// stage was not configured, so answer-less reports keep their exact
+	// v1 shape.
+	Answers *AnswerReport `json:"answers,omitempty"`
 }
 
 // Stable returns the report with every VOLATILE field removed:
 // generated_at, runs[].duration_ns and runs[].queries[].latency_ns (the
-// report carries no run IDs and measures no cost). Source identity is
-// NOT volatile: a reproducibility manifest must preserve the code the
-// results came from, so Stable keeps SourceRevision. Two runs of the
-// same binary, fixture, seed and strategy have byte-identical
+// report carries no run IDs and measures no cost), plus the answer
+// stage's measured token cost (answers.summary.tokens/judge_tokens and
+// answers.cases[].tokens/judge_tokens) and the answer cases' fact-ID
+// material (retrieved_ids, cited_ids: generated per store instance, like
+// latency); the deterministic retrieved keys and all answer grading
+// outcomes stay. Source
+// identity is NOT volatile: a reproducibility manifest must preserve the
+// code the results came from, so Stable keeps SourceRevision. Two runs of
+// the same binary, fixture, seed and strategy have byte-identical
 // StableJSON; anything else in the artifact is part of the
 // reproducibility claim.
 func (r Report) Stable() Report {
@@ -184,6 +196,31 @@ func (r Report) Stable() Report {
 			cp.Queries = qs
 		}
 		out.Runs[i] = cp
+	}
+	if r.Answers != nil {
+		a := *r.Answers
+		a.Summary.Tokens = 0
+		a.Summary.JudgeTokens = 0
+		a.Summary.UsageUnknown = 0
+		if a.Cases != nil {
+			cs := make([]AnswerCaseResult, len(a.Cases))
+			copy(cs, a.Cases)
+			for j := range cs {
+				cs[j].Tokens = 0
+				cs[j].JudgeTokens = 0
+				// Fact IDs are generated per store instance, so like
+				// latency they cannot be byte-compared across runs:
+				// the stable form keeps the deterministic KEYS and all
+				// grading outcomes; the full report keeps the IDs. A
+				// grader Note may carry model text, so like usage it is
+				// volatile and stripped.
+				cs[j].RetrievedIDs = nil
+				cs[j].CitedIDs = nil
+				cs[j].Note = ""
+			}
+			a.Cases = cs
+		}
+		out.Answers = &a
 	}
 	return out
 }
@@ -436,6 +473,11 @@ type SuiteOptions struct {
 	EmbedderID string // "none" (or empty) when no embedder is wired
 	RerankerID string // "none" (or empty) when no reranker is wired; any other value enables the rerank ablation
 	Fixture    string // fixture identifier recorded in the report
+	// Answers, when non-nil, attaches the E02 answer stage (answers.go):
+	// after the retrieval runs it composes and grades an answer per query
+	// in warm mode over the ingested corpus, recorded as Report.Answers.
+	// Nil (the default) keeps the report's retrieval-only v1 shape.
+	Answers *AnswerOptions
 }
 
 // Suite runs the reproducible offline suite against one store and
@@ -448,11 +490,31 @@ type SuiteOptions struct {
 // configured reranker that fails (or is not actually wired) is recorded
 // as a degraded rerank run with an explicit fallback Reason, never as a
 // successful reranked ablation, and no suite path makes paid/external
-// model calls by default. The report's SourceRevision records the
+// model calls by default. With SuiteOptions.Answers set the optional
+// answer stage runs warm over the ingested corpus after the retrieval
+// runs and lands in Report.Answers (see answers.go for its grading and
+// budget contract). The report's SourceRevision records the
 // running binary's embedded VCS provenance (see BuildSourceRevision):
 // the code the results came from, independent of the directory the
 // binary was invoked in.
 func Suite(ctx context.Context, s *memory.Store, ns string, recs []Record, o SuiteOptions) (Report, error) {
+	arecs := make([]AnswerRecord, len(recs))
+	for i, r := range recs {
+		arecs[i] = AnswerRecord{Record: r}
+	}
+	return suite(ctx, s, ns, arecs, o)
+}
+
+// SuiteWithAnswers is Suite over an answer-labeled scenario: the
+// retrieval runs see exactly the base Records (identical corpus hash and
+// rankings), while the expected answers feed the answer stage's
+// exact/structured grading when SuiteOptions.Answers is set.
+func SuiteWithAnswers(ctx context.Context, s *memory.Store, ns string, arecs []AnswerRecord, o SuiteOptions) (Report, error) {
+	return suite(ctx, s, ns, arecs, o)
+}
+
+func suite(ctx context.Context, s *memory.Store, ns string, arecs []AnswerRecord, o SuiteOptions) (Report, error) {
+	recs := BaseRecords(arecs)
 	k := o.K
 	if k <= 0 {
 		k = 5
@@ -511,5 +573,17 @@ func Suite(ctx context.Context, s *memory.Store, ns string, recs []Record, o Sui
 		reason = "embedder configured: the vector arm is active in every run; an FTS-only ablation requires an unwired store"
 	}
 	rep.Runs = append(rep.Runs, RunReport{Name: "embed-hybrid", Reason: reason})
+	if o.Answers != nil {
+		ao := *o.Answers
+		ao.Mode = "warm" // the baseline run already ingested the corpus
+		if ao.K <= 0 {
+			ao.K = k
+		}
+		ar, err := RunAnswers(ctx, s, ns, arecs, ao)
+		if err != nil {
+			return Report{}, err
+		}
+		rep.Answers = &ar
+	}
 	return rep, nil
 }

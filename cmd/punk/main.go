@@ -44,6 +44,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/memory"
 	"github.com/hypervisor-io/punk-records/internal/obs"
 	"github.com/hypervisor-io/punk-records/internal/policy"
+	"github.com/hypervisor-io/punk-records/internal/reflect"
 	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/hypervisor-io/punk-records/internal/registry"
 	"github.com/hypervisor-io/punk-records/internal/replay"
@@ -2256,6 +2257,7 @@ func cmdRegion(args []string) error {
 //	punk membench --file scenarios/membench/sample.jsonl [--k N] [--ns name]
 //	punk membench --file ... --rerank --reranker-url http://host:8080/rerank
 //	punk membench --file scenarios/membench/baseline.jsonl --report report.json [--k N] [--seed N] [--commit SHA]
+//	punk membench --file scenarios/membench/answers.jsonl --report report.json --answers [--judge-url URL --judge-model M --answer-budget N]
 //	punk membench --locomo locomo10.json [--k N] [--config config.yaml]
 //
 // --report writes the versioned machine-readable report (membench.Report:
@@ -2270,6 +2272,16 @@ func cmdRegion(args []string) error {
 // unless a reranker URL is given; no paid model calls happen by default.
 // A reranker that fails degrades the rerank ablation to recorded baseline
 // fallback, never to a silent "successful" rerank.
+//
+// --answers attaches the optional answer stage (membench.RunAnswers) to
+// the report: per-case answers, retrieved/cited IDs, abstention decisions
+// and token usage, with citation existence scored separately from claim
+// support and unanswerable examples kept distinct from retrieval misses.
+// The defaults are fully offline (extractive composer + gold judge); a
+// model-backed judge or reflect composer runs ONLY with explicit
+// endpoint/model/--answer-budget configuration. Like the rest of --file
+// mode, the stage runs against a throwaway in-memory store in the
+// membench namespace - never the live memory namespace.
 func cmdMembench(args []string) error {
 	fs := flag.NewFlagSet("membench", flag.ContinueOnError)
 	file := fs.String("file", "", "JSONL scenario file")
@@ -2282,6 +2294,14 @@ func cmdMembench(args []string) error {
 	report := fs.String("report", "", "write the versioned baseline+ablation report (manifests, per-query rankings, aggregate metrics) to this path; --file scenarios only")
 	seed := fs.Int64("seed", 1, "seed recorded in report manifests (retrieval is deterministic; reserved for future randomized ablations)")
 	commit := fs.String("commit", version, "build/commit label recorded in report manifests (code-state provenance is resolved separately into the report's source_revision)")
+	answers := fs.Bool("answers", false, "attach the answer stage to --report: compose and grade answers, citation existence/support and abstention per query (offline defaults; --file scenarios only)")
+	composerName := fs.String("composer", "extractive", "answer composer for --answers: extractive (deterministic, offline) | reflect (model-backed agentic loop; requires --composer-url, --composer-model and --answer-budget)")
+	composerURL := fs.String("composer-url", "", "OpenAI-compatible endpoint for --composer reflect")
+	composerModel := fs.String("composer-model", "", "model ID for --composer reflect")
+	judgeURL := fs.String("judge-url", "", "OpenAI-compatible endpoint for the semantic judge (requires --judge-model and --answer-budget); empty = deterministic gold grading")
+	judgeModel := fs.String("judge-model", "", "model ID for the judge")
+	judgeKeyEnv := fs.String("judge-key-env", "", "env var HOLDING the API key for the judge/composer endpoint (optional; never the key itself)")
+	answerBudget := fs.Int("answer-budget", 0, "hard token budget across composer+judge calls; required when any model-backed answer component is configured")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2296,6 +2316,30 @@ func cmdMembench(args []string) error {
 	}
 	if *report != "" && *rerank {
 		return errors.New("membench: --report runs its own rerank ablation when --reranker-url is set; --rerank applies to plain scoring only")
+	}
+	answerFlagsSet := *answers || *composerName != "extractive" || *composerURL != "" || *composerModel != "" || *judgeURL != "" || *judgeModel != "" || *answerBudget != 0
+	if answerFlagsSet && !*answers {
+		return errors.New("membench: answer-stage flags require --answers")
+	}
+	if *answers {
+		if *report == "" {
+			return errors.New("membench: --answers attaches to the versioned report; --report is required")
+		}
+		if *locomo != "" {
+			return errors.New("membench: --answers supports --file scenarios only")
+		}
+		if *composerName != "extractive" && *composerName != "reflect" {
+			return fmt.Errorf("membench: --composer %q: want extractive or reflect", *composerName)
+		}
+		if *composerName == "reflect" && (*composerURL == "" || *composerModel == "") {
+			return errors.New("membench: --composer reflect requires explicit --composer-url and --composer-model")
+		}
+		if (*judgeURL != "") != (*judgeModel != "") {
+			return errors.New("membench: --judge-url and --judge-model are required together")
+		}
+		if (*composerName == "reflect" || *judgeModel != "") && *answerBudget <= 0 {
+			return errors.New("membench: a model-backed answer stage requires an explicit --answer-budget (tokens)")
+		}
 	}
 	db, err := store.Open("sqlite", ":memory:")
 	if err != nil {
@@ -2349,16 +2393,55 @@ func cmdMembench(args []string) error {
 		if *rerankerURL != "" {
 			rerankerID = *rerankerURL
 		}
-		rep, err := membench.Suite(ctx, mem, *ns, recs, membench.SuiteOptions{
+		suiteOpts := membench.SuiteOptions{
 			K:          *k,
 			Seed:       *seed,
 			Commit:     *commit,
 			EmbedderID: "none", // --file mode wires no embedder: offline FTS-only, no paid model calls
 			RerankerID: rerankerID,
 			Fixture:    filepath.Base(*file),
-		})
-		if err != nil {
-			return err
+		}
+		var rep membench.Report
+		if *answers {
+			arecs, err := membench.LoadAnswers(*file)
+			if err != nil {
+				return err
+			}
+			ao := &membench.AnswerOptions{K: *k, MaxTokens: *answerBudget}
+			// Model-backed components are wired only from the explicit
+			// endpoint/model/budget flags; the client records nothing to
+			// any database (nil store) and the whole stage runs against
+			// the throwaway in-memory membench store above.
+			explicitClient := func(url, model string) (llm.Client, error) {
+				m := llm.NewManager(true, map[string]llm.Profile{
+					"default": {BaseURL: url, APIKeyEnv: *judgeKeyEnv, Model: model},
+				}, nil, nil)
+				return m.Client("default")
+			}
+			if *composerName == "reflect" {
+				client, err := explicitClient(*composerURL, *composerModel)
+				if err != nil {
+					return fmt.Errorf("membench: composer client: %w", err)
+				}
+				ao.Composer = membench.NewReflectComposer(reflect.New(mem, client), *ns, *composerURL, *composerModel)
+			}
+			if *judgeModel != "" {
+				client, err := explicitClient(*judgeURL, *judgeModel)
+				if err != nil {
+					return fmt.Errorf("membench: judge client: %w", err)
+				}
+				ao.Judge = membench.NewLLMJudge(client, *judgeURL, *answerBudget)
+			}
+			suiteOpts.Answers = ao
+			rep, err = membench.SuiteWithAnswers(ctx, mem, *ns, arecs, suiteOpts)
+			if err != nil {
+				return err
+			}
+		} else {
+			rep, err = membench.Suite(ctx, mem, *ns, recs, suiteOpts)
+			if err != nil {
+				return err
+			}
 		}
 		out, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {
@@ -2375,6 +2458,15 @@ func cmdMembench(args []string) error {
 				fmt.Printf("NOTE: %s run degraded: %s\n", r.Name, r.Reason)
 			}
 		}
+		if rep.Answers != nil {
+			a := rep.Answers
+			fmt.Printf("answers: %d cases (%d answered, %d abstained, %d failed; %d retrieval misses, %d confident-on-unanswerable); exact_match=%s judge_correct=%s citation_existence=%s support=%s; tokens=%d judge_tokens=%d budget=%d\n",
+				a.Summary.Queries, a.Summary.Answered, a.Summary.Abstained, a.Summary.Failed,
+				a.Summary.RetrievalMisses, a.Summary.ConfidentUnanswerable,
+				answerRate(a.Summary.ExactMatchRate), answerRate(a.Summary.JudgeCorrectRate),
+				answerRate(a.Summary.CitationExistenceRate), answerRate(a.Summary.SupportRate),
+				a.Summary.Tokens, a.Summary.JudgeTokens, a.BudgetTokens)
+		}
 		return nil
 	}
 	res, err := membench.Run(ctx, mem, *ns, recs, *k, *rerank)
@@ -2387,6 +2479,15 @@ func cmdMembench(args []string) error {
 	}
 	fmt.Println(string(out))
 	return nil
+}
+
+// answerRate formats an optional answer-stage rate for the CLI summary:
+// "n/a" when its denominator was zero, never a vacuous number.
+func answerRate(v *float64) string {
+	if v == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.4f", *v)
 }
 
 // cmdHook runs "punk hook": a hook process reads one hook payload on
