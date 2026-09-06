@@ -96,3 +96,27 @@ func TestSummarizeSessions(t *testing.T) {
 		t.Fatalf("nil summarizer: %d %v", n, err)
 	}
 }
+
+// TestSummarizeSessionsIgnoresDeliveryBookkeeping pins the C04 delivery
+// bookkeeping facts - the delivery marker ("<event> <rev> issued") and
+// the delivered-turns pid set - as session metadata: like injected and
+// summary, they never count toward the summarization threshold and are
+// never fed to the summarizer.
+func TestSummarizeSessionsIgnoresDeliveryBookkeeping(t *testing.T) {
+	s, _, _ := newTest(t)
+	ctx := context.Background()
+	sum := &recordingSummarizer{}
+
+	writeCapture(t, s, "s1", "prompt-p1", strings.Repeat("alpha ", 30))
+	writeCapture(t, s, "s1", "tool-t1", strings.Repeat("beta ", 30))
+	writeCapture(t, s, "s1", "delivery", "startup 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef issued")
+	writeCapture(t, s, "s1", "delivered-turns", "p1 p2")
+
+	n, err := s.SummarizeSessions(ctx, "ns", 10, sum, time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if sum.calls != 1 || sum.priors[0] != "" || sum.counts[0] != 2 {
+		t.Fatalf("delivery bookkeeping must never reach the summarizer: %+v", sum)
+	}
+}

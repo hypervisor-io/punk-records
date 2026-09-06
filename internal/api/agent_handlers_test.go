@@ -1260,3 +1260,412 @@ func TestAgentContextSummaryComponent(t *testing.T) {
 		t.Fatalf("summary must not appear as a fact bullet: %v", out.FactIDs)
 	}
 }
+
+// deliveryMarkerFact returns session sid's delivery bookkeeping fact
+// (/agent-sessions/<sid>/delivery) in ns, or nil when none exists.
+func deliveryMarkerFact(t *testing.T, srv *Server, ns, sid string) *memory.Fact {
+	t.Helper()
+	key := "/agent-sessions/" + sid + "/delivery"
+	facts, err := srv.mem.Recall(context.Background(), ns, key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range facts {
+		if facts[i].Key == key {
+			return &facts[i]
+		}
+	}
+	return nil
+}
+
+// deliveryMarker asserts the single well-formed delivery marker for
+// session sid exists ("<event> <rev-64hex> issued" - the C04 delivery
+// identity plus the only state the server can truthfully record) and
+// returns its parts plus the fact's reinforcements, which must stay 0
+// when nothing ever rewrote the marker with identical content.
+func deliveryMarker(t *testing.T, srv *Server, ns, sid string) (event, rev, state string, reinforcements int64) {
+	t.Helper()
+	f := deliveryMarkerFact(t, srv, ns, sid)
+	if f == nil {
+		t.Fatal("no delivery marker recorded")
+	}
+	parts := strings.Fields(f.Body)
+	if len(parts) != 3 || len(parts[1]) != 64 {
+		t.Fatalf("delivery marker body = %q", f.Body)
+	}
+	for _, c := range parts[1] {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("delivery marker revision not hex: %q", f.Body)
+		}
+	}
+	return parts[0], parts[1], parts[2], f.Reinforcements
+}
+
+// TestAgentContextRepeatedSessionStartDeliversOnce pins the C04
+// session-start idempotency boundary: a repeated healthy delivery of the
+// same event (same sid, same event, unchanged facts -> unchanged context
+// revision) produces exactly one non-empty context. The duplicate answers
+// empty and records nothing; the marker keeps its single issued
+// (event, revision) pair. A legacy fetch without the event param carries
+// no delivery identity and keeps the old always-deliver behavior (the
+// documented bounded policy for hosts that send no identity).
+func TestAgentContextRepeatedSessionStartDeliversOnce(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	if _, err := srv.mem.Write(ctx, memory.WriteInput{
+		Namespace: "agent-myproj", Key: "/decisions/auth", Body: "auth uses jwt via jose",
+		Author: "test", Writer: "test", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, "GET", "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event=startup", "")
+	out := agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") || len(out.FactIDs) != 1 {
+		t.Fatalf("first delivery: %d %q %v", rec.Code, out.Context, out.FactIDs)
+	}
+	event, rev, state, reinf := deliveryMarker(t, srv, "agent-myproj", "s1")
+	if event != "startup" || state != "issued" || reinf != 0 {
+		t.Fatalf("marker = event %q state %q reinforcements %d", event, state, reinf)
+	}
+
+	// Repeat transport delivery of the identical event: suppressed.
+	rec = do(t, srv, "GET", "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event=startup", "")
+	out = agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || out.Context != "" || len(out.FactIDs) != 0 {
+		t.Fatalf("duplicate delivery must answer empty: %d %q %v", rec.Code, out.Context, out.FactIDs)
+	}
+	if e2, r2, _, reinf2 := deliveryMarker(t, srv, "agent-myproj", "s1"); e2 != event || r2 != rev || reinf2 != 0 {
+		t.Fatalf("duplicate must not rewrite the marker: %q %q reinf=%d", e2, r2, reinf2)
+	}
+
+	// No event param: no delivery identity, legacy behavior unchanged.
+	rec = do(t, srv, "GET", "/v1/agent/context?cwd=/home/u/myproj&sid=s1", "")
+	out = agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("legacy no-event fetch must keep delivering: %d %q", rec.Code, out.Context)
+	}
+}
+
+// TestAgentContextResumeRefreshesOnce pins the resume policy: a deliberate
+// resume refreshes the block once per identified resume event, and a
+// repeated resume delivery with an unchanged revision is suppressed - the
+// host offers no delivery ID distinguishing a fresh resume from a
+// transport replay, so once-per-(event, revision) is the documented
+// bounded policy. The marker stores only the latest pair, so a startup
+// following the resume delivers again (bounded flip-flop, also
+// documented) and then dedupes on its own repeat.
+func TestAgentContextResumeRefreshesOnce(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	if _, err := srv.mem.Write(ctx, memory.WriteInput{
+		Namespace: "agent-myproj", Key: "/decisions/auth", Body: "auth uses jwt via jose",
+		Author: "test", Writer: "test", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event="
+
+	rec := do(t, srv, "GET", path+"startup", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context == "" {
+		t.Fatalf("startup: %d %q", rec.Code, out.Context)
+	}
+	rec = do(t, srv, "GET", path+"resume", "")
+	out := agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("fresh resume must refresh once: %d %q", rec.Code, out.Context)
+	}
+	if event, _, state, _ := deliveryMarker(t, srv, "agent-myproj", "s1"); event != "resume" || state != "issued" {
+		t.Fatalf("marker after resume = %q %q", event, state)
+	}
+
+	rec = do(t, srv, "GET", path+"resume", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("repeated resume delivery must be suppressed: %d %q", rec.Code, out.Context)
+	}
+
+	// Flip-flop: the marker holds only the latest pair, so startup after
+	// resume delivers again, then dedupes on repeat.
+	rec = do(t, srv, "GET", path+"startup", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context == "" {
+		t.Fatalf("startup after resume delivers (bounded flip-flop): %d %q", rec.Code, out.Context)
+	}
+	rec = do(t, srv, "GET", path+"startup", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("repeated startup delivery must be suppressed: %d %q", rec.Code, out.Context)
+	}
+}
+
+// TestAgentContextChangedFactsEligibleAgain pins the revision half of the
+// delivery identity: once the assembled block changes (a superseded fact
+// body -> a new fact ID -> a new revision), the same event is eligible
+// again, and the new revision then dedupes on its own repeat.
+func TestAgentContextChangedFactsEligibleAgain(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	write := func(body string) {
+		t.Helper()
+		if _, err := srv.mem.Write(ctx, memory.WriteInput{
+			Namespace: "agent-myproj", Key: "/decisions/auth", Body: body,
+			Author: "test", Writer: "test", Importance: 0.8,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("auth uses jwt via jose")
+	const path = "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event=startup"
+
+	rec := do(t, srv, "GET", path, "")
+	out := agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("first delivery: %d %q", rec.Code, out.Context)
+	}
+	_, rev1, _, _ := deliveryMarker(t, srv, "agent-myproj", "s1")
+
+	write("auth uses jwt via jose, refreshed keys in vault")
+	rec = do(t, srv, "GET", path, "")
+	out = agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "refreshed keys") {
+		t.Fatalf("changed facts must be eligible again: %d %q", rec.Code, out.Context)
+	}
+	_, rev2, _, _ := deliveryMarker(t, srv, "agent-myproj", "s1")
+	if rev1 == rev2 {
+		t.Fatal("changed assembly must produce a new revision")
+	}
+
+	rec = do(t, srv, "GET", path, "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("repeat of the new revision must be suppressed: %d %q", rec.Code, out.Context)
+	}
+}
+
+// TestAgentContextConcurrentSameDeliveryNoAmplification pins the
+// concurrency boundary: N simultaneous deliveries of the same
+// (ns, sid, event) produce exactly one non-empty response and exactly one
+// marker/injected bookkeeping write - followers assemble independently
+// (results are never shared) and answer empty when their revision matches
+// the leader's recorded marker. Duplicate identical writes would show up
+// as reinforcements on the store-deduped bookkeeping facts.
+func TestAgentContextConcurrentSameDeliveryNoAmplification(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	f, err := srv.mem.Write(ctx, memory.WriteInput{
+		Namespace: "agent-myproj", Key: "/decisions/auth", Body: "auth uses jwt via jose",
+		Author: "test", Writer: "test", Importance: 0.8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 8
+	const path = "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event=startup"
+	recs := make([]*httptest.ResponseRecorder, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			rr := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+			recs[i] = rr
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	nonEmpty := -1
+	for i, rec := range recs {
+		if rec == nil {
+			t.Fatalf("goroutine %d produced no response", i)
+		}
+		out := agentContextOutFromBody(t, rec)
+		if rec.Code != 200 {
+			t.Fatalf("goroutine %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+		if out.Context != "" {
+			if nonEmpty != -1 {
+				t.Fatalf("delivery amplified: responses %d and %d both non-empty", nonEmpty, i)
+			}
+			nonEmpty = i
+		} else if len(out.FactIDs) != 0 {
+			t.Fatalf("goroutine %d: empty context must carry no fact_ids: %v", i, out.FactIDs)
+		}
+	}
+	if nonEmpty == -1 {
+		t.Fatal("no delivery produced a context")
+	}
+	if event, _, state, reinf := deliveryMarker(t, srv, "agent-myproj", "s1"); event != "startup" || state != "issued" || reinf != 0 {
+		t.Fatalf("marker = event %q state %q reinforcements %d", event, state, reinf)
+	}
+	injected, err := srv.mem.Recall(ctx, "agent-myproj", "/agent-sessions/s1/injected", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(injected) != 1 || injected[0].Key != "/agent-sessions/s1/injected" {
+		t.Fatalf("injected bookkeeping = %+v", injected)
+	}
+	if injected[0].Body != f.ID || injected[0].Reinforcements != 0 {
+		t.Fatalf("injected fact must be written exactly once: body %q reinf %d", injected[0].Body, injected[0].Reinforcements)
+	}
+}
+
+// TestAgentTurnContextSamePromptIDDeliversOnce pins the turn delivery
+// identity: a repeated delivery of the same pid is suppressed without
+// assembly, a distinct pid stays eligible, and the existing per-turn
+// fact-ID dedup remains effective underneath (the distinct pid only sees
+// facts not already injected into the session). Callers without a pid
+// keep the legacy fact-ID-only behavior.
+func TestAgentTurnContextSamePromptIDDeliversOnce(t *testing.T) {
+	srv := turnTestServer(t, 600, nil)
+	ctx := context.Background()
+	write := func(key, body string) {
+		t.Helper()
+		if _, err := srv.mem.Write(ctx, memory.WriteInput{
+			Namespace: "agent-myproj", Key: key, Body: body,
+			Author: "test", Writer: "test", Importance: 0.8,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("/decisions/auth", "auth uses jwt via jose")
+	const turn = "/v1/agent/context?cwd=/home/u/myproj&mode=turn&q=jwt&sid=s1"
+
+	rec := do(t, srv, "GET", turn+"&pid=p1", "")
+	out := agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("first delivery of pid p1: %d %q", rec.Code, out.Context)
+	}
+
+	rec = do(t, srv, "GET", turn+"&pid=p1", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" || len(out.FactIDs) != 0 {
+		t.Fatalf("duplicate pid delivery must answer empty: %d %q %v", rec.Code, out.Context, out.FactIDs)
+	}
+
+	// A changed fact set does not resurrect an already-delivered pid...
+	write("/decisions/refresh", "jwt refresh rotation policy")
+	rec = do(t, srv, "GET", turn+"&pid=p1", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("delivered pid stays suppressed: %d %q", rec.Code, out.Context)
+	}
+	// ...but a distinct pid is eligible: it gets the new fact only, the
+	// per-session injected-ID dedup still filtering the old one.
+	rec = do(t, srv, "GET", turn+"&pid=p2", "")
+	out = agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "refresh rotation") || strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("distinct pid p2: %d %q", rec.Code, out.Context)
+	}
+	rec = do(t, srv, "GET", turn+"&pid=p2", "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("duplicate pid p2 delivery must answer empty: %d %q", rec.Code, out.Context)
+	}
+
+	// Legacy no-pid turn: unchanged fact-ID dedup (both facts injected),
+	// never an error, and no pid bookkeeping.
+	rec = do(t, srv, "GET", turn, "")
+	if out := agentContextOutFromBody(t, rec); rec.Code != 200 || out.Context != "" {
+		t.Fatalf("legacy no-pid turn: %d %q", rec.Code, out.Context)
+	}
+
+	facts, err := srv.mem.Recall(ctx, "agent-myproj", "/agent-sessions/s1/delivered-turns", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 || facts[0].Key != "/agent-sessions/s1/delivered-turns" {
+		t.Fatalf("delivered-turns bookkeeping = %+v", facts)
+	}
+	if facts[0].Body != "p1 p2" || facts[0].Reinforcements != 0 {
+		t.Fatalf("delivered-turns body = %q reinf = %d", facts[0].Body, facts[0].Reinforcements)
+	}
+}
+
+// TestAgentContextNamespaceAndSessionIsolation pins the identity's scope:
+// delivery markers live under (namespace, session), so the same sid in a
+// different namespace, or a different sid in the same namespace, is a
+// separate delivery stream that dedupes only against itself.
+func TestAgentContextNamespaceAndSessionIsolation(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	for ns, kb := range map[string][2]string{
+		"agent-proja": {"/decisions/a", "proja uses sqlite"},
+		"agent-projb": {"/decisions/b", "projb uses postgres"},
+	} {
+		if _, err := srv.mem.Write(ctx, memory.WriteInput{
+			Namespace: ns, Key: kb[0], Body: kb[1],
+			Author: "test", Writer: "test", Importance: 0.8,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(ns, sid, event string) agentContextOut {
+		t.Helper()
+		rec := do(t, srv, "GET", "/v1/agent/context?ns="+ns+"&sid="+sid+"&event="+event, "")
+		if rec.Code != 200 {
+			t.Fatalf("%s/%s: %d %s", ns, sid, rec.Code, rec.Body.String())
+		}
+		return agentContextOutFromBody(t, rec)
+	}
+
+	if out := get("agent-proja", "s1", "startup"); !strings.Contains(out.Context, "proja uses sqlite") {
+		t.Fatalf("proja/s1: %q", out.Context)
+	}
+	if out := get("agent-projb", "s1", "startup"); !strings.Contains(out.Context, "projb uses postgres") {
+		t.Fatalf("same sid in another namespace must be isolated: %q", out.Context)
+	}
+	if out := get("agent-proja", "s2", "startup"); !strings.Contains(out.Context, "proja uses sqlite") {
+		t.Fatalf("another sid in the same namespace must be isolated: %q", out.Context)
+	}
+	if out := get("agent-proja", "s1", "startup"); out.Context != "" {
+		t.Fatalf("proja/s1 repeat must dedupe: %q", out.Context)
+	}
+	if out := get("agent-projb", "s1", "startup"); out.Context != "" {
+		t.Fatalf("projb/s1 repeat must dedupe: %q", out.Context)
+	}
+	if out := get("agent-proja", "s2", "startup"); out.Context != "" {
+		t.Fatalf("proja/s2 repeat must dedupe: %q", out.Context)
+	}
+	for _, pair := range [][2]string{{"agent-proja", "s1"}, {"agent-proja", "s2"}, {"agent-projb", "s1"}} {
+		if event, _, state, _ := deliveryMarker(t, srv, pair[0], pair[1]); event != "startup" || state != "issued" {
+			t.Fatalf("marker %s/%s = %q %q", pair[0], pair[1], event, state)
+		}
+	}
+}
+
+// TestAgentContextFailureNotRecordedAsDelivered pins the failure
+// boundary: a fetch that fails before any response was produced (here a
+// cancelled request context turning the first store call into a 500)
+// must NOT be recorded as a confirmed delivery, and a healthy retry
+// delivers the full block and only then writes the issued marker.
+func TestAgentContextFailureNotRecordedAsDelivered(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	if _, err := srv.mem.Write(ctx, memory.WriteInput{
+		Namespace: "agent-myproj", Key: "/decisions/auth", Body: "auth uses jwt via jose",
+		Author: "test", Writer: "test", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/v1/agent/context?cwd=/home/u/myproj&sid=s1&event=startup"
+
+	r := httptest.NewRequest("GET", path, nil)
+	cctx, cancel := context.WithCancel(r.Context())
+	cancel()
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, r.WithContext(cctx))
+	if rr.Code != 500 {
+		t.Fatalf("failed fetch: %d %s", rr.Code, rr.Body.String())
+	}
+	if m := deliveryMarkerFact(t, srv, "agent-myproj", "s1"); m != nil {
+		t.Fatalf("failed fetch recorded a delivery: %q", m.Body)
+	}
+
+	rec := do(t, srv, "GET", path, "")
+	out := agentContextOutFromBody(t, rec)
+	if rec.Code != 200 || !strings.Contains(out.Context, "auth uses jwt") {
+		t.Fatalf("retry must deliver in full: %d %q", rec.Code, out.Context)
+	}
+	if _, _, state, _ := deliveryMarker(t, srv, "agent-myproj", "s1"); state != "issued" {
+		t.Fatalf("retry marker state = %q", state)
+	}
+}

@@ -55,11 +55,22 @@ const maxStdinBytes = 1 << 20 // 1MB
 // JSON envelopes with no reason to need different bounds.
 const maxRespBytes = 1 << 20 // 1MB
 
+// hookPayload is the subset of the Claude-shaped hook envelope the
+// injection paths decode. Source and PromptID carry the server's
+// delivery identity (its context-endpoint idempotency boundary): Source
+// is the SessionStart reason - Claude Code's own source enum
+// (startup|resume|clear|compact|fork), forwarded as the session-start
+// fetch's event param - and PromptID is the per-prompt correlation id,
+// forwarded as the turn fetch's pid param. Both may be empty; an empty
+// identity simply means the server applies no delivery dedup, never a
+// failure.
 type hookPayload struct {
 	HookEventName string `json:"hook_event_name"`
 	CWD           string `json:"cwd"`
 	SessionID     string `json:"session_id"`
+	Source        string `json:"source"`
 	Prompt        string `json:"prompt"`
+	PromptID      string `json:"prompt_id"`
 }
 
 // turnQueryClip bounds how many runes of the user's prompt ride the
@@ -128,12 +139,12 @@ func Run(stdin io.Reader, baseURL, apiKey string, out, errw io.Writer) error {
 	var params url.Values
 	switch p.HookEventName {
 	case "SessionStart":
-		params = sessionParams(p.CWD, p.SessionID)
+		params = sessionParams(p.CWD, p.SessionID, p.Source)
 	case "UserPromptSubmit":
 		if p.Prompt == "" {
 			return nil
 		}
-		params = turnParams(p.CWD, p.SessionID, p.Prompt)
+		params = turnParams(p.CWD, p.SessionID, p.Prompt, p.PromptID)
 	default:
 		return nil
 	}
@@ -189,11 +200,18 @@ func forwardHook(baseURL, apiKey string, raw []byte, errw io.Writer) {
 // sessionParams builds the query for a session-start context fetch: cwd
 // always, sid when the payload carried a session id (it feeds the
 // server's per-turn dedup bookkeeping; an absent sid just means no
-// dedup, never a failure).
-func sessionParams(cwd, sid string) url.Values {
+// dedup, never a failure), and event when the payload carried the
+// session-start reason - the delivery identity the server dedupes
+// repeated deliveries of the same event on. An absent event means no
+// delivery identity: the server keeps its legacy always-deliver
+// behavior for such callers.
+func sessionParams(cwd, sid, event string) url.Values {
 	v := url.Values{"cwd": {cwd}}
 	if sid != "" {
 		v.Set("sid", sid)
+	}
+	if event != "" {
+		v.Set("event", event)
 	}
 	if namespaceOverride != "" {
 		v.Set("ns", namespaceOverride)
@@ -203,12 +221,19 @@ func sessionParams(cwd, sid string) url.Values {
 
 // turnParams builds the query for a per-turn (mode=turn) context fetch:
 // prompt-scoped hybrid search, deduped against what session sid was
-// already shown. An empty prompt yields a q the server answers with an
-// empty context, so callers may pass it through without pre-checking.
-func turnParams(cwd, sid, prompt string) url.Values {
+// already shown. pid is the turn delivery identity (the host's
+// per-prompt id): once a pid has been delivered a non-empty block, the
+// server answers a repeated delivery of it empty; an absent pid keeps
+// the legacy fact-ID-only dedup. An empty prompt yields a q the server
+// answers with an empty context, so callers may pass it through without
+// pre-checking.
+func turnParams(cwd, sid, prompt, pid string) url.Values {
 	v := url.Values{"cwd": {cwd}, "mode": {"turn"}, "q": {clipRunes(prompt, turnQueryClip)}}
 	if sid != "" {
 		v.Set("sid", sid)
+	}
+	if pid != "" {
+		v.Set("pid", pid)
 	}
 	if namespaceOverride != "" {
 		v.Set("ns", namespaceOverride)
@@ -406,7 +431,7 @@ func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.
 	// other RunFrom agent keeps its own "never print Claude's envelope"
 	// rule (Cursor's blocking reply above excepted).
 	if fromKey == "codex" {
-		injectCodexContext(translated, baseURL, apiKey, out, errw)
+		injectCodexContext(translated, raw, baseURL, apiKey, out, errw)
 	}
 	return nil
 }
@@ -418,7 +443,19 @@ func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.
 // hookSpecificOutput envelope only when the server returned a non-empty
 // context. Any failure (undecodable translation, dead server, empty
 // context) stays silent, exactly like Run.
-func injectCodexContext(translated []byte, baseURL, apiKey string, out, errw io.Writer) {
+//
+// raw is the NATIVE (pre-translation) payload, decoded here only to
+// recover SessionStart's own source reason (startup|resume|clear|compact
+// per Codex's session_start_source_schema) for the server's event
+// delivery-identity param: translateCodex deliberately hardcodes the
+// translated envelope's source to "codex" (an agent identity, never the
+// session-start reason - see its own doc comment), so the native reason
+// cannot come off env. The translated envelope's prompt_id (the native
+// turn_id) feeds the turn path's pid param. A raw decode failure just
+// leaves the event identity empty - the server then applies no delivery
+// dedup (its documented bounded policy for identity-less callers), and
+// injection still proceeds.
+func injectCodexContext(translated, raw []byte, baseURL, apiKey string, out, errw io.Writer) {
 	var env hookPayload
 	if err := json.Unmarshal(translated, &env); err != nil {
 		// Unreachable in practice: the translator just produced these
@@ -428,16 +465,20 @@ func injectCodexContext(translated []byte, baseURL, apiKey string, out, errw io.
 		fmt.Fprintln(errw, "punk hook: decode translated codex envelope:", err)
 		return
 	}
+	var native codexPayload
+	if json.Unmarshal(raw, &native) != nil {
+		native.Source = "" // no delivery identity; fetch still proceeds
+	}
 
 	var params url.Values
 	switch env.HookEventName {
 	case "SessionStart":
-		params = sessionParams(env.CWD, env.SessionID)
+		params = sessionParams(env.CWD, env.SessionID, native.Source)
 	case "UserPromptSubmit":
 		if env.Prompt == "" {
 			return
 		}
-		params = turnParams(env.CWD, env.SessionID, env.Prompt)
+		params = turnParams(env.CWD, env.SessionID, env.Prompt, env.PromptID)
 	default:
 		return
 	}
@@ -583,7 +624,7 @@ func RunFromAntigravity(event string, stdin io.Reader, baseURL, apiKey string, o
 			fmt.Fprintln(errw, "punk hook: decode translated antigravity envelope:", err)
 			return nil
 		}
-		ctxBody, fetched := fetchContext(baseURL, apiKey, sessionParams(env.CWD, env.SessionID), errw)
+		ctxBody, fetched := fetchContext(baseURL, apiKey, sessionParams(env.CWD, env.SessionID, env.Source), errw)
 		if !fetched || ctxBody == "" {
 			return nil
 		}
@@ -732,7 +773,7 @@ func RunFromCopilot(stdin io.Reader, baseURL, apiKey string, out, errw io.Writer
 		return nil
 	}
 
-	ctxBody, fetched := fetchContext(baseURL, apiKey, sessionParams(env.CWD, env.SessionID), errw)
+	ctxBody, fetched := fetchContext(baseURL, apiKey, sessionParams(env.CWD, env.SessionID, env.Source), errw)
 	if !fetched || ctxBody == "" {
 		return nil
 	}
@@ -856,12 +897,12 @@ func RunFromHermes(stdin io.Reader, baseURL, apiKey string, out, errw io.Writer)
 	// before this path existed.
 	var params url.Values
 	if probe.Extra.IsFirstTurn {
-		params = sessionParams(env.CWD, env.SessionID)
+		params = sessionParams(env.CWD, env.SessionID, env.Source)
 	} else {
 		if probe.Extra.UserMessage == "" {
 			return nil
 		}
-		params = turnParams(env.CWD, env.SessionID, probe.Extra.UserMessage)
+		params = turnParams(env.CWD, env.SessionID, probe.Extra.UserMessage, env.PromptID)
 	}
 	ctxBody, fetched := fetchContext(baseURL, apiKey, params, errw)
 	if !fetched || ctxBody == "" {

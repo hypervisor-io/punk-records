@@ -25,9 +25,15 @@ const sessionSummaryKeySuffix = "/summary"
 
 // sessionBookkeepingSuffixes are per-session facts that are metadata, not
 // capture: they never count toward the summarization threshold and are
-// never fed to the summarizer.
+// never fed to the summarizer. "delivery" and "delivered-turns" are the
+// context-delivery bookkeeping the api package's idempotency boundary
+// writes (its deliveryKey/deliveredTurnsKey).
 func sessionBookkeepingKey(rest string) bool {
-	return rest == "summary" || rest == "injected"
+	switch rest {
+	case "summary", "injected", "delivery", "delivered-turns":
+		return true
+	}
+	return false
 }
 
 // SummarizeSessions maintains one rolling summary per captured agent

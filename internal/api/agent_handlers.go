@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/authz"
@@ -392,6 +395,188 @@ func (s *Server) recordInjectedIDs(ctx context.Context, ns, sid string, prior ma
 	}
 }
 
+// agentTurnDeliveredMaxPIDs caps how many prompt IDs the per-session
+// delivered-turns bookkeeping fact accumulates. Beyond this the oldest
+// entries fall off (lexicographically, the same graceful-degradation
+// tradeoff agentContextInjectedMaxIDs makes): pid dedup may re-deliver a
+// very old turn on a transport replay instead of the bookkeeping fact
+// growing unbounded in a long session.
+const agentTurnDeliveredMaxPIDs = 200
+
+// deliveryKey is the /agent-sessions/ key holding session sid's latest
+// context-delivery marker, body "<event> <revision> issued": the
+// session-start delivery identity (see handleAgentContext's idempotency
+// comment for the full state model) and the only state the server can
+// truthfully record. Living under /agent-sessions/ keeps it out of every
+// context pool (agentContextExcludedPrefix) and out of session
+// summarization (memory.sessionBookkeepingKey), and gives it the same
+// capture TTL.
+func deliveryKey(sid string) string {
+	return "/agent-sessions/" + sid + "/delivery"
+}
+
+// deliveredTurnsKey is the /agent-sessions/ key recording which prompt
+// IDs (the mode=turn path's pid param) were already delivered to session
+// sid - the per-turn analog of deliveryKey, bounded by
+// agentTurnDeliveredMaxPIDs.
+func deliveredTurnsKey(sid string) string {
+	return "/agent-sessions/" + sid + "/delivered-turns"
+}
+
+// deliveryRevision is the content half of the session-start delivery
+// identity: a sha256 over the assembled context block and the fact IDs it
+// carried, joined with a NUL byte (neither component can contain one -
+// context lines are control-character-sanitized and IDs are store-
+// generated), so any change to the block's text OR its fact set yields a
+// new revision and becomes eligible for delivery again. Covering the
+// whole assembled block is what makes duplicate suppression include the
+// profile, summary and entities components, not just the fact bullets.
+func deliveryRevision(context string, ids []string) string {
+	sum := sha256.Sum256([]byte(context + "\x00" + strings.Join(ids, " ")))
+	return hex.EncodeToString(sum[:])
+}
+
+// readDeliveryMarker returns the (event, revision) pair recorded in
+// session sid's latest delivery marker, or empty strings when none exists
+// or any read fails - dedup is best-effort and must never fail a context
+// request (a missed suppression re-delivers, the safe direction).
+func (s *Server) readDeliveryMarker(ctx context.Context, ns, sid string) (event, rev string) {
+	facts, err := s.mem.Recall(ctx, ns, deliveryKey(sid), 2)
+	if err != nil {
+		return "", ""
+	}
+	for _, f := range facts {
+		if f.Key != deliveryKey(sid) {
+			continue
+		}
+		if parts := strings.Fields(f.Body); len(parts) == 3 {
+			return parts[0], parts[1]
+		}
+	}
+	return "", ""
+}
+
+// recordDeliveryMarker writes session sid's delivery marker as
+// "<event> <rev> issued". "issued" is deliberately the only state that
+// exists here: the assembled response was produced and handed to the
+// HTTP layer. An "acknowledged" state - the hook actually consumed the
+// response and rendered it to its agent - is unobservable from this
+// side: neither Claude Code nor Codex 0.153.4 sends any acknowledgement,
+// so the endpoint makes no end-to-end exactly-once rendering promise
+// (see handleAgentContext's idempotency comment for the resulting
+// loss/duplication windows). Best-effort like every other delivery
+// bookkeeping write: a store failure is logged and swallowed - the
+// consequence is a later re-delivery, never a failed request.
+func (s *Server) recordDeliveryMarker(ctx context.Context, ns, sid, event, rev string) {
+	expiresAt := time.Now().Add(agentCaptureTTL)
+	if _, err := s.mem.Write(ctx, memory.WriteInput{
+		Namespace: ns, Key: deliveryKey(sid), Body: event + " " + rev + " issued",
+		Author: "agent-context", Writer: "agent-context",
+		ExpiresAt: &expiresAt,
+	}); err != nil && s.log != nil {
+		s.log.Warn("record delivery marker failed", "ns", ns, "sid", sid, "err", err)
+	}
+}
+
+// readDeliveredTurns returns the set of prompt IDs already delivered to
+// session sid by the mode=turn path, or an empty set on any failure -
+// the same best-effort contract readInjectedIDs has.
+func (s *Server) readDeliveredTurns(ctx context.Context, ns, sid string) map[string]bool {
+	seen := map[string]bool{}
+	facts, err := s.mem.Recall(ctx, ns, deliveredTurnsKey(sid), 2)
+	if err != nil {
+		return seen
+	}
+	for _, f := range facts {
+		if f.Key != deliveredTurnsKey(sid) {
+			continue
+		}
+		for _, pid := range strings.Fields(f.Body) {
+			seen[pid] = true
+		}
+	}
+	return seen
+}
+
+// recordDeliveredTurn merges pid into session sid's delivered-turns
+// fact, capped at agentTurnDeliveredMaxPIDs. Best-effort like
+// recordInjectedIDs: any store failure is logged and swallowed.
+func (s *Server) recordDeliveredTurn(ctx context.Context, ns, sid string, prior map[string]bool, pid string) {
+	if sid == "" || pid == "" {
+		return
+	}
+	merged := make([]string, 0, len(prior)+1)
+	for id := range prior {
+		merged = append(merged, id)
+	}
+	sort.Strings(merged) // deterministic body for the revision chain
+	if !prior[pid] {
+		merged = append(merged, pid)
+	}
+	if len(merged) > agentTurnDeliveredMaxPIDs {
+		merged = merged[len(merged)-agentTurnDeliveredMaxPIDs:]
+	}
+	expiresAt := time.Now().Add(agentCaptureTTL)
+	if _, err := s.mem.Write(ctx, memory.WriteInput{
+		Namespace: ns, Key: deliveredTurnsKey(sid), Body: strings.Join(merged, " "),
+		Author: "agent-context", Writer: "agent-context",
+		ExpiresAt: &expiresAt,
+	}); err != nil && s.log != nil {
+		s.log.Warn("record delivered turn failed", "ns", ns, "sid", sid, "err", err)
+	}
+}
+
+// deliveryMutex is a keyed mutex guarding the idempotency boundary: it
+// serializes concurrent deliveries that share one delivery-identity key
+// (ns|sid|event on the session-start path, ns|sid|turn|pid on the turn
+// path) so exactly one request per delivery produces a non-empty
+// response and writes the bookkeeping. Locks are refcounted and deleted
+// when the last waiter releases, so the map never grows with every
+// session the server has ever seen. Results are deliberately NOT shared
+// between waiters (no singleflight): a suppressed duplicate must answer
+// empty from its own assembly rather than receive the leader's context.
+type deliveryMutex struct {
+	mu    sync.Mutex
+	locks map[string]*deliveryLock
+}
+
+type deliveryLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func newDeliveryMutex() *deliveryMutex {
+	return &deliveryMutex{locks: map[string]*deliveryLock{}}
+}
+
+// lock acquires key's mutex and returns its release function, which is
+// idempotent (sync.Once) so a deferred release stays correct on every
+// return path.
+func (m *deliveryMutex) lock(key string) func() {
+	m.mu.Lock()
+	l := m.locks[key]
+	if l == nil {
+		l = &deliveryLock{}
+		m.locks[key] = l
+	}
+	l.refs++
+	m.mu.Unlock()
+
+	l.mu.Lock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Unlock()
+			m.mu.Lock()
+			l.refs--
+			if l.refs == 0 {
+				delete(m.locks, key)
+			}
+			m.mu.Unlock()
+		})
+	}
+}
+
 // handleAgentContext assembles a ready-to-inject context block for an
 // agent starting work on a project: the namespace's known entities plus
 // its most important/recent facts (or, with a q param, hybrid-search hits
@@ -415,6 +600,18 @@ func (s *Server) recordInjectedIDs(ctx context.Context, ns, sid string, prior ma
 // an empty fact_ids are still returned - so a caller like hookcli can
 // treat "nothing to show" as "skip injection" rather than printing a
 // useless header-only block every session.
+//
+// With the sid AND event params present the request carries a delivery
+// identity and becomes idempotent: event is the host's session-start
+// reason (Claude Code's SessionStart source enum startup|resume|clear|
+// compact|fork; Codex's native source of the same name, recovered by
+// hookcli from the raw payload), and a delivery whose assembled revision
+// matches the session's latest issued marker - a duplicate transport
+// delivery of the same event - answers an empty Context and records
+// nothing. See the idempotency comment at the function's end for the
+// issued-vs-acknowledged state boundary and the bounded loss/duplication
+// windows; callers sending no event keep the legacy always-deliver
+// behavior.
 func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 	ns := r.URL.Query().Get("ns")
 	if ns == "" {
@@ -445,6 +642,19 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("mode") == "turn" {
 		s.handleAgentTurnContext(w, r, ns, sid)
 		return
+	}
+	// Delivery identity (event param): sanitized like every other
+	// caller-supplied ID so it can never inject extra key segments
+	// through the marker bookkeeping. sid+event together enable the
+	// idempotency boundary below; either one absent means no delivery
+	// identity and the legacy always-deliver behavior. The keyed lock
+	// serializes concurrent deliveries of this exact identity so the
+	// marker read -> assemble -> compare -> record window below yields
+	// exactly one non-empty response and one bookkeeping write.
+	event := sanitizeID(r.URL.Query().Get("event"))
+	if sid != "" && event != "" {
+		unlock := s.delivery.lock(ns + "|" + sid + "|" + event)
+		defer unlock()
 	}
 	maxTokens := queryMaxTokens(r)
 	if maxTokens <= 0 {
@@ -635,10 +845,67 @@ func (s *Server) handleAgentContext(w http.ResponseWriter, r *http.Request) {
 		context = ""
 	}
 
+	// Idempotency boundary. A delivery is identified by
+	// (namespace, session, event, revision); the marker at
+	// deliveryKey(sid) holds the latest ISSUED pair. Issued is the
+	// only state that exists: the response was produced and handed to
+	// the HTTP layer. There is no acknowledged state - whether the
+	// hook consumed the response before exiting, or the connection
+	// died after the response was produced but before stdout was
+	// consumed, is unobservable without a host acknowledgement
+	// channel - so this endpoint makes no end-to-end exactly-once
+	// rendering promise. Two bounded windows follow from that, both
+	// deliberate:
+	//
+	//   - loss: a response produced but never consumed leaves the
+	//     marker issued while the model never saw the context; an
+	//     identical re-delivery stays suppressed. Self-heal is the
+	//     next IDENTIFIED event: a different event (resume after
+	//     startup, compact, ...) or any changed fact/entity/profile/
+	//     summary content (new revision) re-delivers current state.
+	//   - duplication: callers sending no event param get no dedup
+	//     at all, and alternating event values over an unchanged
+	//     revision re-deliver each alternation - the marker stores
+	//     only the latest (event, revision) pair. Hosts that lack a
+	//     per-delivery ID (every supported one) therefore get
+	//     once-per-(event, revision) suppression as the bounded
+	//     policy: a repeat resume with unchanged content is
+	//     indistinguishable from a transport replay and is
+	//     suppressed.
+	//
+	// A failed fetch is never a confirmed delivery: this block runs
+	// only on the 200 path after successful assembly, and a request
+	// context that is already cancelled (the client is gone - the
+	// response provably will not be consumed) skips the marker write
+	// so a retry delivers. Store failures, 500s and refused
+	// connections record nothing for the same reason.
+	if sid != "" && event != "" && context != "" {
+		rev := deliveryRevision(context, ids)
+		if mEvent, mRev := s.readDeliveryMarker(r.Context(), ns, sid); mEvent == event && mRev == rev {
+			// Duplicate transport delivery of an already-issued
+			// event: answer empty and record nothing. The revision
+			// covers the whole assembled block, so this suppresses
+			// the profile, summary and entities components exactly
+			// like the fact bullets.
+			writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: "", FactIDs: []string{}})
+			return
+		}
+		// Authorization is checked immediately before the write, never
+		// cached from request start: bookkeeping records state a caller
+		// did not read, so it counts as a write on ns and needs OpWrite.
+		// A read-only subject still gets the assembled context; only the
+		// bookkeeping is skipped (see recordInjectedIDs below).
+		if r.Context().Err() == nil && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
+			s.recordDeliveryMarker(r.Context(), ns, sid, event, rev)
+		}
+	}
+
 	// Session-start bookkeeping for per-turn dedup: when
 	// the hook told us its session id, remember which fact IDs this block
 	// carried so mode=turn never re-injects them. Merging with any prior
 	// record keeps resumed sessions (SessionStart source=resume) additive.
+	// The duplicate branch above returns early, so a suppressed delivery
+	// re-records nothing here either.
 	if sid != "" && len(ids) > 0 && context != "" && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
 		s.recordInjectedIDs(r.Context(), ns, sid, s.readInjectedIDs(r.Context(), ns, sid), ids)
 	}
@@ -660,11 +927,39 @@ const agentTurnContextHeader = "## Relevant memory\n"
 // A disabled feature (turnTokens 0), an empty q, or zero surviving facts
 // all answer an empty Context so hook clients skip injection; only a
 // genuine store failure is a 500.
+//
+// With the sid AND pid params present the request carries a turn
+// delivery identity: pid is the host's per-prompt id (Claude Code's
+// prompt_id, Codex's native turn_id mapped onto prompt_id), and once a
+// pid has been delivered a non-empty block, a repeated delivery of that
+// same pid answers empty without assembly. A distinct pid stays
+// eligible, still filtered by the per-session injected-IDs dedup, which
+// remains effective with or without a pid. Callers sending no pid keep
+// the legacy fact-ID-only dedup. The state model matches the
+// session-start path's (see handleAgentContext's idempotency comment):
+// the delivered-turns record means issued, never acknowledged, and a
+// failed fetch records nothing.
 func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, ns, sid string) {
 	q := r.URL.Query().Get("q")
 	if s.turnTokens <= 0 || q == "" {
 		writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: "", FactIDs: []string{}})
 		return
+	}
+	// Turn delivery identity: sanitized like every caller-supplied ID.
+	// The keyed lock serializes concurrent deliveries of the same
+	// (ns, sid, pid) so exactly one of them assembles and delivers.
+	pid := sanitizeID(r.URL.Query().Get("pid"))
+	delivered := map[string]bool{}
+	if sid != "" && pid != "" {
+		unlock := s.delivery.lock(ns + "|" + sid + "|turn|" + pid)
+		defer unlock()
+		delivered = s.readDeliveredTurns(r.Context(), ns, sid)
+		if delivered[pid] {
+			// Duplicate transport delivery of an already-issued
+			// turn: answer empty, record nothing.
+			writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: "", FactIDs: []string{}})
+			return
+		}
 	}
 	maxTokens := queryMaxTokens(r)
 	if maxTokens <= 0 {
@@ -715,6 +1010,19 @@ func (s *Server) handleAgentTurnContext(w http.ResponseWriter, r *http.Request, 
 		context = ""
 	} else if sid != "" && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
 		s.recordInjectedIDs(r.Context(), ns, sid, seen, ids)
+		// The pid is recorded only for a delivery that actually
+		// carried something: a turn that assembled nothing has not
+		// consumed its delivery identity, so a retry of a failed or
+		// empty fetch stays eligible. Issued, never acknowledged -
+		// see handleAgentContext's idempotency comment.
+		//
+		// The grant is re-checked here rather than carried over from
+		// the guard above: recordInjectedIDs performs a store write
+		// (with embedding), during which the grant can be revoked, and
+		// a stale decision must not authorize this second write.
+		if pid != "" && s.allowNS(r.Context(), verifiedSubject(r), ns, authz.OpWrite) {
+			s.recordDeliveredTurn(r.Context(), ns, sid, delivered, pid)
+		}
 	}
 	writeJSON(w, http.StatusOK, agentContextOut{Namespace: ns, Context: context, FactIDs: ids})
 }

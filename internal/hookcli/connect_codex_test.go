@@ -1,16 +1,24 @@
 package hookcli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/hypervisor-io/punk-records/internal/api"
+	"github.com/hypervisor-io/punk-records/internal/memory"
+	"github.com/hypervisor-io/punk-records/internal/store"
 )
 
 func TestConnectCodexHooksWritesClaudeShapedFile(t *testing.T) {
@@ -42,11 +50,13 @@ func TestConnectCodexHooksWritesClaudeShapedFile(t *testing.T) {
 }
 
 // codexHookSrv is a minimal capture+context double for the RunFrom("codex")
-// tests below: it records the last forwarded /v1/agent/hooks body and
-// answers /v1/agent/context with a fixed non-empty context.
+// tests below: it records the last forwarded /v1/agent/hooks body, every
+// /v1/agent/context query it saw (the C04 delivery-identity params ride
+// there), and answers the context fetch with a fixed non-empty context.
 type codexHookSrv struct {
-	gotHook []byte
-	srv     *httptest.Server
+	gotHook    []byte
+	gotQueries []url.Values
+	srv        *httptest.Server
 }
 
 func newCodexHookSrv(t *testing.T, contextBody string) *codexHookSrv {
@@ -58,6 +68,7 @@ func newCodexHookSrv(t *testing.T, contextBody string) *codexHookSrv {
 			h.gotHook, _ = io.ReadAll(r.Body)
 			w.Write([]byte(`{"status":"stored"}`))
 		case "/v1/agent/context":
+			h.gotQueries = append(h.gotQueries, r.URL.Query())
 			w.Write([]byte(`{"namespace":"agent-p","context":` + strconv.Quote(contextBody) + `,"fact_ids":["1"]}`))
 		}
 	}))
@@ -981,5 +992,287 @@ func TestCodexHookPinRefusesDisagreeingRegistrations(t *testing.T) {
 	}
 	if !installed {
 		t.Fatal("the file is installed; only the single-pin view is refused")
+	}
+}
+
+// newCodexBackend builds a REAL api.Server (sqlite-backed, the same stack
+// production runs) seeded with one durable fact in the namespace the
+// codex fixtures' cwd maps to (/home/u/punkrecords -> agent-punkrecords),
+// and returns its handler - so each test can wrap it in whatever
+// transport-failure behavior it needs - plus the memory store, so tests
+// can inspect the server's delivery bookkeeping directly.
+func newCodexBackend(t *testing.T) (http.Handler, *memory.Store) {
+	t.Helper()
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.MigrateUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mem := memory.New(db, nil)
+	if _, err := mem.Write(context.Background(), memory.WriteInput{
+		Namespace: "agent-punkrecords", Key: "/decisions/delivery",
+		Body:   "delivery dedup ships in C04",
+		Author: "test", Writer: "test", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := api.New(slog.New(slog.DiscardHandler),
+		api.Deps{Memory: mem, TurnContextTokens: 600})
+	return srv.Router(), mem
+}
+
+// codexResumePayload is the native session-start fixture with its source
+// reason flipped to resume - Codex's session_start_source_schema value
+// for a deliberate resume, the event identity the server's once-per-
+// resume refresh keys on.
+func codexResumePayload(t *testing.T) []byte {
+	t.Helper()
+	raw := string(codexFixture(t, "session_start.json"))
+	out := strings.Replace(raw, `"source": "startup"`, `"source": "resume"`, 1)
+	if out == raw {
+		t.Fatal("session_start fixture no longer carries source=startup")
+	}
+	return []byte(out)
+}
+
+// codexDeliveryMarker reads session sid's delivery bookkeeping fact
+// (/agent-sessions/<sid>/delivery) back out of the backend store; nil
+// when none exists.
+func codexDeliveryMarker(t *testing.T, mem *memory.Store, sid string) *memory.Fact {
+	t.Helper()
+	key := "/agent-sessions/" + sid + "/delivery"
+	facts, err := mem.Recall(context.Background(), "agent-punkrecords", key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range facts {
+		if facts[i].Key == key {
+			return &facts[i]
+		}
+	}
+	return nil
+}
+
+// TestRunFromCodexDuplicateSessionStartInjectsOnce is the end-to-end C04
+// contract against a real server: the same native SessionStart event
+// delivered twice over a healthy transport injects exactly once. The
+// first run prints the nested envelope and the server records the issued
+// delivery marker; the repeat run stays completely silent.
+func TestRunFromCodexDuplicateSessionStartInjectsOnce(t *testing.T) {
+	handler, mem := newCodexBackend(t)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	var out1, errw1 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out1, &errw1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out1.String(), `"hookSpecificOutput"`) || !strings.Contains(out1.String(), "delivery dedup ships in C04") {
+		t.Fatalf("first delivery must inject: %s (stderr %s)", out1.String(), errw1.String())
+	}
+	m := codexDeliveryMarker(t, mem, "sess-codex-0153-1")
+	if m == nil {
+		t.Fatal("first delivery must record the delivery marker")
+	}
+	if !strings.HasPrefix(m.Body, "startup ") || !strings.HasSuffix(m.Body, " issued") {
+		t.Fatalf("marker body = %q", m.Body)
+	}
+
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out2, &errw2); err != nil {
+		t.Fatal(err)
+	}
+	if out2.Len() != 0 {
+		t.Fatalf("duplicate session-start delivery must inject nothing, got %s", out2.String())
+	}
+}
+
+// TestRunFromCodexResumeInjectsOncePerEvent pins the resume policy end to
+// end: a deliberate resume (native source=resume) refreshes the injection
+// once per identified resume event; a repeated resume delivery with an
+// unchanged revision stays silent - Codex offers no delivery ID to tell a
+// fresh resume from a transport replay, so once per (event, revision) is
+// the documented bounded policy.
+func TestRunFromCodexResumeInjectsOncePerEvent(t *testing.T) {
+	handler, mem := newCodexBackend(t)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	var out1, errw1 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out1, &errw1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out1.String(), `"hookSpecificOutput"`) {
+		t.Fatalf("startup must inject: %s (stderr %s)", out1.String(), errw1.String())
+	}
+
+	resume := string(codexResumePayload(t))
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(resume), ts.URL, "", &out2, &errw2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2.String(), `"hookSpecificOutput"`) {
+		t.Fatalf("fresh resume must refresh once: %s (stderr %s)", out2.String(), errw2.String())
+	}
+	m := codexDeliveryMarker(t, mem, "sess-codex-0153-1")
+	if m == nil || !strings.HasPrefix(m.Body, "resume ") || !strings.HasSuffix(m.Body, " issued") {
+		t.Fatalf("marker after resume = %+v", m)
+	}
+
+	var out3, errw3 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(resume), ts.URL, "", &out3, &errw3); err != nil {
+		t.Fatal(err)
+	}
+	if out3.Len() != 0 {
+		t.Fatalf("repeated resume delivery must inject nothing, got %s", out3.String())
+	}
+}
+
+// TestRunFromCodexForwardsDeliveryIdentity pins the wire contract: the
+// codex context fetch carries the delivery identity - the native
+// session-start source as the event param (recovered from the RAW
+// payload, since translateCodex deliberately hardcodes the translated
+// envelope's source to "codex"), the session id as sid, and the native
+// turn_id (mapped onto prompt_id by the translator) as the turn path's
+// pid param.
+func TestRunFromCodexForwardsDeliveryIdentity(t *testing.T) {
+	h := newCodexHookSrv(t, "## Project memory\n- [/a] x")
+	var out, errw strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexResumePayload(t))), h.srv.URL, "", &out, &errw); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.gotQueries) != 1 {
+		t.Fatalf("context fetches = %d, want 1", len(h.gotQueries))
+	}
+	q := h.gotQueries[0]
+	if q.Get("event") != "resume" {
+		t.Fatalf("session-start query %q must carry the native source as event", q.Encode())
+	}
+	if q.Get("sid") != "sess-codex-0153-1" {
+		t.Fatalf("session-start query %q must carry sid", q.Encode())
+	}
+
+	h2 := newCodexHookSrv(t, "- [/a] relevant turn fact")
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "user_prompt_submit.json"))), h2.srv.URL, "", &out2, &errw2); err != nil {
+		t.Fatal(err)
+	}
+	if len(h2.gotQueries) != 1 {
+		t.Fatalf("turn context fetches = %d, want 1", len(h2.gotQueries))
+	}
+	q2 := h2.gotQueries[0]
+	if q2.Get("mode") != "turn" || q2.Get("pid") != "turn-codex-0001" {
+		t.Fatalf("turn query %q must carry pid=turn-codex-0001", q2.Encode())
+	}
+}
+
+// TestRunFromCodexContextLostAfterResponseIsIssuedNotAcked pins the
+// loss-window half of the state boundary: the server produces the full
+// response (and records the marker as ISSUED - acknowledged is
+// unobservable without a host ack channel), the connection dies mid-body
+// so the hook never renders anything, and the next identified event
+// (resume) re-delivers. This is the documented, unavoidable window: the
+// server cannot tell a consumed response from a lost one.
+func TestRunFromCodexContextLostAfterResponseIsIssuedNotAcked(t *testing.T) {
+	handler, mem := newCodexBackend(t)
+	var lost atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agent/context" && !lost.Swap(true) {
+			// Let the real server produce the complete response (this is
+			// what issues the delivery marker), then kill the connection
+			// mid-body: the model never sees the context and the server
+			// can never know.
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			body := rec.Body.Bytes()
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("test server cannot hijack the connection")
+				return
+			}
+			conn, buf, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			// Announce more bytes than will ever arrive, send half the
+			// body, then hard-close: the client's read fails mid-body.
+			fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(body)+256)
+			buf.Write(body[:len(body)/2])
+			buf.Flush()
+			conn.Close()
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	var out, errw strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out, &errw); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("hook must stay silent when the response was lost in transit: %s", out.String())
+	}
+	if !strings.Contains(errw.String(), "context response read") {
+		t.Fatalf("truncated body must be noted on stderr as a read failure: %s", errw.String())
+	}
+	m := codexDeliveryMarker(t, mem, "sess-codex-0153-1")
+	if m == nil || !strings.HasPrefix(m.Body, "startup ") || !strings.HasSuffix(m.Body, " issued") {
+		t.Fatalf("marker after lost response = %+v", m)
+	}
+
+	// Self-heal: the next identified event re-delivers the current state.
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexResumePayload(t))), ts.URL, "", &out2, &errw2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2.String(), `"hookSpecificOutput"`) {
+		t.Fatalf("resume after a lost delivery must re-inject: %s (stderr %s)", out2.String(), errw2.String())
+	}
+}
+
+// TestRunFromCodexFetchFailureBeforeResponseRetryDelivers pins the
+// failure half of the boundary: a context fetch that fails BEFORE any
+// response was produced (500 from the server) prints nothing and records
+// nothing - a failed fetch is never a confirmed delivery - and the retry
+// over a healthy transport delivers in full and only then issues the
+// marker.
+func TestRunFromCodexFetchFailureBeforeResponseRetryDelivers(t *testing.T) {
+	handler, mem := newCodexBackend(t)
+	var failNext atomic.Bool
+	failNext.Store(true)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agent/context" && failNext.CompareAndSwap(true, false) {
+			http.Error(w, "store on fire", http.StatusInternalServerError)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	var out, errw strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out, &errw); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("failed fetch must print nothing: %s", out.String())
+	}
+	if m := codexDeliveryMarker(t, mem, "sess-codex-0153-1"); m != nil {
+		t.Fatalf("failed fetch recorded a delivery: %q", m.Body)
+	}
+
+	var out2, errw2 strings.Builder
+	if err := RunFrom("codex", strings.NewReader(string(codexFixture(t, "session_start.json"))), ts.URL, "", &out2, &errw2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2.String(), `"hookSpecificOutput"`) || !strings.Contains(out2.String(), "delivery dedup ships in C04") {
+		t.Fatalf("retry must deliver in full: %s (stderr %s)", out2.String(), errw2.String())
+	}
+	if m := codexDeliveryMarker(t, mem, "sess-codex-0153-1"); m == nil || !strings.HasSuffix(m.Body, " issued") {
+		t.Fatalf("retry must issue the marker: %+v", m)
 	}
 }

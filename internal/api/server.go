@@ -62,6 +62,12 @@ type Server struct {
 	inject        []string // session-start context components; empty = default
 	version       string   // stamped via MountAgentCard; used in A2A cards
 
+	// delivery serializes concurrent context deliveries sharing one
+	// delivery identity (see agent_handlers.go's deliveryMutex) so a
+	// repeated event produces exactly one non-empty response and one
+	// bookkeeping write.
+	delivery *deliveryMutex
+
 	// Ready reports readiness (DB reachable, registry loaded). Nil means
 	// "ready" so the skeleton stays honest before P1 wires the store.
 	Ready func() error
@@ -74,6 +80,7 @@ func New(log *slog.Logger, d Deps) *Server {
 		keys: d.Keys, bus: d.Bus, db: d.DB, reg: d.Reg, region: d.Region, expander: d.Expander,
 		defaultBudget: d.DefaultBudget,
 		turnTokens:    d.TurnContextTokens, inject: d.Inject,
+		delivery: newDeliveryMutex(),
 	}
 	s.mux.Use(middleware.RequestID)
 	s.mux.Use(middleware.Recoverer)

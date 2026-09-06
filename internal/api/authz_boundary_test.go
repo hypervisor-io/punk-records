@@ -568,6 +568,132 @@ func TestAuthzBoundaryAgentContextReadOnlySkipsInjectedBookkeeping(t *testing.T)
 	}
 }
 
+// TestAuthzBoundaryReadOnlyCannotWriteDeliveryMarker pins the C04-review
+// fix: the session-start path also records a delivery marker at
+// /agent-sessions/<sid>/delivery when an event param is present (the
+// idempotency identity from C04), and a read-only subject must not cause
+// that write. The add/sid/event block still assembles and returns the
+// 200 context with its facts; only the bookkeeping write is skipped. On
+// the write grant the same flow records it, so the check is per-write,
+// not cached from request start.
+func TestAuthzBoundaryReadOnlyCannotWriteDeliveryMarker(t *testing.T) {
+	g := authzBoundaryServer(t, true)
+	ctx := context.Background()
+	if _, err := g.mem.Write(ctx, memory.WriteInput{
+		Namespace: "ns-a", Key: "/decisions/x", Body: "auth uses jwt", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bobToken, err := g.keys.Create(ctx, "bob-key", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.az.Grant(ctx, "bob", "ns-a", authz.OpRead); err != nil {
+		t.Fatal(err)
+	}
+	bobAuth := map[string]string{"Authorization": "Bearer " + bobToken}
+
+	// read-only: context comes back with the fact, but no bookkeeping
+	// fact is written.
+	rec := g.do(t, http.MethodGet, "/v1/agent/context?ns=ns-a&sid=s1&event=startup", "", bobAuth)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("context = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out agentContextOut
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.FactIDs) == 0 {
+		t.Fatalf("context returned no facts: %+v", out)
+	}
+	if facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/s1/", 1); err != nil {
+		t.Fatal(err)
+	} else if len(facts) != 0 {
+		t.Fatalf("read-only subject caused a bookkeeping write: %+v", facts)
+	}
+
+	// write grant: the same subject's bookkeeping writes now happen -
+	// the injected-IDs fact AND, with an event param, the delivery
+	// marker.
+	if err := g.az.Grant(ctx, "bob", "ns-a", authz.OpWrite); err != nil {
+		t.Fatal(err)
+	}
+	rec = g.do(t, http.MethodGet, "/v1/agent/context?ns=ns-a&sid=s2&event=startup", "", bobAuth)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("context = %d: %s", rec.Code, rec.Body.String())
+	}
+	if facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/s2/injected", 1); err != nil {
+		t.Fatal(err)
+	} else if len(facts) == 0 {
+		t.Fatal("write-granted subject should still get the injected-IDs write")
+	}
+	if facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/s2/delivery", 1); err != nil {
+		t.Fatal(err)
+	} else if len(facts) == 0 {
+		t.Fatal("write-granted subject should still get the delivery-marker write")
+	}
+}
+
+// revokeOnInjectedEmbedder revokes alice's OpWrite on ns-a the first time
+// the /agent-sessions/<sid>/injected bookkeeping fact is embedded - i.e.
+// DURING the recordInjectedIDs store write of a turn-context request.
+type revokeOnInjectedEmbedder struct {
+	az      *authz.Authorizer
+	revoked bool
+	err     error
+}
+
+func (e *revokeOnInjectedEmbedder) Dims() int { return 3 }
+
+func (e *revokeOnInjectedEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	for _, s := range texts {
+		if strings.Contains(s, "/agent-sessions/turn-session/injected") && !e.revoked {
+			e.revoked = true
+			e.err = e.az.Revoke(ctx, "alice", "ns-a", authz.OpWrite)
+			if e.err != nil {
+				return nil, e.err
+			}
+		}
+	}
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1, 0, 0}
+	}
+	return out, nil
+}
+
+// TestAuthzBoundaryRevocationBeforeSecondTurnWrite pins the C04-review-r2
+// fix: the turn branch's enclosing OpWrite guard authorizes
+// recordInjectedIDs, but the grant can be revoked during that first store
+// write (here: mid-embed). recordDeliveredTurn must re-check the grant
+// immediately before its own write rather than reuse the stale decision.
+func TestAuthzBoundaryRevocationBeforeSecondTurnWrite(t *testing.T) {
+	g := authzBoundaryServer(t, true)
+	ctx := t.Context()
+	g.s.turnTokens = 600
+	if _, err := g.mem.Write(ctx, memory.WriteInput{
+		Namespace: "ns-a", Key: "/decisions/auth", Body: "auth uses jwt via jose", Importance: 0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := &revokeOnInjectedEmbedder{az: g.az}
+	g.mem.SetEmbedder(e)
+	r := g.do(t, http.MethodGet, "/v1/agent/context?ns=ns-a&mode=turn&q=jwt&sid=turn-session&pid=p1", "", nil)
+	if r.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", r.Code, r.Body.String())
+	}
+	if !e.revoked || e.err != nil {
+		t.Fatalf("revocation not exercised: %t %v", e.revoked, e.err)
+	}
+	facts, err := g.mem.Recall(ctx, "ns-a", "/agent-sessions/turn-session/delivered-turns", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) > 0 {
+		t.Fatal("delivered-turns written after OpWrite revoked during earlier injected-ID write")
+	}
+}
+
 // TestAuthzBoundaryZeroKeyBootstrapDeniedResolvedNS: enforcement mode
 // denies the zero-key bootstrap on request-resolved namespace routes too
 // (no verified subject, deny-by-default).
