@@ -311,6 +311,45 @@ func TestInspectCodexMCPScopeEnabledFalseMarksDisabled(t *testing.T) {
 	}
 }
 
+// TestInspectCodexMCPScopeUnrecognizedKeyMultilineArrayStaysInspectable
+// is the 3d(i) red proof: an unrecognized [mcp_servers.punk] key (tool
+// filters and similar future fields) with a multi-line array value used
+// to fail the whole scope as unknown, because only recognized keys
+// folded multi-line values - the continuation lines were then read as
+// fresh (unparseable) lines inside the punk table. The value carries no
+// punk identity, so it must be folded and ignored, leaving the rest of
+// the entry inspectable.
+func TestInspectCodexMCPScopeUnrecognizedKeyMultilineArrayStaysInspectable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	doc := "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\nenabled_tools = [\n  \"recall\",\n  \"search\",\n]\n"
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc := EnumerateCodexMCPScopes(p)[0]
+	if sc.Err != nil || !sc.Installed || sc.Endpoint != "http://localhost:9090/mcp?toolset=agent" {
+		t.Fatalf("an unrecognized key's multi-line array value must be folded and ignored: %+v (err %v)", sc, sc.Err)
+	}
+}
+
+// TestInspectCodexMCPScopeForeignMultilineNestedArrayStaysInspectable is
+// the 3d(ii) red proof: a root-level or other-table multi-line array
+// whose continuation line begins with '[' (a nested array element) used
+// to be misread by the strings.HasPrefix(trim, "[") table-header check,
+// failing the whole document as unparseable. auditCodexForeignLine must
+// fold such an array so its continuation lines are consumed and never
+// examined as headers.
+func TestInspectCodexMCPScopeForeignMultilineNestedArrayStaysInspectable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	doc := "[other]\nmatrix = [\n  [\"a\", \"b\"],\n  [\"c\", \"d\"],\n]\n\n[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n"
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc := EnumerateCodexMCPScopes(p)[0]
+	if sc.Err != nil || !sc.Installed || sc.Endpoint != "http://localhost:9090/mcp?toolset=agent" {
+		t.Fatalf("a foreign table's multi-line array with a bracket-leading continuation line must not be misread as a table header: %+v (err %v)", sc, sc.Err)
+	}
+}
+
 // TestInspectCodexMCPScopeHeaderHelperMarksUnverified: an entry
 // carrying http_headers_helper resolves part of its headers by running
 // an external command at connect time (upstream codex-rs

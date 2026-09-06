@@ -255,6 +255,92 @@ func TestConnectCodexConfigRefusesForeignPunkTable(t *testing.T) {
 	}
 }
 
+// TestConnectCodexConfigMissingEndMarkerRefuses is the 3a red proof:
+// stripManagedBlock used to return s[:i] when a start marker had no
+// matching end marker, silently dropping everything after it (including
+// a real [other] table) and ConnectCodexConfig would then rewrite the
+// truncated file. A start marker with no end marker must instead be
+// refused, naming the config path, and the file must be left untouched.
+func TestConnectCodexConfigMissingEndMarkerRefuses(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	orig := codexBlockStart + "\n[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n[other]\nfoo = 1\n"
+	if err := os.WriteFile(p, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := MCPEntryOpts{ServerURL: "http://localhost:9090"}
+	if _, err := ConnectCodexConfig(p, o, false, false); err == nil {
+		t.Fatal("a start marker with no end marker must be refused, not silently truncated")
+	} else if !strings.Contains(err.Error(), p) {
+		t.Fatalf("error must name the config path: %v", err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != orig {
+		t.Fatalf("file must be unchanged when the managed block cannot be parsed:\n%s", raw)
+	}
+}
+
+// TestConnectCodexConfigRecognizesQuotedForeignPunkTable is the 3b red
+// proof for ConnectCodexConfig's foreign-table guard: a TOML-equivalent
+// quoted spelling of [mcp_servers.punk] punk did not write must be
+// recognized as the same table as the bare spelling, both without and
+// with --force.
+func TestConnectCodexConfigRecognizesQuotedForeignPunkTable(t *testing.T) {
+	for _, hdr := range []string{`[mcp_servers."punk"]`, `[mcp_servers.'punk']`} {
+		t.Run(hdr, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(p, []byte(hdr+"\ncommand = \"something-else\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			o := MCPEntryOpts{ServerURL: "http://localhost:9090"}
+			if _, err := ConnectCodexConfig(p, o, false, false); err == nil {
+				t.Fatalf("a quoted %s table punk did not write must be refused without --force", hdr)
+			}
+			if _, err := ConnectCodexConfig(p, o, false, true); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile(p)
+			if strings.Contains(string(raw), "something-else") || strings.Count(string(raw), codexPunkTable) != 1 {
+				t.Fatalf("force must replace the quoted foreign table, leaving exactly one punk table:\n%s", raw)
+			}
+		})
+	}
+}
+
+// TestDetectCodexMCPAliasesNormalizesQuotedSpelling is the 3b red proof
+// for the alias detector: [mcp_servers.punk] and [mcp_servers."punk"]
+// name the SAME table, so a file carrying both (both pointing at punk's
+// URL) must not be reported as two duplicate aliases, while genuinely
+// distinct aliases (punk, punk2) still are.
+func TestDetectCodexMCPAliasesNormalizesQuotedSpelling(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	content := "[mcp_servers.\"punk\"]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n" +
+		"[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := DetectCodexMCPAliases(p, "http://localhost:9090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliases) != 0 {
+		t.Fatalf("[mcp_servers.punk] and [mcp_servers.\"punk\"] are the same table and must not be reported as duplicate aliases: %v", aliases)
+	}
+
+	p2 := filepath.Join(t.TempDir(), "config.toml")
+	content2 := "[mcp_servers.punk]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n\n" +
+		"[mcp_servers.punk2]\nurl = \"http://localhost:9090/mcp?toolset=agent\"\n"
+	if err := os.WriteFile(p2, []byte(content2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliases, err = DetectCodexMCPAliases(p2, "http://localhost:9090")
+	if err != nil || len(aliases) != 2 || aliases[0] != "punk" || aliases[1] != "punk2" {
+		t.Fatalf("distinct aliases must still be reported: aliases=%v err=%v", aliases, err)
+	}
+}
+
 func TestConnectCodexConfigKeepsCRLF(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.toml")
 	orig := "model = \"gpt-5\"\r\n\r\n[features]\r\nweb_search = true\r\n"
@@ -384,6 +470,39 @@ func TestDedupeCodexHookScopesKeepsNamespacePinnedProjectGroups(t *testing.T) {
 	joined := strings.Join(notes, "\n")
 	if !strings.Contains(joined, "both") || !strings.Contains(joined, "Stop") {
 		t.Fatalf("double-execution diagnostic must name the event and both scopes: %s", joined)
+	}
+}
+
+// TestDedupeCodexHookScopesNoBothFireNoteWithoutGlobalPunkGroup is the
+// 3c red proof: the "both fire" note only makes sense when the global
+// file actually registers a punk group for that event too. A project
+// punk group for an event the global file has no punk registration for
+// at all cannot "both fire" - there is only one registration - so no
+// note may be emitted for that event, even though the project group is
+// kept.
+func TestDedupeCodexHookScopesNoBothFireNoteWithoutGlobalPunkGroup(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global.json")
+	projectPath := filepath.Join(dir, "project.json")
+	global := `{"hooks":{"SessionStart":[{"matcher":"startup|resume","hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex"}]}]}}`
+	project := `{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex --ns agent-pin"}]}]}}`
+	if err := os.WriteFile(globalPath, []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(project), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("a pinned project group with no global counterpart for its event must be kept")
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "PostToolUse") {
+			t.Fatalf("no global punk group registers PostToolUse; a both-fire note is false evidence: %v", notes)
+		}
 	}
 }
 

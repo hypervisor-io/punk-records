@@ -125,16 +125,20 @@ func codexManagedBlock(o MCPEntryOpts, includeFeatures bool) string {
 // rest. A config.toml can carry more than one (a paste accident, or a
 // block written before the strip existed): they are all punk-managed, so
 // all of them go - leaving a second [mcp_servers.punk] table behind would
-// be exactly the duplicate-MCP-alias defect this package reconciles.
-func stripManagedBlock(s string) string {
+// be exactly the duplicate-MCP-alias defect this package reconciles. A
+// start marker with no matching end marker is not a block this function
+// can safely remove - the content after the start marker could be
+// anything, including a real table - so it reports an error naming the
+// marker instead of truncating the file at the start marker.
+func stripManagedBlock(s string) (string, error) {
 	for {
 		i := strings.Index(s, codexBlockStart)
 		if i < 0 {
-			return s
+			return s, nil
 		}
 		j := strings.Index(s[i:], codexBlockEnd)
 		if j < 0 {
-			return s[:i]
+			return "", fmt.Errorf("found %q with no matching %q", codexBlockStart, codexBlockEnd)
 		}
 		end := i + j + len(codexBlockEnd)
 		if end < len(s) && s[end] == '\n' {
@@ -144,15 +148,42 @@ func stripManagedBlock(s string) string {
 	}
 }
 
+// isPunkMCPTableHeader reports whether line is a [mcp_servers.punk]
+// table header, in any TOML-equivalent quoting - bare
+// ([mcp_servers.punk]), basic-quoted ([mcp_servers."punk"]) or
+// literal-quoted ([mcp_servers.'punk']) all name the same table. An
+// array-of-tables header ([[mcp_servers.punk]]) is a different
+// construct entirely and does not count.
+func isPunkMCPTableHeader(line string) bool {
+	path, array, ok := parseTOMLTableHeader(line)
+	return ok && !array && len(path) == 2 && path[0] == "mcp_servers" && path[1] == "punk"
+}
+
+// hasPunkMCPTableHeader reports whether body declares a
+// [mcp_servers.punk] table, in any TOML-equivalent quoted spelling.
+func hasPunkMCPTableHeader(body string) bool {
+	for _, ln := range strings.Split(body, "\n") {
+		if isPunkMCPTableHeader(strings.TrimSpace(ln)) {
+			return true
+		}
+	}
+	return false
+}
+
 // removeTable deletes the TOML table whose header is exactly hdr, from
-// the header line through the line before the next header (or EOF).
+// the header line through the line before the next header (or EOF). hdr
+// naming the punk table (codexPunkTable) matches every TOML-equivalent
+// quoted spelling of [mcp_servers.punk], not just hdr's own bytes -
+// removeTable is called with the bare spelling but a config can declare
+// the foreign table it replaces with a quoted one.
 func removeTable(s, hdr string) string {
+	punk := hdr == codexPunkTable
 	lines := strings.Split(s, "\n")
 	out := lines[:0]
 	skipping := false
 	for _, ln := range lines {
 		trim := strings.TrimSpace(ln)
-		if trim == hdr {
+		if trim == hdr || (punk && isPunkMCPTableHeader(trim)) {
 			skipping = true
 			continue
 		}
@@ -179,9 +210,12 @@ func ConnectCodexConfig(configPath string, o MCPEntryOpts, enableHooks, force bo
 	// line endings on the way out so a CRLF config.toml stays CRLF and
 	// never ends up with mixed endings.
 	crlf := strings.Contains(existing, "\r\n")
-	body := stripManagedBlock(strings.ReplaceAll(existing, "\r\n", "\n"))
+	body, stripErr := stripManagedBlock(strings.ReplaceAll(existing, "\r\n", "\n"))
+	if stripErr != nil {
+		return false, fmt.Errorf("%s: %w", configPath, stripErr)
+	}
 
-	if strings.Contains(body, codexPunkTable) {
+	if hasPunkMCPTableHeader(body) {
 		if !force {
 			return false, fmt.Errorf("%s already has a %s table that punk did not write; rerun with --force to replace it", configPath, codexPunkTable)
 		}
@@ -333,7 +367,14 @@ func DedupeCodexHookScopes(globalPath, projectPath, punkPath string) (notes []st
 				continue
 			}
 			keptGroups = append(keptGroups, g)
-			notes = append(notes, fmt.Sprintf("%s: both %s and %s register a punk hook; both fire for this repo (the project group differs - for example a namespace pin or a different matcher) - kept, remove one scope by hand if unintended", ev, globalPath, projectPath))
+			// "Both fire" is only true when the global file actually
+			// registers a punk group for THIS event too; a project punk
+			// group for an event the global file has no punk group for at
+			// all is the only registration, so no double-execution note
+			// applies.
+			if len(globalPunkCanon) > 0 {
+				notes = append(notes, fmt.Sprintf("%s: both %s and %s register a punk hook; both fire for this repo (the project group differs - for example a namespace pin or a different matcher) - kept, remove one scope by hand if unintended", ev, globalPath, projectPath))
+			}
 		}
 		if changed {
 			if len(keptGroups) == 0 {
@@ -1233,10 +1274,14 @@ func (sc *CodexMCPScope) markTransport(field string) {
 // one would report inherited connection identity as absent; every one
 // of them fails the scope as unknown instead. Lines that cannot reach
 // the punk entry (other servers, other tables, text this inspector
-// cannot even parse as a key) keep being ignored. i advances across
-// continuation lines when a root-level inline mcp_servers table spans
-// them. Diagnostics name the file, the line and the representation -
-// never a value, which can carry a secret.
+// cannot even parse as a key) keep being ignored - but when such a
+// line's value is an array or inline table, it is still folded (i
+// advances across the lines it spans) so a continuation line is never
+// left for the caller's line loop to misread as document structure (in
+// particular, a nested array element line beginning with '[' would
+// otherwise be read as a table header). Diagnostics name the file, the
+// line and the representation - never a value, which can carry a
+// secret.
 func auditCodexForeignLine(lines []string, i *int, cur []string, trim, configPath string) error {
 	segs, rest, ok := parseTOMLKeyPath(trim)
 	if !ok || len(segs) == 0 {
@@ -1249,30 +1294,45 @@ func auditCodexForeignLine(lines []string, i *int, cur []string, trim, configPat
 	case len(cur) == 0 && len(segs) >= 2 && segs[0] == "mcp_servers" && segs[1] == "punk":
 		return fmt.Errorf("%s line %d defines punk MCP entry fields through a dotted key at the document root, which this inspector does not support; the punk MCP entry cannot be inspected faithfully", configPath, *i+1)
 	}
-	if dotted || len(cur) != 0 || segs[0] != "mcp_servers" {
-		return nil
-	}
-	// A root-level inline mcp_servers table: its top-level keys are the
-	// server aliases, so a punk key among them is the punk entry in a
-	// representation this inspector does not parse.
+
 	rest = strings.TrimSpace(rest)
 	if !strings.HasPrefix(rest, "=") {
 		return nil
 	}
 	value := strings.TrimSpace(rest[1:])
-	if !strings.HasPrefix(value, "{") {
+
+	// A root-level inline mcp_servers table: its top-level keys are the
+	// server aliases, so a punk key among them is the punk entry in a
+	// representation this inspector does not parse.
+	if !dotted && len(cur) == 0 && segs[0] == "mcp_servers" && strings.HasPrefix(value, "{") {
+		body, _, ok := foldTOMLValue(lines, i, value, cutTOMLInlineTable)
+		if !ok {
+			return fmt.Errorf("%s line %d holds an mcp_servers inline table this inspector does not support; whether it defines a punk entry cannot be established", configPath, *i+1)
+		}
+		found, ok := scanTOMLInlineKeys(body, "punk")
+		if !ok {
+			return fmt.Errorf("%s line %d holds an mcp_servers inline table this inspector does not support; whether it defines a punk entry cannot be established", configPath, *i+1)
+		}
+		if found {
+			return fmt.Errorf("%s line %d defines the punk MCP entry inside an inline mcp_servers table, which this inspector does not support; the punk MCP entry cannot be inspected faithfully", configPath, *i+1)
+		}
 		return nil
 	}
-	body, _, ok := foldTOMLValue(lines, i, value, cutTOMLInlineTable)
-	if !ok {
-		return fmt.Errorf("%s line %d holds an mcp_servers inline table this inspector does not support; whether it defines a punk entry cannot be established", configPath, *i+1)
-	}
-	found, ok := scanTOMLInlineKeys(body, "punk")
-	if !ok {
-		return fmt.Errorf("%s line %d holds an mcp_servers inline table this inspector does not support; whether it defines a punk entry cannot be established", configPath, *i+1)
-	}
-	if found {
-		return fmt.Errorf("%s line %d defines the punk MCP entry inside an inline mcp_servers table, which this inspector does not support; the punk MCP entry cannot be inspected faithfully", configPath, *i+1)
+
+	// Any other key line's array or inline-table value carries no punk
+	// identity (it was already ruled out above), but TOML arrays and
+	// inline tables can span multiple lines, and the value must still be
+	// folded so those continuation lines are consumed here rather than
+	// examined as fresh lines by the caller.
+	switch {
+	case strings.HasPrefix(value, "["):
+		if _, _, ok := foldTOMLValue(lines, i, value, cutTOMLArray); !ok {
+			return fmt.Errorf("%s line %d holds an array this inspector cannot follow to its end; the punk MCP entry cannot be inspected faithfully", configPath, *i+1)
+		}
+	case strings.HasPrefix(value, "{"):
+		if _, _, ok := foldTOMLValue(lines, i, value, cutTOMLInlineTable); !ok {
+			return fmt.Errorf("%s line %d holds an inline table this inspector cannot follow to its end; the punk MCP entry cannot be inspected faithfully", configPath, *i+1)
+		}
 	}
 	return nil
 }
@@ -1531,12 +1591,31 @@ func inspectCodexMCPScope(configPath string) CodexMCPScope {
 		if !inPunk() {
 			continue // a deeper punk subtable's key: not a top-level field
 		}
-		if codexPunkEntryKeys[key] {
-			if seenPunkFields[key] {
-				return fail("%s line %d redefines %s in the [mcp_servers.punk] table; TOML rejects duplicate definitions, so Codex cannot load the entry and it cannot be inspected faithfully", configPath, i+1, key)
+		if !codexPunkEntryKeys[key] {
+			// A key outside codexPunkEntryKeys (tool filters and any
+			// further fields upstream adds) carries neither transport nor
+			// punk identity and is ignored - but when its value is an
+			// array or inline table, it may still SPAN further lines
+			// (TOML arrays and inline tables can be multi-line), and those
+			// continuation lines must be consumed here or the main loop
+			// will read them as fresh, unparseable lines (or, for a line
+			// beginning with '[', misread them as a table header).
+			switch {
+			case strings.HasPrefix(value, "["):
+				if _, _, ok := foldTOMLValue(lines, &i, value, cutTOMLArray); !ok {
+					return fail("%s has an unterminated array on line %d; the punk MCP entry cannot be inspected faithfully", configPath, i+1)
+				}
+			case strings.HasPrefix(value, "{"):
+				if _, _, ok := foldTOMLValue(lines, &i, value, cutTOMLInlineTable); !ok {
+					return fail("%s has an unterminated inline table on line %d; the punk MCP entry cannot be inspected faithfully", configPath, i+1)
+				}
 			}
-			seenPunkFields[key] = true
+			continue
 		}
+		if seenPunkFields[key] {
+			return fail("%s line %d redefines %s in the [mcp_servers.punk] table; TOML rejects duplicate definitions, so Codex cannot load the entry and it cannot be inspected faithfully", configPath, i+1, key)
+		}
+		seenPunkFields[key] = true
 		switch key {
 		case "url", "bearer_token_env_var":
 			val, tail, ok := parseTOMLString(value)
@@ -1687,9 +1766,6 @@ func inspectCodexMCPScope(configPath string) CodexMCPScope {
 			// supported boundary explicit, and a duplicate definition is
 			// rejected above exactly like any other recognized key's.
 		}
-		// Keys outside codexPunkEntryKeys (tool filters and any further
-		// fields upstream adds) are ignored: they shape neither the
-		// transport nor the identity.
 	}
 
 	if inlineHeaders && subtableHeaders {
@@ -2074,10 +2150,14 @@ var codexMCPURLRe = regexp.MustCompile(`(?m)^\s*url\s*=\s*("(?:[^"\\]|\\.)*")`)
 // whose url is exactly punk's MCP endpoint for serverURL. More than one
 // such alias means Codex opens duplicate connections to the same punk
 // server under different names (the duplicate-MCP-alias half of C03's
-// duplicate-integration defect). Detection only: aliases punk did not
-// write are foreign config and are never edited here - the caller prints
-// the list so the user can resolve them. A missing file or a config with
-// at most one matching alias returns nil. CRLF content is normalized
+// duplicate-integration defect). Aliases are normalized through
+// parseTOMLTableHeader before comparison, so quoted spellings of the
+// same table ([mcp_servers.punk] and [mcp_servers."punk"]) count as ONE
+// alias rather than two - they name the identical table, not a
+// duplicate. Detection only: aliases punk did not write are foreign
+// config and are never edited here - the caller prints the list so the
+// user can resolve them. A missing file or a config with at most one
+// distinct matching alias returns nil. CRLF content is normalized
 // before scanning, matching ConnectCodexConfig's own line-ending
 // tolerance.
 func DetectCodexMCPAliases(configPath, serverURL string) ([]string, error) {
@@ -2092,6 +2172,7 @@ func DetectCodexMCPAliases(configPath, serverURL string) ([]string, error) {
 	want := mcpEndpoint(serverURL)
 
 	headers := codexMCPTableRe.FindAllStringSubmatchIndex(body, -1)
+	seen := map[string]bool{}
 	var aliases []string
 	for i, h := range headers {
 		end := len(body)
@@ -2107,9 +2188,18 @@ func DetectCodexMCPAliases(configPath, serverURL string) ([]string, error) {
 		if err := json.Unmarshal([]byte(m[1]), &u); err != nil {
 			continue
 		}
-		if u == want {
-			aliases = append(aliases, body[h[2]:h[3]])
+		if u != want {
+			continue
 		}
+		alias := body[h[2]:h[3]]
+		if path, array, ok := parseTOMLTableHeader(body[h[0]:h[1]]); ok && !array && len(path) >= 2 {
+			alias = strings.Join(path[1:], ".")
+		}
+		if seen[alias] {
+			continue
+		}
+		seen[alias] = true
+		aliases = append(aliases, alias)
 	}
 	if len(aliases) < 2 {
 		return nil, nil
