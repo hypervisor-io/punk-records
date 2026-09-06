@@ -502,6 +502,79 @@ func (e *entityExtractor) ExtractBatch(ctx context.Context, bodies []string) ([]
 	return out, nil
 }
 
+// entityExtractTypedPrompt asks for typed entities as strict JSON, one
+// object per entity, with aliases and 1-based source text numbers.
+const entityExtractTypedPrompt = `For EACH numbered text below, list its distinct named entities.
+Respond with ONLY a JSON array of objects, one per entity: {"name": ..., "type": ..., "aliases": [...], "sources": [<text numbers>]}.
+"type" must be one of: service, repository, database, host, incident, person, unknown. Use "unknown" when unsure.
+"aliases" lists other names the text uses for the same entity. "sources" lists the numbers of the texts mentioning the entity.`
+
+// typedEntityExtractor upgrades the plain entityExtractor to
+// memory.StructuredEntityExtractor. It is wired only when
+// memory.entity_types is on, so disabled mode keeps the legacy name-only
+// behavior byte-identical. Parse failures surface as errors - the store
+// falls back to legacy per-fact extraction.
+type typedEntityExtractor struct {
+	*entityExtractor
+}
+
+// ExtractStructured implements memory.StructuredEntityExtractor: one
+// model call over the batch, source numbers mapped back to the exact
+// fact revision IDs (EntitySource.ID, the provenance anchor the store
+// validates and retains; mentions links stay key-addressed inside the
+// store). A source without a revision identity is skipped, never
+// cited as an empty string.
+func (e *typedEntityExtractor) ExtractStructured(ctx context.Context, sources []memory.EntitySource) ([]memory.ExtractedEntity, error) {
+	var b strings.Builder
+	for i, src := range sources {
+		fmt.Fprintf(&b, "%d. %s\n\n", i+1, src.Body)
+	}
+	res, err := e.client.Chat(ctx, []llm.Turn{
+		{Role: "system", Content: entityExtractTypedPrompt},
+		{Role: "user", Content: b.String()},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	s := strings.TrimSpace(res.Content)
+	// fence-strip identical to sibling adapters (obsSummarizer et al).
+	if i := strings.Index(s, "```"); i >= 0 {
+		s = s[i+3:]
+		s = strings.TrimPrefix(s, "json")
+		if j := strings.Index(s, "```"); j >= 0 {
+			s = s[:j]
+		}
+	}
+	var raw []struct {
+		Name    string   `json:"name"`
+		Type    string   `json:"type"`
+		Aliases []string `json:"aliases"`
+		Sources []int    `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &raw); err != nil {
+		e.log.Warn("typed entity extract: unparseable model response", "err", err)
+		return nil, err
+	}
+	out := make([]memory.ExtractedEntity, 0, len(raw))
+	for _, r := range raw {
+		ent := memory.ExtractedEntity{Name: r.Name, Type: r.Type, Aliases: r.Aliases}
+		seen := map[string]bool{}
+		for _, n := range r.Sources {
+			if n < 1 || n > len(sources) {
+				continue // out-of-range source numbers are dropped
+			}
+			id := sources[n-1].ID
+			if id == "" || seen[id] {
+				continue // no revision identity to cite, or already cited
+			}
+			seen[id] = true
+			ent.SourceFacts = append(ent.SourceFacts, id)
+		}
+		out = append(out, ent)
+	}
+	return out, nil
+}
+
 // expandPrompt asks for diverse reformulations as a strict JSON array.
 const expandPrompt = `Generate up to 3 diverse reformulations of the search query below for a memory retrieval system. Different wording, same intent. Respond with ONLY a JSON array of strings.`
 
@@ -690,7 +763,12 @@ func cmdServe(args []string) error {
 			reflectClient = obsClient
 			expander = &queryExpander{client: obsClient, log: log}
 			if cfg.Memory.Entities {
-				mem.SetEntityExtractor(&entityExtractor{client: obsClient, log: log})
+				ex := &entityExtractor{client: obsClient, log: log}
+				if cfg.Memory.EntityTypes {
+					mem.SetEntityExtractor(&typedEntityExtractor{entityExtractor: ex})
+				} else {
+					mem.SetEntityExtractor(ex)
+				}
 			}
 		} else {
 			log.Warn("llm observer disabled", "err", err)

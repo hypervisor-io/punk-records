@@ -123,6 +123,7 @@ type Memory struct {
 	DefensePolicies    map[string]string `yaml:"defense_policies"`    // per-namespace defense mode override
 	ReconcileThreshold float64           `yaml:"reconcile_threshold"` // cosine >= this reconciles near-duplicate observations (0 disables; needs embeddings + AI)
 	Entities           bool              `yaml:"entities"`            // extract + link named entities (needs AI)
+	EntityTypes        bool              `yaml:"entity_types"`        // type extracted entities (service/repository/database/host/incident/person/unknown; needs entities)
 	RerankerURL        string            `yaml:"reranker_url"`        // optional cross-encoder endpoint (TEI /rerank); empty disables reranking
 	QuantizeVectors    bool              `yaml:"quantize_vectors"`    // true: store new embeddings int8 (4x smaller, ~2% recall cost); reads handle both
 	IVFNprobe          int               `yaml:"ivf_nprobe"`          // >0 enables approximate vector index (clusters probed per query)

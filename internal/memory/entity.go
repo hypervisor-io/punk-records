@@ -24,6 +24,64 @@ type BatchEntityExtractor interface {
 	ExtractBatch(ctx context.Context, bodies []string) ([][]string, error)
 }
 
+// The entity type vocabulary: a small fixed set, not a general ontology
+// engine. Anything an extractor declares outside this list is coerced to
+// EntityTypeUnknown (with the declared value retained as declared_type).
+const (
+	EntityTypeService    = "service"
+	EntityTypeRepository = "repository"
+	EntityTypeDatabase   = "database"
+	EntityTypeHost       = "host"
+	EntityTypeIncident   = "incident"
+	EntityTypePerson     = "person"
+	EntityTypeUnknown    = "unknown"
+)
+
+// ValidEntityType reports whether t is in the fixed vocabulary.
+func ValidEntityType(t string) bool {
+	switch t {
+	case EntityTypeService, EntityTypeRepository, EntityTypeDatabase,
+		EntityTypeHost, EntityTypeIncident, EntityTypePerson, EntityTypeUnknown:
+		return true
+	}
+	return false
+}
+
+// EntitySource is one fact handed to a StructuredEntityExtractor. ID is
+// the exact revision identity of the fact (the provenance anchor an
+// extractor cites and the store retains); Key is its mutable address
+// (mentions links stay key-addressed), Body the text extracted from.
+type EntitySource struct {
+	ID   string
+	Key  string
+	Body string
+}
+
+// ExtractedEntity is one structured entity mention: a display name, a
+// declared type from the fixed vocabulary, optional aliases, and the
+// source facts that evidenced it. SourceFacts entries should be exact
+// fact revision IDs (EntitySource.ID); source keys are also accepted
+// and resolve to the revision of that key actually present in the call.
+// Citations matching nothing in the call are invalid: they are dropped
+// and never expand to the whole batch.
+type ExtractedEntity struct {
+	Name        string
+	Type        string
+	Aliases     []string
+	SourceFacts []string
+}
+
+// StructuredEntityExtractor is an optional upgrade an EntityExtractor may
+// implement: typed extraction over a batch of facts, returning names,
+// types, aliases and source fact IDs. Its presence on the configured
+// extractor selects typed entity mode (canonical /entities/<type>/<slug>
+// keys); a plain EntityExtractor keeps the legacy untyped behavior.
+// Adapted from Cognee's consolidate_entities.py mechanism (typed,
+// provenance-linked entity consolidation), reimplemented in Go.
+type StructuredEntityExtractor interface {
+	ExtractStructured(ctx context.Context, sources []EntitySource) ([]ExtractedEntity, error)
+}
+
 var entitySlugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 // EntitySlug normalizes a name to a stable key segment: lowercased,
@@ -91,6 +149,9 @@ func (s *Store) EnrichEntities(ctx context.Context, ns, key string) (int, error)
 	if len(facts) == 0 {
 		return 0, nil // tombstoned or gone between event and processing
 	}
+	if se, ok := s.entityExtractor.(StructuredEntityExtractor); ok {
+		return s.enrichEntitiesTyped(ctx, ns, facts, se)
+	}
 	names, err := s.entityExtractor.Extract(ctx, facts[0].Body)
 	if err != nil {
 		return 0, err
@@ -124,6 +185,9 @@ func (s *Store) EnrichEntitiesBatch(ctx context.Context, ns string, keys []strin
 	if len(live) == 0 {
 		return 0, nil
 	}
+	if se, ok := s.entityExtractor.(StructuredEntityExtractor); ok {
+		return s.enrichEntitiesTyped(ctx, ns, live, se)
+	}
 
 	perFact := func() (int, error) {
 		total := 0
@@ -141,16 +205,11 @@ func (s *Store) EnrichEntitiesBatch(ctx context.Context, ns string, keys []strin
 		return total, nil
 	}
 
-	batcher, ok := s.entityExtractor.(BatchEntityExtractor)
-	if !ok || len(live) == 1 {
-		return perFact()
+	lists, err := s.extractNamesBatched(ctx, live)
+	if err != nil {
+		return 0, err
 	}
-	bodies := make([]string, len(live))
-	for i, f := range live {
-		bodies[i] = f.Body
-	}
-	lists, err := batcher.ExtractBatch(ctx, bodies)
-	if err != nil || len(lists) != len(live) {
+	if lists == nil {
 		// A batch failure or a miscounted answer degrades to per-fact
 		// calls rather than dropping the batch: correctness over the
 		// batching saving.
@@ -165,6 +224,441 @@ func (s *Store) EnrichEntitiesBatch(ctx context.Context, ns string, keys []strin
 		total += n
 	}
 	return total, nil
+}
+
+// extractNamesBatched runs BatchEntityExtractor over live, returning one
+// name list per fact in order. A nil slice (with nil error) means the
+// batch could not be used (no batcher, single fact, batch error or a
+// miscounted answer) and the caller should fall back to per-fact Extract.
+func (s *Store) extractNamesBatched(ctx context.Context, live []Fact) ([][]string, error) {
+	batcher, ok := s.entityExtractor.(BatchEntityExtractor)
+	if !ok || len(live) == 1 {
+		return nil, nil
+	}
+	bodies := make([]string, len(live))
+	for i, f := range live {
+		bodies[i] = f.Body
+	}
+	lists, err := batcher.ExtractBatch(ctx, bodies)
+	if err != nil || len(lists) != len(live) {
+		return nil, nil
+	}
+	return lists, nil
+}
+
+// typedEntity is a validated ExtractedEntity plus its resolved canonical
+// key. declared retains an out-of-vocabulary extractor type for
+// inspection when typ was coerced to unknown. sources holds the source
+// fact KEYS (mentions edges and co_occurs are key-addressed); sourceIDs
+// holds the exact contributing revision IDs stored as source_facts
+// provenance on the entity fact.
+type typedEntity struct {
+	key, name, typ, declared string
+	aliases, sources         []string
+	sourceIDs                []string
+}
+
+// enrichEntitiesTyped is the typed-mode write path shared by
+// EnrichEntities and EnrichEntitiesBatch: one structured call for the
+// whole fact set, validation, then canonical typed upserts. A structured
+// failure degrades to legacy name extraction adapted to type unknown, so
+// typed mode can only add information, never lose entities.
+func (s *Store) enrichEntitiesTyped(ctx context.Context, ns string, live []Fact, se StructuredEntityExtractor) (int, error) {
+	sources := make([]EntitySource, len(live))
+	for i, f := range live {
+		sources[i] = EntitySource{ID: f.ID, Key: f.Key, Body: f.Body}
+	}
+	raw, err := se.ExtractStructured(ctx, sources)
+	if err != nil {
+		return s.enrichEntitiesTypedFallback(ctx, ns, live)
+	}
+	return s.applyTypedEntities(ctx, ns, s.validateExtracted(raw, live))
+}
+
+// enrichEntitiesTypedFallback adapts the legacy name-only interface into
+// structured results of type unknown when the structured call fails.
+// Each name cites the exact revision ID of the fact it came from, so
+// fallback provenance is revision-precise like the structured path.
+func (s *Store) enrichEntitiesTypedFallback(ctx context.Context, ns string, live []Fact) (int, error) {
+	var ents []ExtractedEntity
+	lists, err := s.extractNamesBatched(ctx, live)
+	if err != nil {
+		return 0, err
+	}
+	if lists != nil {
+		for i, f := range live {
+			for _, n := range lists[i] {
+				ents = append(ents, ExtractedEntity{Name: n, SourceFacts: []string{f.ID}})
+			}
+		}
+	} else {
+		for _, f := range live {
+			names, err := s.entityExtractor.Extract(ctx, f.Body)
+			if err != nil {
+				return 0, err
+			}
+			for _, n := range names {
+				ents = append(ents, ExtractedEntity{Name: n, SourceFacts: []string{f.ID}})
+			}
+		}
+	}
+	return s.applyTypedEntities(ctx, ns, s.validateExtracted(ents, live))
+}
+
+// validateExtracted filters malformed structured results so they never
+// write partial invalid entities: entries without a usable name are
+// dropped; out-of-vocabulary types are coerced to unknown with the
+// declared value kept. Provenance is validated against the facts in
+// THIS call: a citation matching a fact's exact revision ID or its key
+// resolves to that fact's revision (the key keeps mentions links
+// working, the revision ID is retained as the provenance anchor);
+// anything else is invalid and dropped - it never expands to the whole
+// batch. An entry left with no valid citation gets the bounded,
+// explicit per-fact fallback (boundedSourceFallback); with no
+// supporting fact at all the entry is skipped.
+func (s *Store) validateExtracted(raw []ExtractedEntity, live []Fact) []typedEntity {
+	byKey := make(map[string]Fact, len(live))
+	byID := make(map[string]Fact, len(live))
+	for _, f := range live {
+		if _, ok := byKey[f.Key]; !ok {
+			byKey[f.Key] = f
+		}
+		if f.ID != "" {
+			byID[f.ID] = f
+		}
+	}
+	var out []typedEntity
+	for _, e := range raw {
+		name := strings.TrimSpace(e.Name)
+		if name == "" || EntitySlug(name) == "" {
+			continue
+		}
+		typ := strings.ToLower(strings.TrimSpace(e.Type))
+		declared := ""
+		switch {
+		case typ == "":
+			typ = EntityTypeUnknown
+		case !ValidEntityType(typ):
+			declared, typ = typ, EntityTypeUnknown
+		}
+		var aliases []string
+		seenAlias := map[string]bool{strings.ToLower(name): true}
+		for _, a := range e.Aliases {
+			a = strings.TrimSpace(a)
+			if a == "" || EntitySlug(a) == "" || seenAlias[strings.ToLower(a)] {
+				continue
+			}
+			seenAlias[strings.ToLower(a)] = true
+			aliases = append(aliases, a)
+		}
+		var srcs, srcIDs []string
+		seenSrc := map[string]bool{}
+		for _, cited := range e.SourceFacts {
+			f, ok := byID[cited]
+			if !ok {
+				f, ok = byKey[cited]
+			}
+			if !ok || seenSrc[f.Key] {
+				continue // outside this call (or already cited): invalid, dropped
+			}
+			seenSrc[f.Key] = true
+			srcs = append(srcs, f.Key)
+			srcIDs = append(srcIDs, f.ID)
+		}
+		if len(srcs) == 0 {
+			srcs, srcIDs = boundedSourceFallback(name, aliases, live)
+			if len(srcs) == 0 {
+				continue // no supporting fact in the call: skip, never invent
+			}
+		}
+		out = append(out, typedEntity{
+			name: name, typ: typ, declared: declared,
+			aliases: aliases, sources: srcs, sourceIDs: srcIDs,
+		})
+	}
+	return out
+}
+
+// boundedSourceFallback attributes an entity whose citations were all
+// missing or invalid to the facts of this call that can actually
+// support it, never to the whole batch: a single-fact call attributes
+// to that one fact (the extractor saw exactly one text); a multi-fact
+// call attributes only to facts whose body literally contains the
+// display name or an alias. An empty result means skip the entity.
+func boundedSourceFallback(name string, aliases []string, live []Fact) (keys, ids []string) {
+	if len(live) == 1 {
+		return []string{live[0].Key}, []string{live[0].ID}
+	}
+	needles := make([]string, 0, len(aliases)+1)
+	needles = append(needles, strings.ToLower(name))
+	for _, a := range aliases {
+		needles = append(needles, strings.ToLower(a))
+	}
+	for _, f := range live {
+		body := strings.ToLower(f.Body)
+		for _, n := range needles {
+			if n != "" && strings.Contains(body, n) {
+				keys = append(keys, f.Key)
+				ids = append(ids, f.ID)
+				break
+			}
+		}
+	}
+	return keys, ids
+}
+
+// resolveTypedEntityKey canonicalizes a typed name against existing
+// /entities/<typ>/ facts only - same display name under a different type
+// is a different entity. Both the name and its aliases fuzzy-match
+// against existing bodies and alias lists (cutoff entityAliasThreshold)
+// before falling back to the exact /entities/<typ>/<slug> key.
+func (s *Store) resolveTypedEntityKey(ctx context.Context, ns string, e typedEntity) (string, error) {
+	prefix := "/entities/" + e.typ + "/"
+	existing, err := s.Recall(ctx, ns, prefix, 1000)
+	if err != nil {
+		return "", err
+	}
+	probes := append([]string{e.name}, e.aliases...)
+	best, bestScore := "", 0.0
+	for _, ex := range existing {
+		cands := append([]string{ex.Body}, entityAliases(ex)...)
+		for _, p := range probes {
+			for _, c := range cands {
+				if score := nameSimilarity(p, c); score >= entityAliasThreshold && score > bestScore {
+					bestScore = score
+					best = ex.Key
+				}
+			}
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+	return prefix + EntitySlug(e.name), nil
+}
+
+// entityAliases reads the aliases attribute of an entity fact.
+func entityAliases(f Fact) []string {
+	return attrStringList(f, "aliases")
+}
+
+// attrStringList reads a string-list attribute written by the enricher.
+func attrStringList(f Fact, name string) []string {
+	raw, ok := f.Attributes[name].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if a, ok := v.(string); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// applyTypedEntities upserts validated typed entities: /entities/<type>/
+// <slug> facts carrying entity_type, aliases and revision-precise
+// source_facts provenance (the exact contributing fact revision IDs),
+// mentions edges from each source fact KEY, and co_occurs bumps per
+// source fact - the typed counterpart of applyEntities, idempotent per
+// (fact, entity) the same way. Re-enriching a NEWER revision of an
+// already-linked key appends that revision's ID to source_facts without
+// another mention_count or co_occurs bump: key-level mentions dedupe
+// must not discard revision provenance.
+func (s *Store) applyTypedEntities(ctx context.Context, ns string, ents []typedEntity) (int, error) {
+	// resolve canonical keys and merge entries that land on the same one
+	// (e.g. a name and its alias extracted separately).
+	byKey := map[string]int{}
+	var merged []typedEntity
+	for _, e := range ents {
+		key, err := s.resolveTypedEntityKey(ctx, ns, e)
+		if err != nil {
+			return 0, err
+		}
+		e.key = key
+		if i, ok := byKey[key]; ok {
+			m := &merged[i]
+			seen := map[string]bool{}
+			for _, k := range m.sources {
+				seen[k] = true
+			}
+			for _, k := range e.sources {
+				if !seen[k] {
+					seen[k] = true
+					m.sources = append(m.sources, k)
+				}
+			}
+			seenID := map[string]bool{}
+			for _, id := range m.sourceIDs {
+				seenID[id] = true
+			}
+			for _, id := range e.sourceIDs {
+				if !seenID[id] {
+					seenID[id] = true
+					m.sourceIDs = append(m.sourceIDs, id)
+				}
+			}
+			seenAlias := map[string]bool{}
+			for _, a := range m.aliases {
+				seenAlias[strings.ToLower(a)] = true
+			}
+			for _, a := range e.aliases {
+				if !seenAlias[strings.ToLower(a)] {
+					seenAlias[strings.ToLower(a)] = true
+					m.aliases = append(m.aliases, a)
+				}
+			}
+			if m.declared == "" {
+				m.declared = e.declared
+			}
+			continue
+		}
+		byKey[key] = len(merged)
+		merged = append(merged, e)
+	}
+	if len(merged) == 0 {
+		return 0, nil
+	}
+
+	// mentions edges already recorded per source fact, live or closed
+	// (linkTargetsAll, same guard shape as applyEntities), and source
+	// revision IDs already recorded on the entity fact. A re-run is a
+	// no-op only when every key is already linked AND every contributing
+	// revision is already provenance.
+	newOnFact := map[string]map[string]bool{} // source key -> entity keys newly mentioned there
+	for i := range merged {
+		e := &merged[i]
+		var newSources []string
+		for _, src := range e.sources {
+			targets, err := s.linkTargetsAll(ctx, ns, src, "mentions")
+			if err != nil {
+				return 0, err
+			}
+			linked := false
+			for _, tk := range targets {
+				if tk == e.key {
+					linked = true
+					break
+				}
+			}
+			if !linked {
+				newSources = append(newSources, src)
+			}
+		}
+		cur, err := s.liveByKeys(ctx, ns, []string{e.key})
+		if err != nil {
+			return 0, err
+		}
+		priorIDs := map[string]bool{}
+		if len(cur) == 1 {
+			for _, id := range attrStringList(cur[0], "source_facts") {
+				priorIDs[id] = true
+			}
+		}
+		freshID := false
+		for _, id := range e.sourceIDs {
+			if !priorIDs[id] {
+				freshID = true
+				break
+			}
+		}
+		if len(newSources) == 0 && !freshID {
+			continue // idempotent re-run: same revisions, already linked
+		}
+		if len(cur) != 1 && len(newSources) == 0 {
+			continue // entity dead with every key already linked: do not resurrect
+		}
+		count := float64(len(newSources))
+		name := e.name
+		attrs := map[string]any{
+			"entity_type":   e.typ,
+			"mention_count": count,
+			"source_facts":  append([]string(nil), e.sourceIDs...),
+		}
+		if len(e.aliases) > 0 {
+			attrs["aliases"] = append([]string(nil), e.aliases...)
+		}
+		if e.declared != "" {
+			attrs["declared_type"] = e.declared
+		}
+		if len(cur) == 1 {
+			if mc, ok := cur[0].Attributes["mention_count"].(float64); ok {
+				attrs["mention_count"] = mc + count
+			}
+			name = cur[0].Body // keep first-seen casing
+			if al := unionStrings(entityAliases(cur[0]), e.aliases); len(al) > 0 {
+				attrs["aliases"] = al
+			} else {
+				delete(attrs, "aliases")
+			}
+			attrs["source_facts"] = unionStrings(attrStringList(cur[0], "source_facts"), e.sourceIDs)
+			if e.declared == "" {
+				if d, ok := cur[0].Attributes["declared_type"].(string); ok && d != "" {
+					attrs["declared_type"] = d
+				}
+			}
+		}
+		if _, err := s.writeNoOutbox(ctx, WriteInput{
+			Namespace: ns, Key: e.key, Body: name,
+			Attributes: attrs,
+			Writer:     "enricher", Importance: 0.3,
+		}); err != nil {
+			return 0, err
+		}
+		for _, src := range newSources {
+			if err := s.AddLinkWeighted(ctx, ns, src, e.key, "mentions", 1.0); err != nil {
+				return 0, err
+			}
+			if newOnFact[src] == nil {
+				newOnFact[src] = map[string]bool{}
+			}
+			newOnFact[src][e.key] = true
+		}
+	}
+
+	// co_occurs per source fact: bump a pair when this fact contributed a
+	// genuinely new mention on at least one side (same rule as
+	// applyEntities).
+	bySource := map[string][]string{}
+	for _, e := range merged {
+		if e.key == "" {
+			continue
+		}
+		for _, src := range e.sources {
+			bySource[src] = append(bySource[src], e.key)
+		}
+	}
+	for src, keys := range bySource {
+		for i := 0; i < len(keys); i++ {
+			for j := i + 1; j < len(keys); j++ {
+				a, b := keys[i], keys[j]
+				if a == b || (!newOnFact[src][a] && !newOnFact[src][b]) {
+					continue
+				}
+				if err := s.bumpCoOccurs(ctx, ns, a, b); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+
+	return len(merged), nil
+}
+
+// unionStrings merges two string lists, order-preserving, case-insensitive
+// dedupe. An empty result is reported as nil so the attribute stays
+// absent rather than serializing as an empty array.
+func unionStrings(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range append(append([]string(nil), a...), b...) {
+		if !seen[strings.ToLower(s)] {
+			seen[strings.ToLower(s)] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // applyEntities upserts the extracted entity names for the live fact at
