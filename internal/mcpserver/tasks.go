@@ -114,7 +114,7 @@ type listTasksIn struct {
 
 type awaitIn struct {
 	Namespace      string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"how long to wait for a change before returning anyway (default 60, max 300); keep it under your client's tool timeout"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"how long to wait for a change before returning anyway (default 45, max 300); keep it under your client's tool timeout: the server max never extends that deadline"`
 }
 
 type awaitOut struct {
@@ -124,9 +124,28 @@ type awaitOut struct {
 }
 
 const (
-	awaitDefault = 60 * time.Second
-	awaitMax     = 300 * time.Second
+	// awaitDefault is deliberately conservative: MCP clients enforce their
+	// own tool-call deadline (60s observed in the wild), and a wait that
+	// runs to the deadline leaves no time for the response to arrive.
+	awaitDefault = 45 * time.Second
+	// awaitMax stays available for clients whose own timeout is larger;
+	// it is a server cap, never a client deadline guarantee.
+	awaitMax = 300 * time.Second
 )
+
+// awaitTimeout normalizes the timeout_seconds input: an omitted or
+// non-positive value becomes awaitDefault, an explicit wait is preserved,
+// and anything above awaitMax is capped.
+func awaitTimeout(seconds int) time.Duration {
+	timeout := time.Duration(seconds) * time.Second
+	if timeout <= 0 {
+		timeout = awaitDefault
+	}
+	if timeout > awaitMax {
+		timeout = awaitMax
+	}
+	return timeout
+}
 
 func filterBoard(b taskboard.Board, state string) taskboard.Board {
 	if state == "" {
@@ -168,13 +187,7 @@ func registerBoardTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, awaitOut{}, err
 			}
-			timeout := time.Duration(in.TimeoutSeconds) * time.Second
-			if timeout <= 0 {
-				timeout = awaitDefault
-			}
-			if timeout > awaitMax {
-				timeout = awaitMax
-			}
+			timeout := awaitTimeout(in.TimeoutSeconds)
 			keys := taskboard.WaitForChange(ctx, d.Bus, ns, timeout)
 			touch(ctx, d, nsr, req, ns, "")
 			b, err := taskboard.Build(ctx, d.Mem, d.Region, ns)

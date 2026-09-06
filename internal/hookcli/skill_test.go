@@ -12,7 +12,7 @@ func TestRenderSkillPerAgent(t *testing.T) {
 		not  []string
 	}{
 		{SkillOpts{Agent: "claude-code", ToolPrefix: "mcp__punk__", ServerURL: "http://localhost:9090"},
-			[]string{"name: punk-memory", "description:", SkillMarker, "`mcp__punk__whoami`", "`mcp__punk__unified_search`", "format: compact", "/tasks/<id>/status", "claim_work", "punk://memory/", "Never invent a namespace or a key", "`mcp__punk__list_tasks`", "`mcp__punk__await_tasks`", "`mcp__punk__set_task_status`", "timeout_seconds"},
+			[]string{"name: punk-memory", "description:", SkillMarker, "`mcp__punk__whoami`", "`mcp__punk__unified_search`", "format: compact", "/tasks/<id>/status", "claim_work", "punk://memory/", "Never invent a namespace or a key", "`mcp__punk__list_tasks`", "`mcp__punk__await_tasks`", "`mcp__punk__set_task_status`", "timeout_seconds=45", "never extends that deadline", "retry shorter"},
 			[]string{"version:", "metadata:"}},
 		{SkillOpts{Agent: "opencode", ToolPrefix: "punk_"},
 			[]string{"`punk_search`", "`punk_remember_many`"}, nil},

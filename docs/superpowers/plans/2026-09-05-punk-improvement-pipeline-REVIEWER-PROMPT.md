@@ -3,7 +3,7 @@
 Use namespace punk-punkrecords-improvement on every Punk call. The live server at http://127.0.0.1:9090 must remain untouched except for coordination records.
 Repository: /mnt/d/Hypervisor_Code/punkrecords. Integration branch: feat/punk-improvement-pipeline.
 
-Register with a unique identity and role reviewer. Read /plan/summary, both conventions, the design brief, implementation plan and worker prompt. Use list_tasks and await_tasks(timeout_seconds=55); do not assume a worker's previous status is current.
+Register with a unique identity and role reviewer. Read /plan/summary, both conventions, the design brief, implementation plan and worker prompt. Use list_tasks and await_tasks(timeout_seconds=45): this client cancels MCP calls at about 60 seconds, and the server's 300-second maximum does not extend that deadline. After a timeout, inspect the fresh board and /answers/<id>, then retry shorter; do not assume a worker's previous status is current.
 
 Scheduling revision: read docs/superpowers/plans/2026-09-06-cognee-borrowing.md. E01/A01 and their ready dependents may be accepted before C06; Z01 still requires C06. Do not reintroduce the old global Codex-first barrier. Preserve current C05 submission/feedback during planning changes.
 

@@ -60,7 +60,7 @@ Tell workers to pass the namespace on every call. It is the most common reason a
 
 ## Gate
 
-- Wait for changes with {{if .Opts.Pi}}` + "`GET /v1/namespaces/<ns>/tasks?wait=55`" + `{{else}}{{tool .Opts "await_tasks"}} (timeout_seconds 55 unless the client allows longer){{end}} in a loop instead of polling on a timer. Every return carries the whole board; read it fresh, never a remembered key.
+- Wait for changes with {{if .Opts.Pi}}` + "`GET /v1/namespaces/<ns>/tasks?wait=55`" + `{{else}}{{tool .Opts "await_tasks"}} (timeout_seconds=45 if the client deadline is 60s; the server's 300s max never extends that deadline){{end}} in a loop instead of polling on a timer. On timeout, read the board and any ` + "`/answers/<id>`" + `, then retry shorter. Every return carries the whole board; read it fresh, never a remembered key.
 - Each newly done task: fetch the branch, run the gate commands from ` + "`/conventions/repo`" + ` against that commit, and review the diff against the plan and the brief. A real bug: write the fix at ` + "`/answers/<id>`" + ` and set the task's status to ` + "`review`" + ` with the issue; the worker re-claims it. A reviewer nit that changes nothing: leave the status alone and move on.
 - Answer every ` + "`/questions/<id>`" + ` at ` + "`/answers/<id>`" + ` as soon as it appears; a blocked worker polls that key.
 - Workers may be editing the very checkout you sit in. Review from the remote branch and run gates in a detached, throwaway worktree that you remove afterwards; never switch branches under a working worker.
