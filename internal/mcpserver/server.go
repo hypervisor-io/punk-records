@@ -5,6 +5,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -131,6 +132,50 @@ type documentIn struct {
 	Text      string `json:"text,omitempty" jsonschema:"the document body"`
 	Path      string `json:"path,omitempty" jsonschema:"absolute path of a local file to ingest instead of text; only honoured by the stdio server (punk mcp)"`
 	Author    string `json:"author,omitempty"`
+	// Source switches on source-aware ingest (I01): stable content-
+	// addressed chunk identity plus per-chunk provenance. Shape:
+	// {id, uri, revision, media_type, sections: [{name, page, text}]}.
+	// Deliberately a schemaless map: the agent toolset wire payload is
+	// budgeted (guidance_budget_test.go) and typed fields do not fit
+	// the ratchet; decodeDocumentSource enforces the exact shape and
+	// names it in every error instead. The map's own wire bytes are
+	// offset within the same budget by the trimmed remember_document
+	// description, which no longer spells out reconcile mechanics.
+	Source map[string]any `json:"source,omitempty"`
+}
+
+// documentSourceWire is the typed shape of documentIn.Source.
+type documentSourceWire struct {
+	ID        string                `json:"id"`
+	URI       string                `json:"uri"`
+	Revision  string                `json:"revision"`
+	MediaType string                `json:"media_type"`
+	Sections  []documentSectionWire `json:"sections"`
+}
+
+// documentSectionWire is one section entry of documentIn.Source.
+type documentSectionWire struct {
+	Name string `json:"name"`
+	Page int    `json:"page"`
+	Text string `json:"text"`
+}
+
+// decodeDocumentSource validates the free-form source object strictly:
+// unknown keys or wrong value types (at any nesting level) error with
+// the expected shape named, so a typo is actionable instead of silently
+// dropping provenance.
+func decodeDocumentSource(raw map[string]any) (documentSourceWire, error) {
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return documentSourceWire{}, fmt.Errorf("source: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	dec.DisallowUnknownFields()
+	var ds documentSourceWire
+	if err := dec.Decode(&ds); err != nil {
+		return documentSourceWire{}, fmt.Errorf("source: %w (want id/uri/revision/media_type and/or sections: [{name, page, text}])", err)
+	}
+	return ds, nil
 }
 
 type documentOut struct {
@@ -566,14 +611,32 @@ func finishSearch(in searchIn, facts []memory.Fact, scored []memory.ScoredFact) 
 
 func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	mcp.AddTool(s, &mcp.Tool{Name: "remember_document",
-		Description: "Chunk and store a document under a key prefix; rewrites only changed chunks and tombstones chunks past the new end (delta ingest)."},
+		Description: "Chunk and store a document under a key prefix; delta ingest rewrites only changed chunks."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in documentIn) (*mcp.CallToolResult, documentOut, error) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
 			if err != nil {
 				return nil, documentOut{}, err
 			}
+			var srcDoc *memory.SourceDocument
+			if len(in.Source) > 0 {
+				ds, err := decodeDocumentSource(in.Source)
+				if err != nil {
+					return nil, documentOut{}, err
+				}
+				doc := memory.SourceDocument{Source: memory.DocumentSource{
+					ID: ds.ID, URI: ds.URI, Revision: ds.Revision, MediaType: ds.MediaType,
+				}}
+				for _, sec := range ds.Sections {
+					doc.Sections = append(doc.Sections, memory.DocumentSection{
+						Name: sec.Name, Page: sec.Page, Text: sec.Text})
+				}
+				srcDoc = &doc
+			}
+			hasSections := srcDoc != nil && len(srcDoc.Sections) > 0
 			text := in.Text
 			switch {
+			case hasSections && (in.Text != "" || in.Path != ""):
+				return nil, documentOut{}, fmt.Errorf("pass text or path, not source.sections")
 			case in.Path != "" && in.Text != "":
 				return nil, documentOut{}, fmt.Errorf("pass text or path, not both")
 			case in.Path != "":
@@ -588,10 +651,18 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 					return nil, documentOut{}, err
 				}
 				text = string(raw)
-			case in.Text == "":
+			case in.Text == "" && !hasSections:
 				return nil, documentOut{}, fmt.Errorf("text or path is required")
 			}
-			w, u, r, b, err := d.Mem.WriteDocument(ctx, ns, in.Prefix, text, in.Author)
+			var w, u, r, b int
+			if srcDoc != nil {
+				if !hasSections {
+					srcDoc.Sections = []memory.DocumentSection{{Text: text}}
+				}
+				w, u, r, b, err = d.Mem.WriteDocumentSource(ctx, ns, in.Prefix, *srcDoc, in.Author)
+			} else {
+				w, u, r, b, err = d.Mem.WriteDocument(ctx, ns, in.Prefix, text, in.Author)
+			}
 			if err != nil {
 				return nil, documentOut{}, err
 			}
