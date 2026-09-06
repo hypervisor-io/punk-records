@@ -10,11 +10,15 @@ var agentToolset = []string{
 	"whoami", "recall", "search", "unified_search", "list_keys",
 	"remember", "remember_many", "remember_document", "feedback",
 	"claim_work", "release_work", "list_claims", "register", "set_task_status",
-	"list_tasks", "await_tasks",
+	"list_tasks", "await_tasks", "search_skills", "load_skill",
 }
 
 // fullOnlyTools are removed when Deps.Toolset is "agent". Keep in sync
 // with the AddTool calls in server.go; TestAgentToolsetIsLean guards it.
+// search_skills/load_skill are admitted to the lean set (S01 round 2:
+// procedural discovery must be reachable by the clients it is for); the
+// added wire bytes are measured and budgeted in guidance_budget_test.go
+// (C07 ratchet re-measurement, see agentToolsetBudgetTokens).
 var fullOnlyTools = []string{
 	"submit_task", "get_task", "list_agents", "delegate", "reflect",
 	"recall_as_of", "forget", "link", "unlink", "triplet_search", "neighbors",

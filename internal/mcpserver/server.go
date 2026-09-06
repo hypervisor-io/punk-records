@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/hypervisor-io/punk-records/internal/registry"
 	"github.com/hypervisor-io/punk-records/internal/route"
+	"github.com/hypervisor-io/punk-records/internal/skillmine"
 	"github.com/hypervisor-io/punk-records/internal/task"
 )
 
@@ -43,6 +45,24 @@ type Deps struct {
 	DefaultNamespace string                  // used when a call omits namespace and no root is known; empty = agent-default
 	LocalFiles       bool                    // allow remember_document{path}: only for the stdio server, which runs as the user
 	Toolset          string                  // "" or "full": every tool; "agent": the lean session set (see toolset.go)
+	SkillNamespace   string                  // memory namespace the authored skill catalog is published into; empty falls back to DefaultNamespace
+	Log              *slog.Logger            // lifecycle logging (skill index sync); nil discards
+}
+
+// SkillIndexNamespace resolves the namespace the server's skill catalog
+// (authored skills from the spec registry, mined skills from the propose
+// ingest) is published into and that search_skills/load_skill read by
+// default: SkillNamespace, then DefaultNamespace, then "agent-default".
+// The mapping is explicit and fixed per server so reload syncs and
+// discovery reads always meet in the same place.
+func (d Deps) SkillIndexNamespace() string {
+	if d.SkillNamespace != "" {
+		return d.SkillNamespace
+	}
+	if d.DefaultNamespace != "" {
+		return d.DefaultNamespace
+	}
+	return "agent-default"
 }
 
 // A2ARemote is a resolved foreign A2A agent the delegate tool can reach.
@@ -479,7 +499,15 @@ func New(d Deps) *mcp.Server {
 		})
 
 	registerMemoryV2Tools(s, d, nsr)
+	registerSkillTools(s, d, nsr)
 	registerTaskTools(s, d, nsr)
+
+	// Task S01 startup lifecycle: publish the spec snapshot's authored
+	// skills into the skill index namespace so search_skills sees what
+	// the registry already validated, without a separate ingest step.
+	// Hot reload re-syncs in cmd/punk's serve loop on every snapshot
+	// version advance; mined drafts sync at propose time (cmdSkills).
+	syncSkillIndex(context.Background(), d)
 
 	if d.Region != nil {
 		registerRegionTools(s, d, nsr)
@@ -943,6 +971,130 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 				return nil, nil, err
 			}
 			return nil, dg, nil
+		})
+}
+
+// syncSkillIndex publishes the registry's current authored skill catalog
+// into the skill index namespace (Deps.SkillIndexNamespace). Sync
+// failures never abort server construction: the catalog is a discovery
+// aid, and cmd/punk's serve loop retries on every snapshot version
+// advance; conflicts and rejections are logged, not swallowed.
+func syncSkillIndex(ctx context.Context, d Deps) {
+	if d.Reg == nil || d.Mem == nil {
+		return
+	}
+	snap := d.Reg.Current()
+	if snap == nil {
+		return
+	}
+	log := d.Log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	rep, err := skillmine.SyncBundle(ctx, d.Mem, d.SkillIndexNamespace(), snap.Bundle)
+	if err != nil {
+		log.Error("skill index sync failed", "err", err)
+		return
+	}
+	if len(rep.Conflicts) > 0 {
+		log.Warn("skill versions republished with changed content stay pinned; bump metadata.version to publish",
+			"conflicts", rep.Conflicts)
+	}
+	if len(rep.Rejected) > 0 {
+		log.Warn("skills rejected by index validation", "rejected", rep.Rejected)
+	}
+	if rep.Indexed > 0 || rep.Tombstoned > 0 {
+		log.Info("skill index synced", "namespace", d.SkillIndexNamespace(),
+			"indexed", rep.Indexed, "tombstoned", rep.Tombstoned)
+	}
+}
+
+// skillDiscoveryPayloadBound is the pinned ceiling for one serialized
+// search_skills response. The per-field validation limits bound the
+// record sizes, but JSON escaping multiplies them (every '<' becomes
+// six bytes), so the bound is enforced on the actual wire form below,
+// not on the field lengths: hits past the bound are trimmed. 72KiB sits
+// ~9% above the measured 20-hit worst case with unescaped maximal
+// fields (67772 bytes; TestSkillDiscoveryPayloadWithinBound), and a
+// response holding even one inlined procedure body would blow past it.
+const skillDiscoveryPayloadBound = 72 * 1024
+
+// trimSkillPayload caps the serialized search_skills response at the
+// pinned bound, accounting for JSON escaping exactly as the SDK's
+// encoding/json marshal applies it. Hits are ranked, so trimming drops
+// only the tail; a single hit that alone exceeds the bound is dropped
+// rather than shipped over the contract.
+func trimSkillPayload(skills []memory.SkillMeta, bound int) []memory.SkillMeta {
+	size := len(`{"skills":[]}`)
+	n := 0
+	for _, sk := range skills {
+		raw, err := json.Marshal(sk)
+		if err != nil {
+			break
+		}
+		add := len(raw)
+		if n > 0 {
+			add++ // the separating comma
+		}
+		if size+add > bound {
+			break
+		}
+		size += add
+		n++
+	}
+	return skills[:n]
+}
+
+type searchSkillsIn struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
+	Query     string `json:"query" jsonschema:"words or identifiers from the procedure's name, description or declared tools"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"max hits (default 10, hard cap 20, then trimmed to a 72KiB serialized response); hits are metadata only, load the procedure with load_skill"`
+}
+
+type searchSkillsOut struct {
+	Skills []memory.SkillMeta `json:"skills"`
+}
+
+type loadSkillIn struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
+	Name      string `json:"name" jsonschema:"skill name from a search_skills hit"`
+	Version   string `json:"version,omitempty" jsonschema:"exact version from the hit; omittable only when one version is live"`
+}
+
+type loadSkillOut struct {
+	Skill memory.SkillMeta `json:"skill"`
+	Body  string           `json:"body"`
+}
+
+// registerSkillTools exposes task S01's procedural-memory tier: scoped
+// discovery over skill metadata (never procedure text) plus on-demand
+// loading of one exact versioned body. Both are namespace reads (A02).
+func registerSkillTools(s *mcp.Server, d Deps, nsr *nsResolver) {
+	mcp.AddTool(s, &mcp.Tool{Name: "search_skills",
+		Description: "Discover procedural skills (SKILL.md procedures) by metadata: name, description, declared tools, scope. Hits never contain the procedure itself; load one with load_skill by name and exact version."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in searchSkillsIn) (*mcp.CallToolResult, searchSkillsOut, error) {
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, searchSkillsOut{}, err
+			}
+			skills, err := d.Mem.SearchSkills(ctx, ns, in.Query, in.Limit)
+			if err != nil {
+				return nil, searchSkillsOut{}, err
+			}
+			return nil, searchSkillsOut{Skills: trimSkillPayload(skills, skillDiscoveryPayloadBound)}, nil
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "load_skill",
+		Description: "Load one skill's exact versioned procedure body on demand, after search_skills identified it. Inactive and ungranted skills refuse to load."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in loadSkillIn) (*mcp.CallToolResult, loadSkillOut, error) {
+			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
+			if err != nil {
+				return nil, loadSkillOut{}, err
+			}
+			meta, body, err := d.Mem.LoadSkill(ctx, ns, in.Name, in.Version)
+			if err != nil {
+				return nil, loadSkillOut{}, err
+			}
+			return nil, loadSkillOut{Skill: meta, Body: body}, nil
 		})
 }
 

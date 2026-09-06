@@ -857,6 +857,13 @@ func cmdServe(args []string) error {
 		}
 	}()
 
+	// skill index reload lifecycle: every spec snapshot the registry
+	// activates (watcher, SIGHUP) is republished into the skill discovery
+	// namespace; skills whose source vanished are swept. The startup sync
+	// already happened inside mcpserver.New; this loop covers reloads and
+	// retries a startup sync that failed.
+	go syncSkillsOnSpecChange(ctx, log, mem, reg, mcpDeps.SkillIndexNamespace(), 2*time.Second)
+
 	// dispatcher: routed-but-unclaimed tasks get an investigation loop.
 	// Sequential in v1: one investigation at a time keeps costs legible.
 	go func() {
@@ -1996,11 +2003,50 @@ func (d llmDrafter) Draft(ctx context.Context, g skillmine.Group) (string, strin
 }
 
 // cmdSkills implements "punk skills propose": mine completed investigate
+// syncSkillsOnSpecChange keeps the skill discovery index aligned with
+// the registry's active spec snapshot: every version advance (file
+// watcher, SIGHUP) republishes authored skills into ns and sweeps the
+// ones whose source vanished. Startup indexing happens in
+// mcpserver.New; because last starts at 0 the first tick re-syncs even
+// then, which is an idempotent no-op on success and a retry when the
+// startup sync failed. Blocks until ctx is done.
+func syncSkillsOnSpecChange(ctx context.Context, log *slog.Logger, mem *memory.Store, reg *registry.Registry, ns string, interval time.Duration) {
+	var last int64
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		snap := reg.Current()
+		if snap == nil || snap.Version == last {
+			continue
+		}
+		rep, err := skillmine.SyncBundle(ctx, mem, ns, snap.Bundle)
+		if err != nil {
+			log.Error("skill index sync failed, retrying on next tick", "err", err)
+			continue
+		}
+		if len(rep.Conflicts) > 0 {
+			log.Warn("skill versions republished with changed content stay pinned; bump metadata.version to publish",
+				"conflicts", rep.Conflicts)
+		}
+		if len(rep.Rejected) > 0 {
+			log.Warn("skills rejected by index validation", "rejected", rep.Rejected)
+		}
+		last = snap.Version
+		log.Info("skill index synced", "namespace", ns, "snapshot", snap.Version,
+			"indexed", rep.Indexed, "tombstoned", rep.Tombstoned)
+	}
+}
+
 // tasks for recurring tool trajectories (deterministic) and draft one
 // SKILL.md per recurring group (LLM prose) into --out for a human to
 // review before moving the good ones into specs/skills/.
 //
-// punk skills propose [--config F] [--min-count 3] [--out ./proposed-skills] [--agent NAME]
+// punk skills propose [--config F] [--min-count 3] [--out ./proposed-skills] [--agent NAME] [--ns NS]
 func cmdSkills(args []string) error {
 	action := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -2011,7 +2057,7 @@ func cmdSkills(args []string) error {
 	minCount := fs.Int("min-count", 3, "minimum recurring tasks to propose a skill")
 	out := fs.String("out", "", "output directory for drafts (never specs/; default ./proposed-skills or ./proposed-insights)")
 	agentName := fs.String("agent", "", "restrict mining to one agent")
-	ns := fs.String("ns", "", "namespace to distill (insights)")
+	ns := fs.String("ns", "", "namespace to distill (insights) / to publish mined draft metadata into (propose); default PUNK_NAMESPACE or agent-default")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2084,6 +2130,30 @@ func cmdSkills(args []string) error {
 	}
 	for _, p := range paths {
 		fmt.Println(p)
+	}
+
+	// Mined-ingest lifecycle: publish the drafts' metadata into the
+	// memory plane so search_skills can discover them (procedures stay
+	// on-demand via load_skill). Drafts without a frontmatter version
+	// get a content-derived revision, so a rerun that regenerated a
+	// draft publishes its new generation and sweeps the old one.
+	skillNS := *ns
+	if skillNS == "" {
+		skillNS = os.Getenv("PUNK_NAMESPACE")
+	}
+	if skillNS == "" {
+		skillNS = "agent-default"
+	}
+	mem := memory.New(db, nil)
+	rep, err := skillmine.SyncDrafts(context.Background(), mem, skillNS, *out)
+	if err != nil {
+		return fmt.Errorf("publish draft metadata into namespace %s: %w", skillNS, err)
+	}
+	if rep.Indexed > 0 || rep.Tombstoned > 0 {
+		fmt.Printf("skill index[%s]: %d draft version(s) published, %d swept\n", skillNS, rep.Indexed, rep.Tombstoned)
+	}
+	for _, c := range rep.Conflicts {
+		fmt.Printf("skill index[%s]: %s kept its pinned published version (bump metadata.version in the draft to publish the edit)\n", skillNS, c)
 	}
 	fmt.Printf("%d draft(s) written to %s - review and move the good ones into specs/skills/ (rerunning overwrites drafts with the same slug)\n", len(paths), *out)
 	return nil

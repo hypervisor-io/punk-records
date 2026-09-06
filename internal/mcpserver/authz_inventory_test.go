@@ -64,6 +64,8 @@ var toolPermissionInventory = map[string]authz.Op{
 	"recall":              authz.OpRead,
 	"list_keys":           authz.OpRead,
 	"search":              authz.OpRead,
+	"search_skills":       authz.OpRead,
+	"load_skill":          authz.OpRead,
 	"recall_as_of":        authz.OpRead,
 	"triplet_search":      authz.OpRead,
 	"unified_search":      authz.OpRead,
@@ -246,8 +248,10 @@ func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any)
 func bAttempt(name string) map[string]any {
 	base := map[string]any{"namespace": "ns-b"}
 	switch name {
-	case "search", "triplet_search", "unified_search":
+	case "search", "triplet_search", "unified_search", "search_skills":
 		base["query"] = "x"
+	case "load_skill":
+		base["name"] = "x"
 	case "reflect":
 		base["query"] = "x"
 	case "recall_as_of":

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,8 +12,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/membench"
+	"github.com/hypervisor-io/punk-records/internal/memory"
+	"github.com/hypervisor-io/punk-records/internal/registry"
+	"github.com/hypervisor-io/punk-records/internal/store"
 )
 
 func TestOpenCodePathsGlobalUsesOpencodeDir(t *testing.T) {
@@ -356,4 +362,84 @@ func TestMembenchReportRerankerSuccessApplies(t *testing.T) {
 	if got := rr.Queries[0].Ranking; len(got) != 2 || got[0] != "/svc/cache" || got[1] != "/svc/db" {
 		t.Fatalf("rerank ranking = %v, want [/svc/cache /svc/db]: ascending cross-encoder scores must reverse the baseline order", got)
 	}
+}
+
+// The serve loop's skill-index reload lifecycle: while
+// syncSkillsOnSpecChange runs, every spec snapshot the registry
+// activates is republished into the skill namespace - new skills become
+// discoverable and deleted ones are swept, with no server restart.
+func TestSyncSkillsOnSpecChangeTracksRegistry(t *testing.T) {
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "skillsync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if _, err := db.MigrateUp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	specDir := t.TempDir()
+	reg := registry.New(specDir, db, slog.New(slog.DiscardHandler))
+	if err := reg.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mem := memory.New(db, nil)
+	log := slog.New(slog.DiscardHandler)
+
+	runCtx, stop := context.WithCancel(ctx)
+	t.Cleanup(stop)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		syncSkillsOnSpecChange(runCtx, log, mem, reg, "agent-default", 5*time.Millisecond)
+	}()
+
+	writeSkill := func(content string) {
+		t.Helper()
+		dir := filepath.Join(specDir, "skills", "reload-runbook")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Load(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	discoverable := func() bool {
+		hits, err := mem.SearchSkills(ctx, "agent-default", "reload sentinel", 0)
+		return err == nil && len(hits) == 1 && hits[0].Name == "reload-runbook"
+	}
+
+	// A skill added to the tree and loaded (the hot-reload path) is
+	// indexed into the mapped namespace without a restart.
+	writeSkill("---\nname: reload-runbook\ndescription: Inspect reload sentinel diagnostics\nmetadata:\n  version: 0.1.0\n---\n\nFirst body.\n")
+	eventually("authored skill to become discoverable after snapshot advance", discoverable)
+
+	// Deleting it from the tree sweeps it on the next snapshot advance.
+	if err := os.RemoveAll(filepath.Join(specDir, "skills", "reload-runbook")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually("deleted skill to be swept after snapshot advance", func() bool {
+		hits, err := mem.SearchSkills(ctx, "agent-default", "reload sentinel", 0)
+		return err == nil && len(hits) == 0
+	})
+
+	stop()
+	<-done
 }

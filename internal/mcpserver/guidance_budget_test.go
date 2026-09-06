@@ -194,15 +194,23 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // and the write-tool selection clauses (remember_many/remember_document/
 // feedback descriptions). The tool entries themselves are untouched, so
 // their bound is a ratchet, not a cut.
+//
+// Re-measured for S01 round 2 (search_skills/load_skill admitted to the
+// agent toolset): agent tools/list wire is now 24380 bytes, ~6095 tokens
+// (18 tools). The tool entries were otherwise untouched.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
 	// green above it (~383).
 	instructionsBudgetTokens = 420
-	// agentToolsetBudgetTokens = 5514 baseline + 16 slack. C07 edits no
-	// tool description or schema; this only forbids future growth of the
-	// per-tool payload through this package.
-	agentToolsetBudgetTokens = 5530
+	// agentToolsetBudgetTokens: 5514 baseline + 581 measured for the S01
+	// round-2 admission of search_skills (1251 bytes, ~313 tokens) and
+	// load_skill (1072 bytes, ~268 tokens) to the lean toolset - the
+	// deliberate, measured client path for procedural discovery - + 16
+	// slack. The re-measurement is the budgeted ratchet step the task
+	// sanctions; this still forbids any further growth of the per-tool
+	// payload through this package.
+	agentToolsetBudgetTokens = 6111
 	// sessionOpenBudgetTokens is the two parts summed: what a host pays
 	// per session for punk's server-owned guidance with the lean toolset.
 	sessionOpenBudgetTokens = instructionsBudgetTokens + agentToolsetBudgetTokens
