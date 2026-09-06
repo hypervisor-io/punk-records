@@ -102,19 +102,27 @@ func EntitySlug(name string) string {
 const entityAliasThreshold = 0.85
 
 // resolveEntitySlug canonicalizes name against existing /entities/ facts in
-// ns by fuzzy match (nameSimilarity, cutoff entityAliasThreshold) before
-// falling back to the exact EntitySlug. This is what lets aliases ("Alice"
-// / "Alice Chen") merge into one entity instead of the old slug-exact
-// behavior creating a duplicate node.
+// ns: an exact normalized name match first, then fuzzy match
+// (nameSimilarity, cutoff entityAliasThreshold), before falling back to the
+// exact EntitySlug. This is what lets aliases ("Alice" / "Alice Chen")
+// merge into one entity instead of the old slug-exact behavior creating a
+// duplicate node. The scan is paginated (scanLivePrefix), so entities past
+// the old first-1000-Recall ceiling still resolve.
 // ponytail: O(n) linear scan of existing entities with string similarity
 // only (no embeddings) — false-merge risk on names that are lexically close
 // but semantically distinct (kept conservative via entityAliasThreshold to
 // bound that risk). Upgrade path: embedding-similarity resolution, same
 // pattern as ReconcileObservations.
 func (s *Store) resolveEntitySlug(ctx context.Context, ns, name string) (string, error) {
-	existing, err := s.Recall(ctx, ns, "/entities", 1000)
+	existing, err := s.scanLivePrefix(ctx, ns, "/entities")
 	if err != nil {
 		return "", err
+	}
+	nn := normalizeName(name)
+	for _, e := range existing { // key order: first exact match is canonical
+		if nn != "" && normalizeName(e.Body) == nn {
+			return strings.TrimPrefix(e.Key, "/entities/"), nil
+		}
 	}
 	best, bestScore := "", 0.0
 	for _, e := range existing {
@@ -137,6 +145,16 @@ func (s *Store) resolveEntitySlug(ctx context.Context, ns, name string) (string,
 // mentions it already recorded. No-op without an extractor. Only direct
 // writes (facts + links), never memory_outbox — so it cannot re-trigger
 // the enricher loop (same guarantee as EnrichKey).
+//
+// Derived target writes are not plain writes: each one pins the exact
+// target revision (or absence) its plan read and commits atomically per
+// source key (applyEntityPlanReplanning). A concurrent writer - e.g. an
+// entity merge - committing between plan and commit rejects the stale
+// plan (ErrEntityApplyStaleTarget); the apply then re-plans from the
+// winning head and completes over it, preserving the other writer's
+// lineage. A caller that still gets ErrEntityApplyStaleTarget (replan
+// budget exhausted under continuous churn) can retry the same call -
+// idempotency makes the retry safe.
 func (s *Store) EnrichEntities(ctx context.Context, ns, key string) (int, error) {
 	if s.entityExtractor == nil {
 		return 0, nil
@@ -166,7 +184,9 @@ func (s *Store) EnrichEntities(ctx context.Context, ns, key string) (int, error)
 // BatchEntityExtractor (with a per-fact fallback when the batch answer
 // doesn't line up), a plain per-key loop otherwise. Keys that are
 // tombstoned, gone, or /entities/ facts are skipped. Returns total
-// entities applied.
+// entities applied. Derived target writes pin and re-plan exactly like
+// EnrichEntities (see its doc): a concurrent merge committed mid-call
+// never loses its lineage to a stale derived write.
 func (s *Store) EnrichEntitiesBatch(ctx context.Context, ns string, keys []string) (int, error) {
 	if s.entityExtractor == nil || len(keys) == 0 {
 		return 0, nil
@@ -424,20 +444,36 @@ func boundedSourceFallback(name string, aliases []string, live []Fact) (keys, id
 
 // resolveTypedEntityKey canonicalizes a typed name against existing
 // /entities/<typ>/ facts only - same display name under a different type
-// is a different entity. Both the name and its aliases fuzzy-match
-// against existing bodies and alias lists (cutoff entityAliasThreshold)
-// before falling back to the exact /entities/<typ>/<slug> key.
+// is a different entity. Exact matches resolve first (an exact display-name
+// match, then an exact declared-alias match), then the name and its aliases
+// fuzzy-match against existing bodies and alias lists (cutoff
+// entityAliasThreshold), before falling back to the exact
+// /entities/<typ>/<slug> key. The scan is paginated (scanLivePrefix), so
+// entities past the old first-1000-Recall ceiling still resolve.
 func (s *Store) resolveTypedEntityKey(ctx context.Context, ns string, e typedEntity) (string, error) {
 	prefix := "/entities/" + e.typ + "/"
-	existing, err := s.Recall(ctx, ns, prefix, 1000)
+	existing, err := s.scanLivePrefix(ctx, ns, prefix)
 	if err != nil {
 		return "", err
 	}
-	probes := append([]string{e.name}, e.aliases...)
+	probes := normSet(append([]string{e.name}, e.aliases...))
+	for _, ex := range existing { // key order: first exact body match
+		if probes[normalizeName(ex.Body)] {
+			return ex.Key, nil
+		}
+	}
+	for _, ex := range existing { // then exact declared-alias match
+		for _, c := range entityAliases(ex) {
+			if probes[normalizeName(c)] {
+				return ex.Key, nil
+			}
+		}
+	}
+	probeList := append([]string{e.name}, e.aliases...)
 	best, bestScore := "", 0.0
 	for _, ex := range existing {
 		cands := append([]string{ex.Body}, entityAliases(ex)...)
-		for _, p := range probes {
+		for _, p := range probeList {
 			for _, c := range cands {
 				if score := nameSimilarity(p, c); score >= entityAliasThreshold && score > bestScore {
 					bestScore = score
@@ -481,184 +517,57 @@ func attrStringList(f Fact, name string) []string {
 // already-linked key appends that revision's ID to source_facts without
 // another mention_count or co_occurs bump: key-level mentions dedupe
 // must not discard revision provenance.
+//
+// The writes go through the same pinned plan/apply boundary as the
+// pipeline's entity stage: each entity's evidence is split into
+// single-source subs (flushEntityStage's batchTyped shape), and every
+// citing source key's derived write set is computed by
+// planTypedSourceApply - pinning the exact target revisions it read
+// (expectPrevID) or their absence (expectAbsent) - and committed by
+// applyEntityPlanReplanning, which rolls a stale apply back whole and
+// re-plans from the winning head. An entity citing several keys
+// composes across their applies: each source's plan reads the previous
+// apply's committed revision and unions into it, and merge lineage
+// survives via preserveEntityAttrs. Returns the count of distinct
+// canonical entities the call resolved (the pre-apply resolution; the
+// applies re-resolve under their own pinned plans).
 func (s *Store) applyTypedEntities(ctx context.Context, ns string, ents []typedEntity) (int, error) {
-	// resolve canonical keys and merge entries that land on the same one
-	// (e.g. a name and its alias extracted separately).
-	byKey := map[string]int{}
-	var merged []typedEntity
+	// resolve canonical keys to count the call's distinct entities;
+	// entries landing on the same one (e.g. a name and its alias
+	// extracted separately) count once.
+	resolved := map[string]bool{}
 	for _, e := range ents {
 		key, err := s.resolveTypedEntityKey(ctx, ns, e)
 		if err != nil {
 			return 0, err
 		}
-		e.key = key
-		if i, ok := byKey[key]; ok {
-			m := &merged[i]
-			seen := map[string]bool{}
-			for _, k := range m.sources {
-				seen[k] = true
-			}
-			for _, k := range e.sources {
-				if !seen[k] {
-					seen[k] = true
-					m.sources = append(m.sources, k)
-				}
-			}
-			seenID := map[string]bool{}
-			for _, id := range m.sourceIDs {
-				seenID[id] = true
-			}
-			for _, id := range e.sourceIDs {
-				if !seenID[id] {
-					seenID[id] = true
-					m.sourceIDs = append(m.sourceIDs, id)
-				}
-			}
-			seenAlias := map[string]bool{}
-			for _, a := range m.aliases {
-				seenAlias[strings.ToLower(a)] = true
-			}
-			for _, a := range e.aliases {
-				if !seenAlias[strings.ToLower(a)] {
-					seenAlias[strings.ToLower(a)] = true
-					m.aliases = append(m.aliases, a)
-				}
-			}
-			if m.declared == "" {
-				m.declared = e.declared
-			}
-			continue
-		}
-		byKey[key] = len(merged)
-		merged = append(merged, e)
+		resolved[key] = true
 	}
-	if len(merged) == 0 {
+	if len(resolved) == 0 {
 		return 0, nil
 	}
-
-	// mentions edges already recorded per source fact, live or closed
-	// (linkTargetsAll, same guard shape as applyEntities), and source
-	// revision IDs already recorded on the entity fact. A re-run is a
-	// no-op only when every key is already linked AND every contributing
-	// revision is already provenance.
-	newOnFact := map[string]map[string]bool{} // source key -> entity keys newly mentioned there
-	for i := range merged {
-		e := &merged[i]
-		var newSources []string
-		for _, src := range e.sources {
-			targets, err := s.linkTargetsAll(ctx, ns, src, "mentions")
-			if err != nil {
-				return 0, err
+	bySource := map[string][]typedEntity{}
+	var sourceOrder []string
+	for _, e := range ents {
+		for i, src := range e.sources {
+			sub := e
+			sub.sources = []string{src}
+			sub.sourceIDs = []string{e.sourceIDs[i]}
+			if _, ok := bySource[src]; !ok {
+				sourceOrder = append(sourceOrder, src)
 			}
-			linked := false
-			for _, tk := range targets {
-				if tk == e.key {
-					linked = true
-					break
-				}
-			}
-			if !linked {
-				newSources = append(newSources, src)
-			}
+			bySource[src] = append(bySource[src], sub)
 		}
-		cur, err := s.liveByKeys(ctx, ns, []string{e.key})
-		if err != nil {
-			return 0, err
-		}
-		priorIDs := map[string]bool{}
-		if len(cur) == 1 {
-			for _, id := range attrStringList(cur[0], "source_facts") {
-				priorIDs[id] = true
-			}
-		}
-		freshID := false
-		for _, id := range e.sourceIDs {
-			if !priorIDs[id] {
-				freshID = true
-				break
-			}
-		}
-		if len(newSources) == 0 && !freshID {
-			continue // idempotent re-run: same revisions, already linked
-		}
-		if len(cur) != 1 && len(newSources) == 0 {
-			continue // entity dead with every key already linked: do not resurrect
-		}
-		count := float64(len(newSources))
-		name := e.name
-		attrs := map[string]any{
-			"entity_type":   e.typ,
-			"mention_count": count,
-			"source_facts":  append([]string(nil), e.sourceIDs...),
-		}
-		if len(e.aliases) > 0 {
-			attrs["aliases"] = append([]string(nil), e.aliases...)
-		}
-		if e.declared != "" {
-			attrs["declared_type"] = e.declared
-		}
-		if len(cur) == 1 {
-			if mc, ok := cur[0].Attributes["mention_count"].(float64); ok {
-				attrs["mention_count"] = mc + count
-			}
-			name = cur[0].Body // keep first-seen casing
-			if al := unionStrings(entityAliases(cur[0]), e.aliases); len(al) > 0 {
-				attrs["aliases"] = al
-			} else {
-				delete(attrs, "aliases")
-			}
-			attrs["source_facts"] = unionStrings(attrStringList(cur[0], "source_facts"), e.sourceIDs)
-			if e.declared == "" {
-				if d, ok := cur[0].Attributes["declared_type"].(string); ok && d != "" {
-					attrs["declared_type"] = d
-				}
-			}
-		}
-		if _, err := s.writeNoOutbox(ctx, WriteInput{
-			Namespace: ns, Key: e.key, Body: name,
-			Attributes: attrs,
-			Writer:     "enricher", Importance: 0.3,
+	}
+	for _, src := range sourceOrder {
+		subs := bySource[src]
+		if err := s.applyEntityPlanReplanning(ctx, ns, src, func(ctx context.Context) (*entityApplyPlan, error) {
+			return s.planTypedSourceApply(ctx, ns, src, subs)
 		}); err != nil {
 			return 0, err
 		}
-		for _, src := range newSources {
-			if err := s.AddLinkWeighted(ctx, ns, src, e.key, "mentions", 1.0); err != nil {
-				return 0, err
-			}
-			if newOnFact[src] == nil {
-				newOnFact[src] = map[string]bool{}
-			}
-			newOnFact[src][e.key] = true
-		}
 	}
-
-	// co_occurs per source fact: bump a pair when this fact contributed a
-	// genuinely new mention on at least one side (same rule as
-	// applyEntities).
-	bySource := map[string][]string{}
-	for _, e := range merged {
-		if e.key == "" {
-			continue
-		}
-		for _, src := range e.sources {
-			bySource[src] = append(bySource[src], e.key)
-		}
-	}
-	for src, keys := range bySource {
-		for i := 0; i < len(keys); i++ {
-			for j := i + 1; j < len(keys); j++ {
-				a, b := keys[i], keys[j]
-				if a == b || (!newOnFact[src][a] && !newOnFact[src][b]) {
-					continue
-				}
-				if err := s.bumpCoOccurs(ctx, ns, a, b); err != nil {
-					return 0, err
-				}
-			}
-		}
-	}
-
-	return len(merged), nil
+	return len(resolved), nil
 }
 
 // unionStrings merges two string lists, order-preserving, case-insensitive
@@ -679,88 +588,24 @@ func unionStrings(a, b []string) []string {
 // applyEntities upserts the extracted entity names for the live fact at
 // ns/key: /entities/<slug> facts with mention counts, mentions edges,
 // and co_occurs bumps - the write half of EnrichEntities, shared with
-// the batch path.
+// the batch path. The derived writes go through the same pinned
+// plan/apply boundary as the pipeline's entity stage (planEntityApply +
+// applyEntityPlanReplanning): each target revision the plan read is
+// pinned (expectPrevID), each planned create pins the target's absence
+// (expectAbsent), and a concurrent writer (e.g. a G02 merge) committing
+// between plan and commit rejects the stale plan, which is re-planned
+// from the winning head rather than committed over it.
 func (s *Store) applyEntities(ctx context.Context, ns, key string, names []string) (int, error) {
-	type entity struct{ key, name string }
-	seen := map[string]bool{}
-	var ents []entity
-	for _, n := range names {
-		slug, err := s.resolveEntitySlug(ctx, ns, n)
-		if err != nil {
-			return 0, err
-		}
-		if slug == "" || seen[slug] {
-			continue
-		}
-		seen[slug] = true
-		ents = append(ents, entity{"/entities/" + slug, n})
-	}
-	if len(ents) == 0 {
-		return 0, nil
-	}
-
-	// existing outgoing mentions targets, live or closed - linkTargetsAll,
-	// not Neighbors, because a closed target must stay excluded from
-	// re-attempt too (same guard shape as EnrichKey's similar_to check).
-	// Otherwise every re-enrich of an unchanged fact treats the closed
-	// mentions edge as new: a fresh mention_count bump and a fresh
-	// co_occurs weight bump each time, since ON CONFLICT DO NOTHING on the
-	// closed link row never reports back that nothing changed.
-	existing := map[string]bool{}
-	targets, err := s.linkTargetsAll(ctx, ns, key, "mentions")
+	resolved := 0
+	err := s.applyEntityPlanReplanning(ctx, ns, key, func(ctx context.Context) (*entityApplyPlan, error) {
+		plan, n, err := s.planEntityApply(ctx, ns, key, names)
+		resolved = n
+		return plan, err
+	})
 	if err != nil {
 		return 0, err
 	}
-	for _, tk := range targets {
-		existing[tk] = true
-	}
-
-	newKeys := map[string]bool{}
-	for _, e := range ents {
-		if existing[e.key] {
-			continue
-		}
-		count := 1.0
-		name := e.name
-		cur, err := s.liveByKeys(ctx, ns, []string{e.key})
-		if err != nil {
-			return 0, err
-		}
-		if len(cur) == 1 {
-			if mc, ok := cur[0].Attributes["mention_count"].(float64); ok {
-				count = mc + 1
-			}
-			name = cur[0].Body // keep first-seen casing
-		}
-		if _, err := s.writeNoOutbox(ctx, WriteInput{
-			Namespace: ns, Key: e.key, Body: name,
-			Attributes: map[string]any{"mention_count": count},
-			Writer:     "enricher", Importance: 0.3,
-		}); err != nil {
-			return 0, err
-		}
-		if err := s.AddLinkWeighted(ctx, ns, key, e.key, "mentions", 1.0); err != nil {
-			return 0, err
-		}
-		newKeys[e.key] = true
-	}
-
-	// co_occurs only where this fact contributed a genuinely new mention on
-	// at least one side of the pair — otherwise a re-run of an unchanged
-	// fact would double-count a pair it already linked.
-	for i := 0; i < len(ents); i++ {
-		for j := i + 1; j < len(ents); j++ {
-			a, b := ents[i].key, ents[j].key
-			if !newKeys[a] && !newKeys[b] {
-				continue
-			}
-			if err := s.bumpCoOccurs(ctx, ns, a, b); err != nil {
-				return 0, err
-			}
-		}
-	}
-
-	return len(ents), nil
+	return resolved, nil
 }
 
 // bumpCoOccurs increments (creating at weight 1 if absent) the co_occurs

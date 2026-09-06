@@ -50,6 +50,12 @@ type Store struct {
 
 	consolMu         sync.Mutex           // guards lastConsolidated
 	lastConsolidated map[string]time.Time // per-ns last consolidation pass in this process (see MarkConsolidated)
+
+	// mergePreInvalidateHook is a test-only injection point inside
+	// writeMergeRevisionTx, invoked after the predecessor CAS read and
+	// before the invalidating UPDATE - the read-committed window in
+	// which a concurrent writer can commit. Nil in production.
+	mergePreInvalidateHook func(ctx context.Context, tx *sql.Tx, nsID int64, prev Fact) error
 }
 
 // SetEmbedder wires write-time embedding (P12.5).
@@ -147,6 +153,30 @@ func ValidateKey(key string) error {
 		return fmt.Errorf("memory: key %q has empty segment", key)
 	}
 	return nil
+}
+
+// entityMergeLineageAttrs are the attribute keys the entity-merge
+// machinery owns: canonical-side lineage (merges, merge_base) and
+// alias-side lineage (merged_into, merge_id). No other writer may
+// synthesize, alter or drop them.
+var entityMergeLineageAttrs = []string{"merges", "merge_base", "merged_into", "merge_id"}
+
+// carryEntityMergeLineage copies the merge-owned lineage attributes from
+// an entity's current live fact into the attribute map of its superseding
+// revision. Enrichment paths that rebuild an entity's attrs from
+// extraction output - planEntityApply (legacy) here, and the typed
+// applies via preserveEntityAttrs' superset - MUST route lineage through
+// one of these helpers: rebuilding attrs without it silently drops the
+// lineage RevertEntityMerge subtracts on undo, leaving alias-only source
+// provenance and merge-created mention edges behind after a
+// reported-successful revert. Lineage is carried verbatim; enrichment
+// owns provenance (source_facts) and naming (aliases), never lineage.
+func carryEntityMergeLineage(attrs map[string]any, cur Fact) {
+	for _, k := range entityMergeLineageAttrs {
+		if v, ok := cur.Attributes[k]; ok {
+			attrs[k] = v
+		}
+	}
 }
 
 func (s *Store) ensureNamespace(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
@@ -256,6 +286,20 @@ type writePlan struct {
 	expires     any
 	auditLabels []string
 	auditFPs    []string
+	// expectPrevID pins the exact head revision the plan's content was
+	// computed from ("" = unpinned, plain writes). Entity-stage applies
+	// set it to the target revision they read - live, or the stably
+	// tombstoned/expired head a recreation supersedes - so writeTx's
+	// id-bound invalidation rejects a plan another writer (e.g. a G02
+	// merge) has superseded.
+	expectPrevID string
+	// expectAbsent pins the opposite baseline: the plan observed the key
+	// had NO head row at all (never written, or every revision
+	// superseded/swept) and intends to create it. A head at write time
+	// (created meanwhile) rejects the stale plan instead of committing a
+	// second head over the other writer's revision. A tombstoned or
+	// expired head is NOT absence: it pins via expectPrevID.
+	expectAbsent bool
 }
 
 // writePrepare validates a write and precomputes its plan: key
@@ -365,8 +409,60 @@ func (s *Store) writeTx(ctx context.Context, tx *sql.Tx, p *writePlan, outbox bo
 	}
 	p.fact.Action = action
 	now := store.TimeToDB(p.fact.CreatedAt)
-	// invalidate the predecessor's validity window
-	if _, err := tx.ExecContext(ctx, s.db.Rebind(`
+	// a plan that observed the key ABSENT pins that baseline: any live
+	// head now (created meanwhile - e.g. an entity another writer wrote
+	// and merged) means the plan's create is stale and must be rejected,
+	// not committed over the other writer's revision. The check alone
+	// races a concurrently-committing creator under read-committed, so
+	// creators serialize on a per-key advisory lock before re-checking
+	// (Postgres; sqlite's single connection serializes writers
+	// in-process, so only sequential transactions exist there and the
+	// first check already sees them). Plain unpinned writes creating a
+	// head take the same lock, so both sides of a creation race exclude
+	// each other and the plain outcome is unchanged: the later write
+	// supersedes the earlier one.
+	head, err := s.liveHeadIDTx(ctx, tx, nsID, in.Key)
+	if err != nil {
+		return false, err
+	}
+	if head == "" && s.db.Driver == "postgres" {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, in.Key, nsID); err != nil {
+			return false, fmt.Errorf("lock key head: %w", err)
+		}
+		if head, err = s.liveHeadIDTx(ctx, tx, nsID, in.Key); err != nil {
+			return false, err
+		}
+	}
+	if p.expectAbsent && head != "" {
+		return false, fmt.Errorf("%w: %s (created concurrently as %s)", ErrEntityApplyStaleTarget, in.Key, head)
+	}
+	// invalidate the predecessor's validity window. A pinned plan binds
+	// the predicate to the exact expected predecessor row: under
+	// read-committed a concurrent writer can commit between the plan's
+	// reads and this statement, and an unpinned namespace/key predicate
+	// would then invalidate THAT writer's new live row and commit the
+	// stale plan over it (erasing e.g. merge lineage). id = expectPrevID
+	// turns the window into zero matched rows; exactly one row must
+	// invalidate, and a RowsAffected error is never ignored - the plan
+	// is then unverifiable and rejected the same way (retryable: the
+	// stage re-plans from current state).
+	if p.expectPrevID != "" {
+		res, err := tx.ExecContext(ctx, s.db.Rebind(`
+			UPDATE memories SET invalid_at = $1
+			WHERE namespace_id = $2 AND key = $3 AND id = $4 AND invalid_at IS NULL`),
+			now, nsID, in.Key, p.expectPrevID)
+		if err != nil {
+			return false, fmt.Errorf("invalidate predecessor: %w", err)
+		}
+		n, rerr := res.RowsAffected()
+		if rerr != nil {
+			return false, fmt.Errorf("%w: %s (rows affected: %w)", ErrEntityApplyStaleTarget, in.Key, rerr)
+		}
+		if n != 1 {
+			return false, fmt.Errorf("%w: %s (expected predecessor %s)", ErrEntityApplyStaleTarget, in.Key, p.expectPrevID)
+		}
+	} else if _, err := tx.ExecContext(ctx, s.db.Rebind(`
 		UPDATE memories SET invalid_at = $1
 		WHERE namespace_id = $2 AND key = $3 AND invalid_at IS NULL`),
 		now, nsID, in.Key); err != nil {
@@ -401,6 +497,79 @@ func (s *Store) writeTx(ctx context.Context, tx *sql.Tx, p *writePlan, outbox bo
 		}
 	}
 	return false, nil
+}
+
+// liveHeadIDTx returns the id of the key's never-invalidated head row
+// within a caller-owned transaction ("" when the key has none: never
+// written, or every revision superseded). Unlike liveRevisionTx it takes
+// no row lock and does not filter tombstones: callers use it to
+// serialize creation of the head row itself, where there is no row to
+// lock yet.
+func (s *Store) liveHeadIDTx(ctx context.Context, tx *sql.Tx, nsID int64, key string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, s.db.Rebind(`
+		SELECT id FROM memories
+		WHERE namespace_id = $1 AND key = $2 AND invalid_at IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT 1`), nsID, key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// entityPlanHead loads the key's current mutation head - the
+// never-invalidated row any superseding write must invalidate -
+// regardless of action or expiry, and reports whether that head is LIVE
+// (not tombstoned, not expired at s.now()). Entity apply planning reads
+// exactly this one row per target key, so the attribute baseline and the
+// pinned predecessor can never diverge the way separate live/head reads
+// could (a create landing between them would pin a baseline the plan's
+// content was not computed from). A stably tombstoned or expired head
+// (live=false) is a legitimate recreation baseline: plain Write
+// supersedes it the same way, and pinning its ID rejects a DIFFERENT
+// head appearing after planning (a real concurrent create or
+// re-tombstone) exactly like a live-target pin. A poisoned head row is
+// quarantined like scanFacts and reported as absent. (nil, false, nil)
+// means no head row at all: the only true-absence case.
+func (s *Store) entityPlanHead(ctx context.Context, ns, key string) (*Fact, bool, error) {
+	nsID, ok, err := s.namespaceID(ctx, ns)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
+		SELECT `+factCols+`
+		FROM memories m
+		WHERE m.namespace_id = $1 AND m.key = $2 AND m.invalid_at IS NULL
+		ORDER BY m.created_at DESC, m.id DESC LIMIT 1`), nsID, key)
+	if err != nil {
+		return nil, false, fmt.Errorf("entity plan head: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, false, rows.Err()
+	}
+	f, _, serr := scanFactRow(rows, 0)
+	// Release the reader before quarantine starts a write transaction.
+	// SQLite uses one connection, so keeping rows open would block it.
+	if err := rows.Close(); err != nil {
+		return nil, false, err
+	}
+	if serr != nil {
+		var re *rowError
+		if errors.As(serr, &re) {
+			if qerr := s.quarantineRow(ctx, nsID, re.id, re.raw, re.reason); qerr != nil {
+				return nil, false, qerr
+			}
+			return nil, false, nil
+		}
+		return nil, false, serr
+	}
+	f.Namespace = ns
+	live := f.Action != "tombstone" && (f.ExpiresAt == nil || f.ExpiresAt.After(s.now()))
+	return f, live, nil
 }
 
 // preserveEntityAttrs overlays enrichment-derived attrs onto a clone of

@@ -185,6 +185,20 @@ func (s *Store) Neighbors(ctx context.Context, ns, key, direction string) ([]Lin
 // row (never linked, or already closed) is an error - mirrors Forget's
 // double-tombstone refusal.
 func (s *Store) InvalidateLink(ctx context.Context, ns, from, to, linkType string) error {
+	now := s.now()
+	return s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.invalidateLinkTx(ctx, tx, ns, from, to, linkType, now)
+	})
+}
+
+// invalidateLinkTx is the tx-aware core of InvalidateLink: same close
+// semantics against a caller-owned transaction instead of s.db directly,
+// so multi-mutation operations (RevertEntityMerge closes merge-added
+// mention edges alongside its superseding fact revisions) commit or roll
+// back as one unit - the same wrapper/core split as
+// AddLinkDescribed/addLinkTx. now is passed in (not read via s.now()) so
+// every write of one operation shares one instant.
+func (s *Store) invalidateLinkTx(ctx context.Context, tx *sql.Tx, ns, from, to, linkType string, now time.Time) error {
 	if err := ValidateKey(from); err != nil {
 		return err
 	}
@@ -197,10 +211,10 @@ func (s *Store) InvalidateLink(ctx context.Context, ns, from, to, linkType strin
 	if err := ValidateLinkType(linkType); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, s.db.Rebind(`
+	res, err := tx.ExecContext(ctx, s.db.Rebind(`
 		UPDATE memory_links SET invalid_at = $1
 		WHERE namespace = $2 AND from_key = $3 AND to_key = $4 AND link_type = $5 AND invalid_at IS NULL`),
-		store.TimeToDB(s.now()), ns, from, to, linkType)
+		store.TimeToDB(now), ns, from, to, linkType)
 	if err != nil {
 		return fmt.Errorf("invalidate link: %w", err)
 	}
@@ -255,6 +269,31 @@ func (s *Store) linkTargetsAll(ctx context.Context, ns, from, linkType string) (
 		SELECT to_key FROM memory_links
 		WHERE namespace = $1 AND from_key = $2 AND link_type = $3 ORDER BY to_key`),
 		ns, from, linkType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// linkSourcesAll returns the from_key of every incoming edge of linkType
+// to key, live or closed - the incoming-direction counterpart of
+// linkTargetsAll, with the same deliberate unfiltered semantics: a closed
+// edge stays in the dedup set so a user-closed source is never re-added
+// or re-recorded.
+func (s *Store) linkSourcesAll(ctx context.Context, ns, to, linkType string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
+		SELECT from_key FROM memory_links
+		WHERE namespace = $1 AND to_key = $2 AND link_type = $3 ORDER BY from_key`),
+		ns, to, linkType)
 	if err != nil {
 		return nil, err
 	}

@@ -19,6 +19,19 @@ import (
 // logs only; run rows record the sanitized class, never raw text.
 var ErrEmbedding = errors.New("embedding failed")
 
+// ErrEntityApplyStaleTarget rejects an entity-stage apply whose planned
+// TARGET baseline moved between planning and the fence transaction: the
+// target revision the plan's attribute union was computed from was
+// superseded, or the target the plan observed as absent was created
+// meanwhile (e.g. a G02 merge committed in that window). Committing the
+// stale plan would erase the other writer's lineage or head revision.
+// The source/run fence cannot see this - the SOURCE revision never
+// moved. The rejection fails the run (RunFailed), which recovery
+// requeues within the attempt budget: the retry re-plans from the
+// current head and applies cleanly, so the stage state stays consistent
+// and retryable instead of corrupt.
+var ErrEntityApplyStaleTarget = errors.New("memory: entity apply target revision superseded")
+
 // EnrichKey embeds the live fact at ns/key if it lacks a vector, then
 // links it (similar_to) to its topN nearest live neighbors with cosine
 // >= threshold. Returns links added. Embedder failures are returned
@@ -428,7 +441,7 @@ func (s *Store) flushEntityStage(ctx context.Context, ns string, keys []string, 
 		if batchTyped != nil {
 			plan, err = s.planTypedSourceApply(ctx, ns, c.key, batchTyped[c.key])
 		} else {
-			plan, err = s.planEntityApply(ctx, ns, c.key, batchNames[i])
+			plan, _, err = s.planEntityApply(ctx, ns, c.key, batchNames[i])
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -445,6 +458,10 @@ func (s *Store) flushEntityStage(ctx context.Context, ns string, keys []string, 
 			if ctx.Err() != nil {
 				return // shutdown mid-stage: leave the rest running for restart recovery
 			}
+			// ErrEntityApplyStaleTarget lands here: a concurrent writer
+			// superseded a planned target revision. RunFailed keeps the
+			// run retryable - recovery requeues it within the attempt
+			// budget and the retry re-plans from the current head.
 			finish(c, RunFailed, nil, classifyStageError(err, "store"))
 			log.Error("entity apply failed", "ns", ns, "key", c.key, "err", err)
 			continue
@@ -506,10 +523,13 @@ func (s *Store) execEntityApplyTx(ctx context.Context, tx *sql.Tx, ns, srcKey st
 }
 
 // planEntityApply computes the legacy (untyped) derived write set for
-// one source key: the same canonicalization, mention-count, idempotency
-// and co_occurs rules as applyEntities, staged for the fence transaction
-// instead of written directly.
-func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []string) (*entityApplyPlan, error) {
+// one source key: the canonicalization, mention-count, idempotency and
+// co_occurs rules the direct EnrichEntities path applies through
+// applyEntityPlanReplanning, staged for the caller's transaction instead
+// of written directly. The returned count is the resolved entity set
+// (including already-linked ones - EnrichEntities' return value, not
+// just this plan's writes).
+func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []string) (*entityApplyPlan, int, error) {
 	plan := &entityApplyPlan{}
 	type entity struct{ key, name string }
 	seen := map[string]bool{}
@@ -517,7 +537,7 @@ func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []str
 	for _, n := range names {
 		slug, err := s.resolveEntitySlug(ctx, ns, n)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if slug == "" || seen[slug] {
 			continue
@@ -526,7 +546,7 @@ func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []str
 		ents = append(ents, entity{"/entities/" + slug, n})
 	}
 	if len(ents) == 0 {
-		return plan, nil
+		return plan, 0, nil
 	}
 	// existing outgoing mentions targets, live or closed - linkTargetsAll,
 	// not Neighbors, because a closed target must stay excluded from
@@ -534,7 +554,7 @@ func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []str
 	existing := map[string]bool{}
 	targets, err := s.linkTargetsAll(ctx, ns, key, "mentions")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, tk := range targets {
 		existing[tk] = true
@@ -546,24 +566,54 @@ func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []str
 		}
 		count := 1.0
 		name := e.name
-		cur, err := s.liveByKeys(ctx, ns, []string{e.key})
+		// one observation per target key decides both the attribute
+		// baseline (a LIVE head) and the pinned mutation head, so the two
+		// can never diverge (a create landing between separate live/head
+		// reads would pin a baseline the plan's content was not computed
+		// from).
+		head, live, err := s.entityPlanHead(ctx, ns, e.key)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		if len(cur) == 1 {
-			if mc, ok := cur[0].Attributes["mention_count"].(float64); ok {
+		attrs := map[string]any{}
+		prevID := ""
+		expectAbsent := false
+		switch {
+		case live:
+			carryEntityMergeLineage(attrs, *head) // merge-owned lineage rides the superseding revision verbatim
+			if mc, ok := head.Attributes["mention_count"].(float64); ok {
 				count = mc + 1
 			}
-			name = cur[0].Body // keep first-seen casing
+			name = head.Body // keep first-seen casing
+			// the plan's mention_count union assumed this exact target
+			// revision; pin it so a superseded plan is rejected at the
+			// fence instead of overwriting a concurrent writer's head.
+			prevID = head.ID
+		case head != nil:
+			// stably tombstoned or expired head: a legitimate recreation
+			// baseline (plain Write supersedes it the same way), pinned so
+			// a DIFFERENT head appearing after planning - a real concurrent
+			// create or re-tombstone - rejects the plan exactly like a
+			// live-target pin.
+			prevID = head.ID
+		default:
+			// no head row at all: the plan intends to CREATE the entity;
+			// pin that absence so a concurrent creator (e.g. another writer
+			// writing then merging the entity) rejects the stale create
+			// instead of the apply committing a second head over theirs.
+			expectAbsent = true
 		}
+		attrs["mention_count"] = count
 		wp, err := s.writePrepare(ctx, WriteInput{
 			Namespace: ns, Key: e.key, Body: name,
-			Attributes: map[string]any{"mention_count": count},
+			Attributes: attrs,
 			Writer:     "enricher", Importance: 0.3,
 		})
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		wp.expectPrevID = prevID
+		wp.expectAbsent = expectAbsent
 		plan.writes = append(plan.writes, wp)
 		plan.links = append(plan.links, e.key)
 		newKeys[e.key] = true
@@ -579,7 +629,43 @@ func (s *Store) planEntityApply(ctx context.Context, ns, key string, names []str
 			plan.coPairs = append(plan.coPairs, [2]string{a, b})
 		}
 	}
-	return plan, nil
+	return plan, len(ents), nil
+}
+
+// entityApplyMaxReplans bounds how many times a direct entity apply
+// re-plans from the current head after its pinned baseline was
+// superseded (ErrEntityApplyStaleTarget) before the stale error is
+// returned to the caller.
+const entityApplyMaxReplans = 3
+
+// applyEntityPlanReplanning is the direct (unfenced) counterpart of the
+// pipeline's fenced stage apply, shared by EnrichEntities and
+// EnrichEntitiesBatch: planFn computes one source key's derived write
+// set (pinned on the exact target revisions it reads, or on their
+// absence), then the plan commits in ONE transaction - writes, mentions
+// edges and co_occurs bumps together - whose writeTx enforcement rejects
+// a plan a concurrent writer (e.g. a G02 merge) superseded between
+// planning and commit. A stale rejection rolls the whole apply back -
+// no half-written links or bumps - and re-plans from the winning head,
+// so the retried apply unions into the other writer's revision (merge
+// lineage rides it via preserveEntityAttrs/carryEntityMergeLineage)
+// instead of erasing it. Model/embedder calls stay inside planFn,
+// outside the transaction. Exhausting the replan budget returns
+// ErrEntityApplyStaleTarget: derived entity work is idempotent, so the
+// caller can retry the same enrichment later.
+func (s *Store) applyEntityPlanReplanning(ctx context.Context, ns, srcKey string, planFn func(context.Context) (*entityApplyPlan, error)) error {
+	for attempt := 0; ; attempt++ {
+		plan, err := planFn(ctx)
+		if err != nil {
+			return err
+		}
+		err = s.db.WithTx(ctx, func(tx *sql.Tx) error {
+			return s.execEntityApplyTx(ctx, tx, ns, srcKey, plan)
+		})
+		if !errors.Is(err, ErrEntityApplyStaleTarget) || attempt+1 >= entityApplyMaxReplans {
+			return err
+		}
+	}
 }
 
 // planTypedSourceApply computes the typed-mode derived write set one
@@ -652,13 +738,18 @@ func (s *Store) planTypedSourceApply(ctx context.Context, ns, src string, subs [
 		e := &merged[i]
 		entKeys = append(entKeys, e.key)
 		newSource := !linked[e.key]
-		cur, err := s.liveByKeys(ctx, ns, []string{e.key})
+		// one observation per target key decides both the attribute
+		// baseline (a LIVE head) and the pinned mutation head, so the two
+		// can never diverge (a create landing between separate live/head
+		// reads would pin a baseline the plan's content was not computed
+		// from).
+		head, live, err := s.entityPlanHead(ctx, ns, e.key)
 		if err != nil {
 			return nil, err
 		}
 		priorIDs := map[string]bool{}
-		if len(cur) == 1 {
-			for _, id := range attrStringList(cur[0], "source_facts") {
+		if live {
+			for _, id := range attrStringList(*head, "source_facts") {
 				priorIDs[id] = true
 			}
 		}
@@ -672,7 +763,7 @@ func (s *Store) planTypedSourceApply(ctx context.Context, ns, src string, subs [
 		if !newSource && !freshID {
 			continue // idempotent re-run: same revision, already linked
 		}
-		if len(cur) != 1 && !newSource {
+		if !live && !newSource {
 			continue // entity dead with the key already linked: do not resurrect
 		}
 		name := e.name
@@ -697,21 +788,42 @@ func (s *Store) planTypedSourceApply(ctx context.Context, ns, src string, subs [
 		if e.declared != "" {
 			attrs["declared_type"] = e.declared
 		}
-		if len(cur) == 1 {
-			if mc, ok := cur[0].Attributes["mention_count"].(float64); ok {
+		prevID := ""
+		expectAbsent := false
+		switch {
+		case live:
+			if mc, ok := head.Attributes["mention_count"].(float64); ok {
 				attrs["mention_count"] = mc + bump
 			}
-			name = cur[0].Body // keep first-seen casing
-			if al := unionStrings(entityAliases(cur[0]), e.aliases); len(al) > 0 {
+			name = head.Body // keep first-seen casing
+			if al := unionStrings(entityAliases(*head), e.aliases); len(al) > 0 {
 				attrs["aliases"] = al
 			} else {
 				delete(attrs, "aliases")
 			}
-			attrs["source_facts"] = unionStrings(attrStringList(cur[0], "source_facts"), e.sourceIDs)
+			attrs["source_facts"] = unionStrings(attrStringList(*head, "source_facts"), e.sourceIDs)
 			// derived attrs win; everything else the entity carried
 			// (declared_type when not redeclared, merge lineage, any
 			// other foreign attribute) is preserved, not rebuilt away.
-			attrs = preserveEntityAttrs(cur[0].Attributes, attrs)
+			attrs = preserveEntityAttrs(head.Attributes, attrs)
+			// the plan's provenance/lineage union assumed this exact
+			// target revision; pin it so a plan superseded meanwhile
+			// (e.g. a merge committed during embedding) is rejected at
+			// the fence instead of erasing the other writer's lineage.
+			prevID = head.ID
+		case head != nil:
+			// stably tombstoned or expired head: a legitimate recreation
+			// baseline (plain Write supersedes it the same way), pinned so
+			// a DIFFERENT head appearing after planning - a real concurrent
+			// create or re-tombstone - rejects the plan exactly like a
+			// live-target pin.
+			prevID = head.ID
+		default:
+			// no head row at all: the plan intends to CREATE the entity;
+			// pin that absence so a concurrent creator rejects the stale
+			// create instead of the apply committing a second head over
+			// theirs.
+			expectAbsent = true
 		}
 		wp, err := s.writePrepare(ctx, WriteInput{
 			Namespace: ns, Key: e.key, Body: name,
@@ -721,6 +833,8 @@ func (s *Store) planTypedSourceApply(ctx context.Context, ns, src string, subs [
 		if err != nil {
 			return nil, err
 		}
+		wp.expectPrevID = prevID
+		wp.expectAbsent = expectAbsent
 		plan.writes = append(plan.writes, wp)
 		if newSource {
 			plan.links = append(plan.links, e.key)
