@@ -665,6 +665,61 @@ func TestLLMJudgeParsesVerdictAndRecordsTokens(t *testing.T) {
 	}
 }
 
+// TestStripJSONFence pins the unexported fence-strip helper directly:
+// a fenced ```json block, a fenced block with no language tag, and a
+// bare (unfenced) body all reduce to the same trimmed JSON payload.
+func TestStripJSONFence(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"fenced with json tag", "```json\n{\"a\":1}\n```", `{"a":1}`},
+		{"fenced without language tag", "```\n{\"a\":1}\n```", `{"a":1}`},
+		{"bare json passes through", `{"a":1}`, `{"a":1}`},
+		{"surrounding whitespace trimmed", "  \n```json\n{\"a\":1}\n```\n  ", `{"a":1}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stripJSONFence(c.in); got != c.want {
+				t.Fatalf("stripJSONFence(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestLLMJudgeStripsMarkdownFence: a judge reply wrapped in a ```json
+// fence (as many chat models emit by default) still parses into a full
+// verdict instead of failing json.Unmarshal on the fence markers.
+func TestLLMJudgeStripsMarkdownFence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id": "cmpl-1", "object": "chat.completion", "created": 1,
+		  "model": "judge-test",
+		  "choices": [{"index": 0, "finish_reason": "stop",
+		    "message": {"role": "assistant", "content": "` + "```json\\n{\\\"correct\\\":true,\\\"support\\\":true,\\\"justification\\\":\\\"x\\\"}\\n```" + `"}}],
+		  "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+	m := llm.NewManager(true, map[string]llm.Profile{
+		"default": {BaseURL: srv.URL, Model: "judge-test"},
+	}, nil, nil)
+	client, err := m.Client("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewLLMJudge(client, srv.URL, 100).Judge(t.Context(), JudgeInput{Q: "q", Answer: "a"})
+	if err != nil {
+		t.Fatalf("fenced verdict must parse: %v", err)
+	}
+	if v.Correct == nil || !*v.Correct || v.Support == nil || !*v.Support {
+		t.Fatalf("verdict = %+v, want both fields explicitly true", v)
+	}
+	if v.Justification != "x" {
+		t.Fatalf("justification = %q, want x", v.Justification)
+	}
+}
+
 // TestLLMJudgeUnparseableVerdictIsAnError: a judge response that is not
 // the verdict JSON is a per-case judge error (recorded, counted), never a
 // silently passing grade.

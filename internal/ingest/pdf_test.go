@@ -44,6 +44,9 @@ func TestPDFHelperProcess(t *testing.T) {
 	case "sleep":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
+	case "toobig":
+		io.WriteString(os.Stdout, strings.Repeat("x", 200))
+		os.Exit(0)
 	}
 	os.Exit(2)
 }
@@ -181,5 +184,29 @@ func TestPDFAdapterFailuresVisible(t *testing.T) {
 				t.Fatalf("failed adapter ingest left %d chunks", len(got))
 			}
 		})
+	}
+}
+
+// TestPDFAdapterStdoutExceedsMaxBytesReportsExceeded: an adapter whose
+// stdout overruns max_bytes must report the actionable max_bytes error,
+// not a generic "failed" wrapping the incidental write error the
+// overrun also triggers on the stdout pipe copy (the switch order bug:
+// runErr != nil must not shadow stdout.exceeded). Drives PDFLoader.Load
+// directly (a small input body, not the sample.pdf fixture) so the
+// small MaxBytes bounds only the adapter's stdout, not Spec's separate
+// input-size check.
+func TestPDFAdapterStdoutExceedsMaxBytesReportsExceeded(t *testing.T) {
+	loader := PDFLoader{Command: helperAdapter(t, "toobig"), MaxBytes: 64}
+	_, err := loader.Load(context.Background(), LoadInput{Name: "x.pdf", Body: []byte("small pdf body")})
+	if err == nil || !strings.Contains(err.Error(), "output exceeds max_bytes") {
+		t.Fatalf("err = %v, want substring %q", err, "output exceeds max_bytes")
+	}
+	// The overrun also makes the stdout pipe-copy fail, so runErr is
+	// non-nil too; that must not shadow the specific max_bytes message
+	// with the generic "failed: <runErr>" wrapper (which happens to
+	// still embed the same substring via %w, so the check above alone
+	// cannot tell the two apart).
+	if strings.Contains(err.Error(), "failed") {
+		t.Fatalf("err = %v, want the clean max_bytes message, not the generic runErr-wrapped \"failed\" message", err)
 	}
 }

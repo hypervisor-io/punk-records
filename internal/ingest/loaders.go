@@ -37,7 +37,7 @@ func (markdownLoader) Load(_ context.Context, in LoadInput) (*Result, error) {
 	var cur strings.Builder
 	name := ""
 	open := false
-	fenced := false
+	fenceMarker := "" // "" means not inside a fence; else the marker ("```" or "~~~") that opened it
 	flush := func() {
 		if !open {
 			return
@@ -51,10 +51,13 @@ func (markdownLoader) Load(_ context.Context, in LoadInput) (*Result, error) {
 	}
 	for _, line := range strings.Split(string(in.Body), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			fenced = !fenced
+		switch {
+		case fenceMarker == "" && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")):
+			fenceMarker = trimmed[:3]
+		case fenceMarker != "" && strings.HasPrefix(trimmed, fenceMarker):
+			fenceMarker = ""
 		}
-		if !fenced {
+		if fenceMarker == "" {
 			if title, ok := atxHeading(line); ok {
 				flush()
 				name, open = title, true

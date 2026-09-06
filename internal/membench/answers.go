@@ -430,6 +430,23 @@ const judgeSystemPrompt = `You grade one benchmark answer. Reply with ONLY a JSO
 - support: the cited evidence actually supports the answer's claims. An existing but unrelated citation is NOT support. An answer with no cited evidence is NOT supported.
 - A confident answer to an unanswerable question is not correct and not supported.`
 
+// stripJSONFence strips an optional Markdown code fence around a judge
+// reply (mirrors the fence-strip in cmd/punk/main.go's obsSummarizer and
+// sibling LLM adapters): find the first "```", drop it and an optional
+// "json" language tag, cut at the next "```", then trim. A reply with no
+// fence passes through unchanged (after trimming).
+func stripJSONFence(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "```"); i >= 0 {
+		s = s[i+3:]
+		s = strings.TrimPrefix(s, "json")
+		if j := strings.Index(s, "```"); j >= 0 {
+			s = s[:j]
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
 func (j *llmJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, error) {
 	evidence, err := json.Marshal(in.Evidence)
 	if err != nil {
@@ -462,7 +479,7 @@ func (j *llmJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, erro
 		Support       *bool  `json:"support"`
 		Justification string `json:"justification"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Content)), &body); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(res.Content)), &body); err != nil {
 		return v, fmt.Errorf("membench: judge verdict is not verdict JSON: %w", err)
 	}
 	// A parseable but incomplete verdict ({} or one dimension missing) is

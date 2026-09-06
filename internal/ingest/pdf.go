@@ -138,14 +138,14 @@ func (l PDFLoader) Load(ctx context.Context, in LoadInput) (*Result, error) {
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		return nil, fmt.Errorf("ingest: pdf adapter %q timed out after %s", l.Command[0], timeout)
+	case stdout.exceeded:
+		return nil, fmt.Errorf("ingest: pdf adapter %q output exceeds max_bytes (%d)", l.Command[0], maxOut)
 	case runErr != nil:
 		msg := strings.TrimSpace(stderr.buf.String())
 		if msg != "" {
 			return nil, fmt.Errorf("ingest: pdf adapter %q failed: %w: %s", l.Command[0], runErr, msg)
 		}
 		return nil, fmt.Errorf("ingest: pdf adapter %q failed: %w", l.Command[0], runErr)
-	case stdout.exceeded:
-		return nil, fmt.Errorf("ingest: pdf adapter %q output exceeds max_bytes (%d)", l.Command[0], maxOut)
 	}
 
 	var out adapterWire
