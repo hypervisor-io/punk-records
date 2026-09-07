@@ -437,7 +437,7 @@ on the version they started with). Skills are
 | Surface | What |
 |---|---|
 | REST `/v1` | tasks, proposals, memory, webhook intake, agent hooks - bearer-keyed (`punk apikey create`) |
-| MCP | `punk mcp` (stdio) or `/mcp` (HTTP): `submit_task`, `get_task`, `list_agents`, `remember`, `remember_document`, `remember_model`, `recall`, `recall_as_of`, `forget`, `search` (hybrid / scored / interleave / temporal / reranked / `max_tokens` / `expand`), `unified_search`, `triplet_search`, `reflect` (when a model is configured), `list_keys`, `list_tasks`, `await_tasks`, `set_task_status`, `register`, `list_models`, `list_entities`, `feedback`, `profile`, `diagnose`, `link` / `unlink` / `neighbors` |
+| MCP | `punk mcp` (stdio) or `/mcp` (HTTP): `submit_task`, `get_task`, `list_agents`, `remember`, `remember_document`, `remember_model`, `recall`, `recall_as_of`, `forget`, `search` (hybrid / scored / interleave / temporal / reranked / `max_tokens` / `expand` / `strategy`), `unified_search`, `triplet_search`, `reflect` (when a model is configured), `list_keys`, `list_tasks`, `await_tasks`, `set_task_status`, `register`, `list_models`, `list_entities`, `feedback`, `profile`, `diagnose`, `link` / `unlink` / `neighbors` |
 | A2A (in) | `POST /v1/a2a` (Agent2Agent v0.3 JSON-RPC + SSE): `message/send`, `message/stream`, `tasks/{get,cancel,resubscribe}`, push configs; card at `/.well-known/agent-card.json` |
 | A2A (out) | delegate to foreign agents: `punk a2a card\|send` (CLI) or the `delegate` MCP tool over `a2a.remotes` |
 | CLI | `serve` / `migrate` / `validate` / `apikey` / `export` + `import` (memory JSONL) / `a2a` / `itbench` / `membench` / `hook` / `connect` / `skills` |

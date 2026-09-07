@@ -67,7 +67,7 @@ func TestRecordSkillRunRequiresPublishedIdentity(t *testing.T) {
 	// The run record is digest-only: the stored body never carries the
 	// procedure text, exactly like the identity row it cites.
 	var stored string
-	if err := db.QueryRowContext(ctx, db.Rebind(`SELECT body FROM memories WHERE key = ?`),
+	if err := db.QueryRowContext(ctx, db.Rebind(`SELECT body FROM memories WHERE key = $1`),
 		skillRunKey(meta.Name, meta.Version, rec.RunID)).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestSkillRunOutcomeSurvivesRetentionSweep(t *testing.T) {
 		t.Fatal("sweep removed nothing")
 	}
 	var versionRows int
-	if err := db.QueryRowContext(ctx, db.Rebind(`SELECT count(*) FROM memories WHERE key IN (?, ?)`),
+	if err := db.QueryRowContext(ctx, db.Rebind(`SELECT count(*) FROM memories WHERE key IN ($1, $2)`),
 		skillDocKey(v1.Name, v1.Version), skillBodyKey(v1.Name, v1.Version)).Scan(&versionRows); err != nil {
 		t.Fatal(err)
 	}

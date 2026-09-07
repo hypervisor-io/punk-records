@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased (improvement pipeline, integrated locally 2026-09-07)
+
+Twenty-three reviewed tasks on the local branch
+`feat/punk-improvement-pipeline` (baseline `9ab2b8f`, tip `9159cb0`).
+Acceptance evidence: `docs/reports/punk-improvement-pipeline.md`. None
+of this is deployed, released or tagged; the live installation is
+unchanged.
+
+### Added
+- Codex CLI 0.153.4 integration: native hook event normalization (the
+  native `turn_id` becomes the prompt-capture identity; previously every
+  native Codex prompt capture was silently dropped), idempotent
+  `punk connect codex` with managed-block reconciliation, namespace
+  diagnostics, server-side dedup of repeated context delivery with
+  `/delivery` + `/injected` bookkeeping, a pinned native acceptance
+  procedure and run record, and a documented mitigation for the upstream
+  OSC 0 terminal-title stream (`[tui] terminal_title = []`).
+- Opt-in namespace authorization: `authz` grants (read/write/admin per
+  subject and namespace, migration 0022), enforced across REST, MCP
+  (stdio trust stays explicit; HTTP MCP is credential-verified), hooks,
+  brain surfaces, task board and subscriptions when
+  `authz.enforcement: deny`; complete route/tool permission inventories
+  guarded by tests.
+- Typed entity extraction with exact source-revision provenance (G01)
+  and reversible, type-aware entity alias merges with atomic apply/undo
+  (G02).
+- Document ingestion: stable chunk provenance and delta rewrite (I01),
+  loader adapters for text/markdown/html/incident-json plus an external
+  PDF adapter contract with bounded process handling (I02), and
+  `punk ingest --dry-run` / `--allow-adapter` cost previews (P02).
+- Durable enrichment pipeline (migration 0023): stage runs keyed by
+  source revision and stage version, idempotent retries, crash recovery,
+  and commit-time fences so stale workers cannot commit outdated derived
+  state (P01).
+- Scoped procedural skill discovery, immutable versions, run lineage and
+  approval-gated improvement proposals (S01, S02).
+- Inspectable retrieval strategies (`exact`, `semantic`, `historical`,
+  `relationship`, `procedural`, deterministic `auto`) on REST search and
+  MCP `search`/`unified_search` (R01); Go-library opt-ins for bounded
+  reflect evidence expansion (R02) and source-linked hierarchical
+  summaries (H01).
+- Reproducible retrieval baselines and answer/citation/abstention
+  evaluation fixtures under `scenarios/membench/` (E01, E02).
+
+### Changed
+- MCP initialize/tool-list guidance reduced (C07: ~28% smaller initialize
+  instructions with C07's own per-tool schemas unchanged; the pipeline as
+  a whole intentionally grows the schemas - R01 adds the `strategy`
+  parameter and routed metadata, measured +1327B / ~332 estimated
+  tokens), and omitted `await_tasks` waits now default to 45s with
+  client-deferred deadline guidance (C07, C08).
+
 ## v1.8.1 (2026-09-05)
 
 ### Added

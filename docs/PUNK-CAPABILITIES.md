@@ -4,7 +4,7 @@ Punk Records is a self-hosted memory and coordination service for AI agents. It 
 
 Use it to help a coding assistant remember project decisions, let several agents work from shared knowledge, turn operational investigations into reusable procedures, or build an auditable agent workflow around your own tools.
 
-**Availability, 6 September 2026:** This guide describes repository capabilities and the current improvement pipeline. “Core” means functionality already present before this pipeline. “Integrated” means independently reviewed and accepted on the local improvement branch, awaiting release/deployment. “In progress” and “Planned” mean acceptance is still outstanding. The installed build and enabled configuration determine what a particular deployment provides; this guide does not claim the live installation has been upgraded.
+**Availability, 7 September 2026:** This guide describes repository capabilities and the current improvement pipeline. "Core" means functionality already present before this pipeline. "Integrated" means independently reviewed and accepted on the local improvement branch, awaiting release/deployment. "In progress" and "Planned" mean acceptance is still outstanding. The installed build and enabled configuration determine what a particular deployment provides; this guide does not claim the live installation has been upgraded. As of 7 September 2026 twenty-three pipeline feature tasks are integrated locally on `feat/punk-improvement-pipeline` at `9159cb0`; the final acceptance gate (Z01) is documented by the [pipeline acceptance report](reports/punk-improvement-pipeline.md) and its own later commit, not by that source tip. No release, tag, deployment or live-server change has been made.
 
 ## 1. Persistent project and team memory — Core
 
@@ -40,11 +40,11 @@ Semantic search needs embeddings. Keyword recall and the deterministic memory/co
 - Discover connecting facts through graph links, including facts that do not directly match the query text.
 - Optionally extract named entities from stored facts and record mentions and co-occurrences.
 - **Integrated:** structured entity types, an optional domain vocabulary, aliases, and attribution to exact source revisions.
-- **In progress:** evidence-based alias-merge proposals, protected-type checks, reversible application, and preservation of merge history during later enrichment.
+- **Integrated:** evidence-based alias-merge proposals, protected-type checks, reversible application, and preservation of merge history during later enrichment.
 
 **Example:** Connect a service, an incident, a configuration decision, and the evidence explaining their relationship.
 
-## 4. Context across agent sessions — Core; Codex hardening Integrated/Planned
+## 4. Context across agent sessions — Core; Codex hardening Integrated
 
 - Capture supported lifecycle events through client-specific hooks or plugins.
 - Inject relevant project memory at the start of a later session.
@@ -57,7 +57,7 @@ Semantic search needs embeddings. Keyword recall and the deterministic memory/co
 
 Connection targets in the current source include Claude Code, Cursor, OpenCode, GitHub Copilot CLI, Codex CLI, pi, Antigravity, Hermes, and OpenClaw. Capture, injection, and tool availability vary by client and version.
 
-**Integrated:** Codex hook normalization, managed-integration reconciliation, namespace diagnostics, bounded guidance, and safer default task waits. **Planned/blocked:** the complete Codex 0.153.4 acceptance gate, including verification of the reported terminal repetition in the affected terminal.
+**Integrated:** Codex hook normalization, managed-integration reconciliation, namespace diagnostics, bounded guidance, safer default task waits, deduplicated context delivery, and the complete Codex 0.153.4 acceptance gate (native run evidence and the user-confirmed `terminal_title` mitigation are recorded in `docs/investigations/codex-0.153.4-terminal-spam.md`; the exact original renderer was not identified).
 
 ## 5. Multi-agent work coordination — Core
 
@@ -113,40 +113,40 @@ These controls depend on configuration. Namespace authorization enforcement is o
 
 These mechanisms make evidence inspectable; citation validation establishes that cited evidence was retrieved, not that every generated claim is correct.
 
-## 9. Reusable procedures and learning from outcomes — Core / Integrated / In progress
+## 9. Reusable procedures and learning from outcomes — Core / Integrated
 
 - **Core:** author procedures as `SKILL.md` files and associate them with specialist agents.
 - **Core:** mine recurring investigations into proposed skill drafts.
 - **Core:** generate source-cited suggestions for project instructions and practices.
 - **Integrated:** discover procedures through concise metadata and load the exact selected version on demand.
 - **Integrated:** activate/deactivate versions, reject changes to an already published version's content, and retain its content identity after unpublishing and retention.
-- **In progress:** attach outcomes to exact skill versions and originating task evidence; propose improvements for approval; apply approved changes idempotently and support return to a prior version.
+- **Integrated:** attach outcomes to exact skill versions and originating task evidence; propose improvements for approval; apply approved changes idempotently and support return to a prior version. The shipped acceptance fixtures are deterministic contains/absent assertions on procedure content; they do not execute a procedure or prove runtime task success.
 
 “Learning” here means updating memory and proposing versioned procedures. Model-weight training is outside this pipeline.
 
-## 10. Documents and ingestion — Core / Integrated / In progress
+## 10. Documents and ingestion — Core / Integrated
 
 - **Core:** ingest text documents as chunks and update changed content on re-ingestion.
 - **Core:** import/export memory in JSONL and seed code-map knowledge.
 - **Integrated:** retain document identity, source URI, revision metadata, and chunk-level locations.
 - **Integrated:** keep unaffected chunks stable when content is inserted elsewhere in a source document.
 - **Integrated:** respect source ownership and preserve user-replaced chunks during reconciliation.
-- **In progress:** loaders for plain text, Markdown, HTML, and structured incident JSON.
-- **In progress:** optional PDF extraction through an external adapter, explicit URL fetching with destination checks, and bounded input/process handling.
-- **Planned:** preview ingestion/enrichment work before execution, separating measured input from approximate processing cost.
+- **Integrated:** loaders for plain text, Markdown, HTML, and structured incident JSON.
+- **Integrated:** optional PDF extraction through an external adapter, explicit URL fetching with destination checks, and bounded input/process handling.
+- **Integrated:** preview ingestion/enrichment work before execution (`punk ingest --dry-run`), separating measured input bytes from approximate (`bytes/4`) token and cost estimates.
 
 The PDF work provides an adapter contract; an extractor must be supplied separately.
 
-## 11. Retrieval improvements under development — Planned
+## 11. Retrieval improvements — Integrated (opt-in)
 
-- Explicit retrieval strategies with inspectable routing reasons and fallbacks.
-- Optional deterministic selection of an appropriate retrieval strategy.
-- Bounded expansion of related evidence during `reflect`, with stopping conditions and budget controls.
-- Optional hierarchical summaries linked to their sources.
+- Explicit retrieval strategies with inspectable routing reasons and fallbacks (REST `?strategy=`, MCP `search`/`unified_search` `strategy`; omitting it keeps the legacy fused behavior).
+- Optional deterministic selection of an appropriate retrieval strategy (`auto`); no classifier model call.
+- Bounded expansion of related evidence during `reflect`, with stopping conditions and budget controls (Go-library opt-in `reflect.Opts.ExpandEvidence`; no CLI/MCP switch in this build).
+- Optional hierarchical summaries linked to their sources (Go-library opt-in `reflect.Opts.Summaries` over `Store.BuildSummaryTree`; no CLI/MCP switch in this build).
 - Incremental invalidation of affected summaries when their source material changes.
-- Comparative evaluation of these additions before changing default behavior.
+- Comparative evaluation of these additions before changing default behavior; the evaluation fixtures are synthetic and measured neutral, not a demonstrated quality gain.
 
-## 12. Reliability and observability — Core; durable enrichment In progress
+## 12. Reliability and observability — Core; durable enrichment Integrated
 
 - SQLite or PostgreSQL persistence.
 - An outbox-backed event path for memory updates.
@@ -156,7 +156,7 @@ The PDF work provides an adapter contract; an extractor must be supplied separat
 - Backup/export/import tools and schema migration commands.
 - Region branch/merge workflows for experimenting with memory snapshots.
 - Import service topology from Backstage catalogs.
-- **In progress:** durable enrichment run records, stage status, retry lineage, restart recovery, and transactional checks to prevent stale workers from committing outdated derived state.
+- **Integrated:** durable enrichment run records, stage status, retry lineage, restart recovery, and transactional checks to prevent stale workers from committing outdated derived state.
 
 ## 13. Evaluation and regression measurement — Core; expanded evaluation Integrated
 
@@ -194,4 +194,4 @@ Published performance claims should come from the selected dataset, configuratio
 
 ## Basis of this guide
 
-Reviewed against local integration source `803f7e05bd58318ae46d8c678ca2ed2e2410553a` on 6 September 2026. Sources: [README](../README.md), [configuration](CONFIG.md), [MCP toolsets](../internal/mcpserver/toolset.go), [CLI integration targets](../cmd/punk/main.go), [policy engine](../internal/policy/policy.go), [namespace authorization](../internal/authz/authz.go), [release targets](../.github/workflows/release.yml), and the [improvement plan](superpowers/plans/2026-09-06-cognee-borrowing.md). README client tables contain a stale Codex row; this guide uses the implemented CLI targets and separately identifies the outstanding Codex acceptance work.
+Reviewed against local integration source `9159cb069ec014ddc9667f4877925200435d4d90` on 7 September 2026. Sources: [README](../README.md), [configuration](CONFIG.md), [MCP toolsets](../internal/mcpserver/toolset.go), [CLI integration targets](../cmd/punk/main.go), [policy engine](../internal/policy/policy.go), [namespace authorization](../internal/authz/authz.go), [release targets](../.github/workflows/release.yml), the [improvement plan](superpowers/plans/2026-09-06-cognee-borrowing.md), and the [pipeline acceptance report](reports/punk-improvement-pipeline.md). The README client tables' Codex row is now current (hooks plus MCP entry; `terminal_title` mitigation documented).

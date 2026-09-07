@@ -95,6 +95,47 @@ be one JSON object
 and the timeout kills the process. No adapter, a nonzero exit or
 unparsable/empty output fails the ingest before any write.
 
+`punk ingest --dry-run` previews the delta instead of executing it: how
+many chunks the write path would add/change/remove, the exact input byte
+counts per configured enrichment stage, and an estimated token/cost
+figure per stage. A dry run writes nothing, calls no model and spawns
+no adapter subprocess; a PDF input is reported as `unestimated` unless
+`--allow-adapter` explicitly lets the preview run the external extractor
+(`--allow-adapter` without `--dry-run` is a usage error). Byte counts
+are exact measurements at the declared stage boundaries; token figures
+are `bytes/4` estimates; stage completion is heuristic; a model without
+a known price is reported as unknown, and a positive price that rounds
+below micro-USD is labeled `priced_rounded_zero`, never "free". The
+forecast excludes retries, control prompts and work outside the
+disclosed stages - it is a preview, not an invoice. Note the ordinary
+CLI writer has no embedder wired, so it performs zero synchronous
+write-time embedding calls; normal writes still emit durable outbox
+rows, and the configured background `embed_link` stage (a separate
+processor) is forecast with body-only input, while the wired library
+writer embeds the keyed input at write time.
+
+## Retrieval strategies
+
+`GET /v1/namespaces/{ns}/memories/search?strategy=...` and the MCP
+`search`/`unified_search` `strategy` argument accept an explicit
+retrieval route: `exact`, `semantic`, `historical`, `relationship`,
+`procedural`, or `auto` (deterministic selection from the query shape -
+no classifier model call). An explicit strategy returns the routed
+envelope: compact hits plus the mode, the router's reasons and any
+capability fallback (for example semantic requested without embeddings).
+An unknown strategy is an error, not a silent fallback. Omitting the
+parameter preserves the legacy fused listing exactly. A `temporal`
+window that a windowed strategy cannot honor fails 400.
+
+Two further retrieval opt-ins exist only at the Go library layer
+(`internal/reflect`): `reflect.Opts.ExpandEvidence` bounds a
+relationship/evidence expansion loop (per-call and per-run caps,
+context deadline, staged shown-ID citations, per-round accounting), and
+`reflect.Opts.Summaries` adds the `list_summaries` tool backed by
+`Store.BuildSummaryTree`'s source-linked hierarchical summaries. Neither
+has a CLI flag, MCP argument or config key in this build; the MCP
+`reflect` tool exposes only `level` and `schema`. Both default off.
+
 ## Codex 0.153.4 integration
 
 `punk connect codex` wires four capture hooks (SessionStart

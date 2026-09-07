@@ -228,9 +228,7 @@ func TestSkillVersionConflictKeepsPinnedBody(t *testing.T) {
 func TestFailedBodyWriteLeavesNoDiscoverableSkill(t *testing.T) {
 	s, _, _ := newTest(t)
 	ctx := context.Background()
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_skill_body BEFORE INSERT ON memories WHEN NEW.key LIKE '/skill-bodies/%' BEGIN SELECT RAISE(ABORT,'simulated body write failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	installSkillInsertFailure(t, s, "fail_skill_body", "/skill-bodies/%", "simulated body write failure")
 	if err := s.IndexSkill(ctx, "ns", skillMetaFixture(), "procedure"); err == nil {
 		t.Fatal("failure injection did not fire")
 	}
@@ -373,9 +371,7 @@ func TestFailedUnpublishKeepsSkillCoherent(t *testing.T) {
 	m := skillMetaFixture()
 	indexFixture(t, s, "ns", m, "original procedure")
 
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_skill_digest BEFORE INSERT ON memories WHEN NEW.key LIKE '/skills/%' BEGIN SELECT RAISE(ABORT,'simulated digest failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure := installSkillInsertFailure(t, s, "fail_skill_digest", "/skills/%", "simulated digest failure")
 	clk.Set(s.now().Add(time.Second))
 	if err := s.UnpublishSkill(ctx, "ns", m.Name, m.Version); err == nil {
 		t.Fatal("failure injection did not fire")
@@ -394,9 +390,7 @@ func TestFailedUnpublishKeepsSkillCoherent(t *testing.T) {
 	}
 
 	// The failure cleared: the retry completes the removal.
-	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER fail_skill_digest`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure()
 	clk.Set(s.now().Add(time.Second))
 	if err := s.UnpublishSkill(ctx, "ns", m.Name, m.Version); err != nil {
 		t.Fatalf("retry after cleared failure: %v", err)
@@ -419,9 +413,7 @@ func TestFailedBodyTombstoneLeavesInvisibleOrphan(t *testing.T) {
 	m := skillMetaFixture()
 	indexFixture(t, s, "ns", m, "original procedure")
 
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_skill_body_tombstone BEFORE INSERT ON memories WHEN NEW.key LIKE '/skill-bodies/%' BEGIN SELECT RAISE(ABORT,'simulated body failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure := installSkillInsertFailure(t, s, "fail_skill_body_tombstone", "/skill-bodies/%", "simulated body failure")
 	clk.Set(s.now().Add(time.Second))
 	if err := s.UnpublishSkill(ctx, "ns", m.Name, m.Version); err == nil {
 		t.Fatal("failure injection did not fire")
@@ -433,9 +425,7 @@ func TestFailedBodyTombstoneLeavesInvisibleOrphan(t *testing.T) {
 		t.Fatalf("load after partial unpublish: err = %v, want ErrSkillNotFound", err)
 	}
 
-	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER fail_skill_body_tombstone`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure()
 	clk.Set(s.now().Add(time.Second))
 	if err := s.UnpublishSkill(ctx, "ns", m.Name, m.Version); err != nil {
 		t.Fatalf("retry after cleared failure: %v", err)
@@ -554,9 +544,7 @@ func TestSkillIdentityHealsFromLiveRows(t *testing.T) {
 	b.Name = "pool-audit"
 	b.Description = "Audit pooler settings after connection saturation incidents"
 
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_skill_identity BEFORE INSERT ON memories WHEN NEW.key LIKE '/skill-identities/%' BEGIN SELECT RAISE(ABORT,'simulated identity write failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure := installSkillInsertFailure(t, s, "fail_skill_identity", "/skill-identities/%", "simulated identity write failure")
 	if err := s.IndexSkill(ctx, "ns", a, "procedure a"); err == nil {
 		t.Fatal("failure injection did not fire")
 	}
@@ -572,9 +560,7 @@ func TestSkillIdentityHealsFromLiveRows(t *testing.T) {
 		t.Fatalf("load after failed identity write: body=%q err=%v", body, err)
 	}
 
-	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER fail_skill_identity`); err != nil {
-		t.Fatal(err)
-	}
+	clearFailure()
 	// a heals through the identical re-index.
 	indexFixture(t, s, "ns", a, "procedure a")
 	// b heals through its unpublish: the removal pins the identity from
@@ -828,4 +814,34 @@ func TestListSkillsAllPagesPastRecallCap(t *testing.T) {
 	if len(all) != n {
 		t.Fatalf("ListSkillsAll = %d, want %d (past the 1000-row Recall cap)", len(all), n)
 	}
+}
+
+// installSkillInsertFailure injects the same store failure on both engines.
+// Identifiers are fixed test constants; patterns/messages are SQL-quoted.
+// The returned clear function supports the existing retry-after-failure tests.
+func installSkillInsertFailure(t *testing.T, s *Store, name, pattern, message string) func() {
+	t.Helper()
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+	trigger := fmt.Sprintf("CREATE TRIGGER %s BEFORE INSERT ON memories WHEN NEW.key LIKE %s BEGIN SELECT RAISE(ABORT,%s); END", name, quote(pattern), quote(message))
+	cleanup := fmt.Sprintf("DROP TRIGGER IF EXISTS %s", name)
+	if s.db.Driver == "postgres" {
+		function := name + "_fn"
+		ddl := fmt.Sprintf("CREATE OR REPLACE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION %s; END $$", function, quote(message))
+		if _, err := s.db.ExecContext(t.Context(), ddl); err != nil {
+			t.Fatal(err)
+		}
+		trigger = fmt.Sprintf("CREATE TRIGGER %s BEFORE INSERT ON memories FOR EACH ROW WHEN (NEW.key LIKE %s) EXECUTE FUNCTION %s()", name, quote(pattern), function)
+		cleanup = fmt.Sprintf("DROP FUNCTION IF EXISTS %s() CASCADE", function)
+	}
+	clear := func() {
+		t.Helper()
+		if _, err := s.db.ExecContext(context.Background(), cleanup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(clear)
+	if _, err := s.db.ExecContext(t.Context(), trigger); err != nil {
+		t.Fatal(err)
+	}
+	return clear
 }
