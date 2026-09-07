@@ -95,6 +95,42 @@ be one JSON object
 and the timeout kills the process. No adapter, a nonzero exit or
 unparsable/empty output fails the ingest before any write.
 
+## Codex 0.153.4 integration
+
+`punk connect codex` wires four capture hooks (SessionStart
+`startup|resume`, UserPromptSubmit, PostToolUse, Stop) into
+`$CODEX_HOME/hooks.json` and the punk MCP entry plus `[features]
+hooks = true` into `$CODEX_HOME/config.toml` inside a punk-managed
+marker block (foreign config and user hook groups are preserved; a
+`[mcp_servers.punk]` table punk did not write is refused without
+`--force`). Repeated connects are idempotent. Capture and context
+injection derive the namespace from the hook payload's cwd unless the
+hook command carries `--ns`.
+
+Codex emits an OSC 0 terminal-title sequence on every spinner frame
+(upstream `terminal_title.rs`, project-directory basename plus activity
+prefix). The original user confirmed that disabling titles stopped
+repeated text in the input and transcript (2026-09-06). The C02 matrix
+and C06 acceptance run (2026-09-07) confirmed that this setting
+suppresses title bytes while hooks remain functional. Those tmux runs
+did not reproduce visible contamination; the original renderer behavior
+remains unisolated. Apply the mitigation with:
+
+```toml
+[tui]
+terminal_title = []
+```
+
+or one-shot: `codex -c 'tui.terminal_title=[]'`. Punk hooks and context
+injection are unaffected by the setting. Trigger, evidence and the full
+repeatable native acceptance procedure (temp `CODEX_HOME`, temporary
+Punk server and DB, TUI session, duplicate-delivery replay, title A/B)
+live in
+`docs/investigations/codex-0.153.4-terminal-spam.md`; the simulated
+lifecycle half is `internal/api/codex_roundtrip_test.go`. Native
+observations never substitute for simulated boundary tests, and
+simulated tests never claim anything about the TUI renderer.
+
 ## Deployment shapes
 
 - **Single binary + SQLite**: default; `punk backup` covers DR
