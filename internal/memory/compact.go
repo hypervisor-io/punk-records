@@ -1,6 +1,9 @@
 package memory
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // CompactHit is the token-lean projection of a search hit for agent
 // context: key, clipped body, score, and a few advisory flags. Timestamps,
@@ -10,7 +13,7 @@ type CompactHit struct {
 	Key   string   `json:"key"`
 	Body  string   `json:"body"`
 	Score float64  `json:"score,omitempty"`
-	Flags []string `json:"flags,omitempty"` // sorted: invalidated | model | relation | stale
+	Flags []string `json:"flags,omitempty"` // sorted: invalidated | model | relation | stale | unverified
 }
 
 // CompactBodyMaxRunes is the default body clip. Long enough to judge
@@ -43,6 +46,21 @@ func flagsFromComponents(c map[string]float64) []string {
 	return flags
 }
 
+// compactFactFlags preserves computed advisory flags. Plain recall and
+// other paths without a verified freshness check must not silently present a
+// generated summary as current, so a /summaries/ fact without a computed
+// stale marker is conservatively flagged unverified; a computed stale flag
+// supplies the stronger warning and is retained. No database reads here, and
+// ordinary fact/skill/relation projections are unchanged.
+func compactFactFlags(f Fact, components map[string]float64) []string {
+	flags := flagsFromComponents(components)
+	if strings.HasPrefix(f.Key, "/summaries/") && components["stale"] != 1 {
+		flags = append(flags, "unverified")
+		sort.Strings(flags)
+	}
+	return flags
+}
+
 // CompactScored projects scored hits. maxRunes <= 0 uses CompactBodyMaxRunes.
 func CompactScored(hits []ScoredFact, maxRunes int) []CompactHit {
 	out := make([]CompactHit, 0, len(hits))
@@ -51,17 +69,20 @@ func CompactScored(hits []ScoredFact, maxRunes int) []CompactHit {
 			Key:   h.Key,
 			Body:  clipRunes(h.Body, maxRunes),
 			Score: h.Score,
-			Flags: flagsFromComponents(h.Components),
+			Flags: compactFactFlags(h.Fact, h.Components),
 		})
 	}
 	return out
 }
 
-// CompactFacts projects plain (unscored) facts.
+// CompactFacts projects plain (unscored) facts. Advisory components a
+// retrieval path attached (for example a stale generated summary) still
+// surface as flags; the projection never drops a warning.
 func CompactFacts(facts []Fact, maxRunes int) []CompactHit {
 	out := make([]CompactHit, 0, len(facts))
 	for _, f := range facts {
-		out = append(out, CompactHit{Key: f.Key, Body: clipRunes(f.Body, maxRunes)})
+		out = append(out, CompactHit{Key: f.Key, Body: clipRunes(f.Body, maxRunes),
+			Flags: compactFactFlags(f, f.components)})
 	}
 	return out
 }
@@ -80,7 +101,7 @@ func CompactUnified(hits []UnifiedHit, maxRunes int) []CompactHit {
 				Key:   h.Fact.Key,
 				Body:  clipRunes(h.Fact.Body, maxRunes),
 				Score: h.Score,
-				Flags: flagsFromComponents(h.Fact.Components),
+				Flags: compactFactFlags(h.Fact.Fact, h.Fact.Components),
 			})
 		case h.Triplet != nil:
 			out = append(out, CompactHit{

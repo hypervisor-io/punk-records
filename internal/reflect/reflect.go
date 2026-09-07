@@ -41,6 +41,7 @@ const (
 
 const (
 	toolListModels       = "list_models"
+	toolListSummaries    = "list_summaries"
 	toolListObservations = "list_observations"
 	toolRecall           = "recall"
 	toolExpand           = "expand"
@@ -219,6 +220,12 @@ type Opts struct {
 	// deadline and the context error. 0 leaves the caller's context
 	// unchanged.
 	Deadline time.Duration
+	// Summaries, when true, opts this run into the generated source-linked
+	// summary hierarchy: list_summaries is offered and the system prompt
+	// mentions it. The feature stays OFF by default (false): a plain run
+	// exposes the byte-identical default toolset and prompt, so enabling
+	// generation via a Summarizer alone never silently changes retrieval.
+	Summaries bool
 }
 
 // Engine runs the bounded agentic loop.
@@ -250,6 +257,8 @@ func (e *Engine) roundLatency(pre time.Time) time.Duration {
 	return e.clock().Sub(pre)
 }
 
+// systemPrompt is the default, hierarchy of mental models -> observations
+// -> raw recall. Generated summary retrieval is NOT part of it by default.
 const systemPrompt = `You answer questions by reflecting over this deployment's memory plane, checked hierarchically:
 1. list_models — curated mental models, the highest-confidence synthesis. Check these first.
 2. list_observations — consolidated observations. Check these second.
@@ -265,7 +274,18 @@ When you have gathered enough evidence, call done with your answer and the IDs t
 const expansionPrompt = `
 When the higher layers leave a gap, call expand with follow-up queries and/or known fact keys ("/..."): each runs relationship-weighted retrieval over described links and neighborhood expansion, returning the linked facts. At most 4 queries and 8 keys per call. Relation lines in the result are context only — they carry no citable IDs; cite fact IDs from the results. If an expand call returns nothing new, further expansion is pointless: the run ends there.`
 
-func tools(schema json.RawMessage, expand bool) []llm.Tool {
+// systemPromptWithSummaries is the opt-in prompt that inserts generated
+// summary retrieval between mental models and observations.
+const systemPromptWithSummaries = `You answer questions by reflecting over this deployment's memory plane, checked hierarchically:
+1. list_models — curated mental models, the highest-confidence synthesis. Check these first.
+2. list_summaries — generated source-linked topic summaries. Check these second; treat a summary flagged summary_state=stale as provisional, and prefer raw recall to verify it.
+3. list_observations — consolidated observations. Check these third.
+4. recall — raw hybrid search over all facts. Drop to this only to verify something flagged stale, or to fill a gap the higher layers didn't cover.
+Cite ONLY fact or model IDs you were actually shown in a tool result. Never invent an ID.
+If the evidence you gathered cannot answer the question, call done with abstain=true and an empty answer rather than guessing.
+When you have gathered enough evidence, call done with your answer and the IDs that support it.`
+
+func tools(schema json.RawMessage, expand, summaries bool) []llm.Tool {
 	doneSchema := json.RawMessage(`{"type":"object","properties":{
 				"answer":{"type":"string"},
 				"abstain":{"type":"boolean"},
@@ -285,14 +305,22 @@ func tools(schema json.RawMessage, expand bool) []llm.Tool {
 		{Name: toolListModels,
 			Description: "List the curated mental models in this namespace. Check these first.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{}}`)},
-		{Name: toolListObservations,
+	}
+	if summaries {
+		toolset = append(toolset, llm.Tool{
+			Name:        toolListSummaries,
+			Description: "List generated source-linked topic summaries (/summaries/*). Check these second; summaries flagged summary_state=stale are provisional.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{}}`)})
+	}
+	toolset = append(toolset,
+		llm.Tool{Name: toolListObservations,
 			Description: "List consolidated observations (/observations/*). Check these second.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{}}`)},
-		{Name: toolRecall,
+		llm.Tool{Name: toolRecall,
 			Description: "Hybrid search over raw facts. Use to verify something stale or fill a gap.",
 			Schema: json.RawMessage(`{"type":"object","properties":{
 				"query":{"type":"string"}},"required":["query"]}`)},
-	}
+	)
 	if expand {
 		toolset = append(toolset, llm.Tool{Name: toolExpand,
 			Description: "Bounded evidence expansion: follow-up queries and/or known fact keys, answered with relationship-linked facts.",
@@ -330,6 +358,9 @@ func (e *Engine) ReflectWith(ctx context.Context, ns, query string, opts Opts) (
 		maxIter = n
 	}
 	system := systemPrompt
+	if opts.Summaries {
+		system = systemPromptWithSummaries
+	}
 	if opts.ExpandEvidence {
 		system += expansionPrompt
 	}
@@ -337,7 +368,7 @@ func (e *Engine) ReflectWith(ctx context.Context, ns, query string, opts Opts) (
 		{Role: "system", Content: system},
 		{Role: "user", Content: query},
 	}
-	toolset := tools(opts.Schema, opts.ExpandEvidence)
+	toolset := tools(opts.Schema, opts.ExpandEvidence, opts.Summaries)
 	structured := len(opts.Schema) > 0
 	seen := map[string]memory.Fact{}
 	totalTokens := 0
@@ -673,6 +704,33 @@ func (e *Engine) execTool(ctx context.Context, ns string, tc llm.ToolCall, seen 
 			return "", err
 		}
 		return marshalFacts(facts, seen)
+	case toolListSummaries:
+		facts, err := e.store.ListSummaries(ctx, ns)
+		if err != nil {
+			return "", err
+		}
+		flagged := make([]memory.Fact, len(facts))
+		for i, f := range facts {
+			stale, serr := e.store.SummaryStale(ctx, ns, f)
+			if serr != nil {
+				return "", serr
+			}
+			if !stale {
+				flagged[i] = f
+				continue
+			}
+			// Stale is flagged, never hidden: the model must treat it as
+			// provisional rather than believe an unsupported summary.
+			ff := f
+			attrs := make(map[string]any, len(f.Attributes)+1)
+			for k, v := range f.Attributes {
+				attrs[k] = v
+			}
+			attrs["summary_state"] = "stale"
+			ff.Attributes = attrs
+			flagged[i] = ff
+		}
+		return marshalFacts(flagged, seen)
 	case toolListObservations:
 		facts, err := e.store.Recall(ctx, ns, "/observations", recallLimit)
 		if err != nil {

@@ -118,6 +118,13 @@ type Fact struct {
 	// Reinforcements counts idempotent duplicate writes of this exact
 	// content: independent corroboration, ranking only.
 	Reinforcements int64 `json:"reinforcements,omitempty"`
+
+	// components carries advisory retrieval decorations (for example a
+	// stale generated summary) on paths that return plain facts.
+	// Unexported and never persisted or serialized: retrieval sets it,
+	// compact projection surfaces it as flags, wire schemas stay
+	// untouched (the C07 payload budget is not spent on annotations).
+	components map[string]float64
 }
 
 // WriteInput is the full-provenance write surface. Remember wraps it.
@@ -761,7 +768,42 @@ func (s *Store) Recall(ctx context.Context, ns, prefix string, limit int) ([]Fac
 		return nil, fmt.Errorf("recall query: %w", err)
 	}
 	defer rows.Close()
-	return s.scanFacts(ctx, ns, nsID, rows)
+	facts, err := s.scanFacts(ctx, ns, nsID, rows)
+	if err != nil {
+		return nil, err
+	}
+	s.decorateGeneratedStaleness(ctx, ns, facts)
+	return facts, nil
+}
+
+// decorateGeneratedStaleness attaches the advisory stale component to
+// derived/generated facts (/observations/, /summaries/) on plain
+// retrieval paths, mirroring the decoration HybridSearchScoredWith
+// applies to scored hits: a generated summary must not reach a compact
+// projection looking current while its recorded sources are stale. The
+// check is conservative - a freshness evaluation error flags the fact
+// rather than silently omitting the warning. RecallAsOf is deliberately
+// excluded: a point-in-time view is historical by contract.
+func (s *Store) decorateGeneratedStaleness(ctx context.Context, ns string, facts []Fact) {
+	for i := range facts {
+		switch {
+		case strings.HasPrefix(facts[i].Key, "/observations/"):
+			if stale, err := s.ObservationStale(ctx, ns, facts[i]); err == nil && stale {
+				if facts[i].components == nil {
+					facts[i].components = map[string]float64{}
+				}
+				facts[i].components["stale"] = 1
+			}
+		case strings.HasPrefix(facts[i].Key, "/summaries/"):
+			stale, err := s.SummaryStale(ctx, ns, facts[i])
+			if stale || err != nil {
+				if facts[i].components == nil {
+					facts[i].components = map[string]float64{}
+				}
+				facts[i].components["stale"] = 1
+			}
+		}
+	}
 }
 
 // liveByKeys returns the latest live fact for each exact key given

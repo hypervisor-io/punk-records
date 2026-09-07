@@ -525,18 +525,30 @@ func (s *Store) HybridSearchScoredWith(ctx context.Context, ns, query string, o 
 		out = append(out, ScoredFact{Fact: byID[id], Score: score(comp[id]), Components: comp[id]})
 		touched = append(touched, id)
 	}
-	// Advisory staleness: decorates already-selected /observations/ hits
-	// only — never feeds score() or re-ranks (relevance-first). Errors
-	// are swallowed; leave the component absent rather than fail search.
+	// Advisory staleness: decorates already-selected /observations/ and
+	// /summaries/ hits only — never feeds score() or re-ranks
+	// (relevance-first). A generated summary must never reach a compact
+	// retrieval path as "current" while its recorded sources are stale, so
+	// a summary whose freshness check fails is conservatively flagged; the
+	// component is only omitted for genuinely fresh summaries, never
+	// silently dropped.
 	for i := range out {
-		if !strings.HasPrefix(out[i].Key, "/observations/") {
-			continue
-		}
-		if stale, err := s.ObservationStale(ctx, ns, out[i].Fact); err == nil && stale {
-			if out[i].Components == nil {
-				out[i].Components = map[string]float64{}
+		switch {
+		case strings.HasPrefix(out[i].Key, "/observations/"):
+			if stale, err := s.ObservationStale(ctx, ns, out[i].Fact); err == nil && stale {
+				if out[i].Components == nil {
+					out[i].Components = map[string]float64{}
+				}
+				out[i].Components["stale"] = 1
 			}
-			out[i].Components["stale"] = 1
+		case strings.HasPrefix(out[i].Key, "/summaries/"):
+			stale, err := s.SummaryStale(ctx, ns, out[i].Fact)
+			if stale || err != nil {
+				if out[i].Components == nil {
+					out[i].Components = map[string]float64{}
+				}
+				out[i].Components["stale"] = 1
+			}
 		}
 	}
 	_ = s.TouchAccess(ctx, touched) // best-effort ranking signal

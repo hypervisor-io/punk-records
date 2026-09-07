@@ -40,15 +40,18 @@ func (s *Store) ConsolidateObservations(ctx context.Context, ns string, obs Obse
 	if obs == nil {
 		return 0, nil
 	}
-	facts, err := s.Recall(ctx, ns, "/", 1000)
+	// Uncapped scan: ConsolidateObservations must see every live fact, not
+	// a silent first-1000-facts ceiling.
+	facts, err := s.liveAllFacts(ctx, ns, "/")
 	if err != nil {
 		return 0, err
 	}
-	// never consolidate the consolidated, and never feed a curated model
-	// back in as raw evidence — models are syntheses, not raw evidence.
+	// never consolidate the consolidated, never feed a curated model back
+	// in as raw evidence (models are syntheses), and never feed a summary
+	// back in as raw evidence (summaries are derived, not sources).
 	raw := facts[:0]
 	for _, f := range facts {
-		if !hasPrefix(f.Key, "/observations/") && !hasPrefix(f.Key, "/consolidated/") && !hasPrefix(f.Key, "/mental-models/") && !hasPrefix(f.Key, "/entities/") {
+		if !hasPrefix(f.Key, "/observations/") && !hasPrefix(f.Key, "/consolidated/") && !hasPrefix(f.Key, "/mental-models/") && !hasPrefix(f.Key, "/entities/") && !hasPrefix(f.Key, "/summaries/") {
 			raw = append(raw, f)
 		}
 	}
@@ -114,7 +117,7 @@ func (s *Store) ObservationStale(ctx context.Context, ns string, obs Fact) (bool
 			SELECT 1 FROM memories m
 			JOIN namespaces n ON n.id = m.namespace_id
 			WHERE n.name = $1 AND m.action <> 'tombstone' AND m.invalid_at IS NULL
-			  AND m.key NOT LIKE '/observations/%' AND m.key NOT LIKE '/consolidated/%' AND m.key NOT LIKE '/mental-models/%' AND m.key NOT LIKE '/entities/%'
+			  AND m.key NOT LIKE '/observations/%' AND m.key NOT LIKE '/consolidated/%' AND m.key NOT LIKE '/mental-models/%' AND m.key NOT LIKE '/entities/%' AND m.key NOT LIKE '/summaries/%'
 			  AND (m.expiration_date IS NULL OR m.expiration_date > $2)
 			  AND m.created_at > $3
 		)`), ns, store.TimeToDB(s.now()), store.TimeToDB(consolidatedAt)).Scan(&stale)

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -649,5 +651,102 @@ func TestReflectWithSchemaStructuredAnswer(t *testing.T) {
 	ans, err = New(mem, client3).Reflect(context.Background(), "ns", "q")
 	if err != nil || ans.Structured != nil || ans.Text != "prose" {
 		t.Fatalf("plain: %+v %v", ans, err)
+	}
+}
+
+// stickySummarizer emits a deterministic body keyed on children so a
+// reflect test can build a summary tree without an LLM.
+type stickySummarizer struct{}
+
+func (stickySummarizer) Summarize(_ context.Context, facts []memory.Fact) (string, error) {
+	keys := make([]string, len(facts))
+	for i, f := range facts {
+		keys[i] = f.Key
+	}
+	sort.Strings(keys)
+	return "summary[" + strings.Join(keys, ",") + "]", nil
+}
+
+// TestReflectListSummariesFlagsStale: list_summaries surfaces every
+// generated summary (id-validated via marshalFacts) and flags a stale one
+// rather than hiding it.
+func TestReflectListSummariesFlagsStale(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// observations must be source-linked: raw grounding + source_ids
+	raw, err := s.Write(ctx, memory.WriteInput{Namespace: "acme", Key: "/facts/db", Body: "postgres raw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := map[string]any{"source_ids": []any{raw.ID}}
+	if _, err := s.Write(ctx, memory.WriteInput{Namespace: "acme",
+		Key: "/observations/g/obs-000", Body: "postgres primary", Attributes: attrs}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(ctx, memory.WriteInput{Namespace: "acme",
+		Key: "/observations/g/obs-001", Body: "postgres failover", Attributes: attrs}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BuildSummaryTree(ctx, "acme", stickySummarizer{}, memory.SummaryTreeOptions{Fanout: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	// supersede one leaf so the summary becomes stale
+	if _, err := s.Write(ctx, memory.WriteInput{Namespace: "acme",
+		Key: "/observations/g/obs-000", Body: "postgres primary edited", Attributes: attrs}); err != nil {
+		t.Fatal(err)
+	}
+
+	var toolContent string
+	script := &scriptedLLM{t: t}
+	script.queue = []func([]llm.Turn) (*llm.Result, error){
+		// round 1: inspect the summary hierarchy
+		func(_ []llm.Turn) (*llm.Result, error) {
+			return result([]llm.ToolCall{{ID: "c1", Name: toolListSummaries, Args: json.RawMessage(`{}`)}})
+		},
+		// round 2: capture the list_summaries result the model was shown,
+		// then finish.
+		func(turns []llm.Turn) (*llm.Result, error) {
+			for i := len(turns) - 1; i >= 0; i-- {
+				if turns[i].Role == "tool" {
+					toolContent = turns[i].Content
+					break
+				}
+			}
+			return result([]llm.ToolCall{{ID: "c2", Name: toolDone,
+				Args: json.RawMessage(`{"answer":"ok","citations":[]}`)}})
+		},
+	}
+
+	e := New(s, script)
+	// Summary retrieval is opt-in: the run must explicitly request it, or
+	// the list_summaries tool is not offered.
+	if _, err := e.ReflectWith(ctx, "acme", "what is the db state?", Opts{Summaries: true}); err != nil {
+		t.Fatal(err)
+	}
+	if toolContent == "" {
+		t.Fatal("list_summaries produced no tool result")
+	}
+	var got []memory.Fact
+	if err := json.Unmarshal([]byte(toolContent), &got); err != nil {
+		t.Fatalf("tool result not a valid fact list: %v (%s)", err, toolContent)
+	}
+	if len(got) == 0 {
+		t.Fatal("list_summaries returned no summaries")
+	}
+	staleFlag := false
+	for _, f := range got {
+		if f.Key != "/summaries/g" {
+			t.Fatalf("unexpected summary key %s", f.Key)
+		}
+		if sV, _ := f.Attributes["summary_state"].(string); sV == "stale" {
+			staleFlag = true
+		}
+		if f.ID == "" {
+			t.Fatalf("summary %s has no id (citation would not validate)", f.Key)
+		}
+	}
+	if !staleFlag {
+		t.Fatalf("stale summary not flagged: %s", toolContent)
 	}
 }

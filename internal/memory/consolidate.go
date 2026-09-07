@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/store"
@@ -68,15 +69,25 @@ func (s *Store) Consolidate(ctx context.Context, ns string, horizon time.Duratio
 		return res, err
 	}
 
+	// Post-compaction prune: a summary hierarchy for a group whose leaves
+	// were entirely compacted away must not stay present as a stale,
+	// no-longer-supported synthesis.
+	if err := s.pruneEmptySummaryGroups(ctx, ns); err != nil {
+		return res, err
+	}
+
 	if sum != nil {
-		facts, err := s.Recall(ctx, ns, "/", 1000)
+		// Uncapped scan: a region beyond 1000 facts must still roll up in
+		// full, never a silent first-1000-facts ceiling.
+		facts, err := s.liveAllFacts(ctx, ns, "/")
 		if err != nil {
 			return res, err
 		}
-		// never summarize the summaries
+		// never summarize the summaries, and never fold a generated
+		// summary hierarchy back in as raw rollup input.
 		live := facts[:0]
 		for _, f := range facts {
-			if !hasPrefix(f.Key, "/consolidated/") {
+			if !hasPrefix(f.Key, "/consolidated/") && !hasPrefix(f.Key, "/summaries/") {
 				live = append(live, f)
 			}
 		}
@@ -117,6 +128,57 @@ func (s *Store) Consolidate(ctx context.Context, ns string, horizon time.Duratio
 }
 
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
+
+// pruneEmptySummaryGroups forgets summary roots whose group has no live
+// leaves anymore, so a compacted-away source never leaves an unsupported
+// summary standing. No-op when the namespace has no summaries.
+func (s *Store) pruneEmptySummaryGroups(ctx context.Context, ns string) error {
+	keys, err := s.ListKeys(ctx, ns, "/summaries")
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	groups, err := s.summaryGroups(ctx, ns)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		g := strings.TrimPrefix(k, "/summaries/")
+		if g == "" || strings.Contains(g, "/") {
+			continue // only group roots; buckets are pruned with their root
+		}
+		if _, ok := groups[g]; ok {
+			continue
+		}
+		if err := s.pruneSummarySubtree(ctx, ns, g); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneSummarySubtree forgets a group's whole summary prefix.
+func (s *Store) pruneSummarySubtree(ctx context.Context, ns, group string) error {
+	root := "/summaries/" + group
+	subKeys, err := s.ListKeys(ctx, ns, root)
+	if err != nil {
+		return err
+	}
+	for _, k := range subKeys {
+		if k != root && !strings.HasPrefix(k, root+"/") {
+			continue
+		}
+		if err := s.Forget(ctx, ns, k, "summaries"); err != nil {
+			if strings.Contains(err.Error(), ErrNotFound.Error()) {
+				continue // already gone: idempotent
+			}
+			return err
+		}
+	}
+	return nil
+}
 
 // CreativePass is the REM-sleep analogue: scan live
 // facts' vectors and link non-obvious neighbors with similar_to edges,
