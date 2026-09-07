@@ -2,10 +2,14 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/store"
@@ -581,4 +585,294 @@ func (s *Store) ListPipelineRuns(ctx context.Context, ns, stage, status string, 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Work preview (task P02): the read-only half of the pipeline record. A
+// dry-run answers "what would this ingest change, and what stage work
+// would that create" before anything is written, so the two questions
+// live next to the code whose rules they must not drift from:
+// ConfiguredPipelineStages reports exactly what persistPipelineWork
+// persists, and PreviewDocumentSource diffs a document with exactly
+// WriteDocumentSource's rules. Both are pure reads.
+
+// ModelNamer is an optional interface a configured Embedder or
+// EntityExtractor may implement to report the model ID it calls. A
+// preview rates that ID against the price table; a dependency that
+// reports none leaves its predicted cost unknown instead of guessed.
+type ModelNamer interface{ Model() string }
+
+// PipelineStage is one enrichment stage the store records run rows for:
+// the stage name and version persistPipelineWork uses, the model ID the
+// configured dependency reports (empty when it reports none), and
+// BatchKeys - how many source keys one model call covers when the stage
+// batches (0 means one call per key).
+type PipelineStage struct {
+	Name      string `json:"stage"`
+	Version   int    `json:"stage_version"`
+	Model     string `json:"model,omitempty"`
+	BatchKeys int    `json:"batch_keys,omitempty"`
+}
+
+// modelIDOf asks a configured dependency which model it calls.
+func modelIDOf(v any) string {
+	if n, ok := v.(ModelNamer); ok {
+		return n.Model()
+	}
+	return ""
+}
+
+func embedLinkStage(model string) PipelineStage {
+	return PipelineStage{Name: StageEmbedLink, Version: embedLinkStageVersion, Model: model}
+}
+
+func entitiesStage(model string, batched bool) PipelineStage {
+	st := PipelineStage{Name: StageEntities, Version: entitiesStageVersion, Model: model}
+	if batched {
+		st.BatchKeys = entityBatchKeys
+	}
+	return st
+}
+
+// ConfiguredPipelineStages lists the stages persistPipelineWork records
+// work for, in its order and with its stage versions: the embed-link
+// stage when an embedder is wired, the entity stage when an extractor is.
+// The entity stage batches exactly when the wired extractor does (the
+// structured or legacy batch interface), so a predicted model-call count
+// matches flushEntityStage's batching. A preview predicts against this
+// list, which keeps predicted stage work from drifting from the durable
+// work P01 actually records.
+func (s *Store) ConfiguredPipelineStages() []PipelineStage {
+	var out []PipelineStage
+	if s.embedder != nil {
+		out = append(out, embedLinkStage(modelIDOf(s.embedder)))
+	}
+	if s.entityExtractor != nil {
+		_, structured := s.entityExtractor.(StructuredEntityExtractor)
+		_, batcher := s.entityExtractor.(BatchEntityExtractor)
+		out = append(out, entitiesStage(modelIDOf(s.entityExtractor), structured || batcher))
+	}
+	return out
+}
+
+// PipelineStagesForModels describes the same stages from configuration
+// alone: the model IDs a deployment would call, without constructing the
+// dependencies themselves. A dry-run CLI needs this because constructing
+// the real dependencies has side effects a preview must not have - the
+// local embedder downloads a model on first use, and an LLM client reads
+// its API key env. An empty model ID means the deployment wires no such
+// dependency at all (the CLI refuses to build an embedder with no model
+// and an LLM client whose profile has none), so that stage is absent
+// rather than predicted with an unnameable cost. batched reports whether
+// the configured extractor batches its calls.
+func PipelineStagesForModels(embedModel, extractModel string, batched bool) []PipelineStage {
+	var out []PipelineStage
+	if embedModel != "" {
+		out = append(out, embedLinkStage(embedModel))
+	}
+	if extractModel != "" {
+		out = append(out, entitiesStage(extractModel, batched))
+	}
+	return out
+}
+
+// PreviewChunk is one chunk a WriteDocumentSource call would write: the
+// key it would land at, the body that would be stored (already scrubbed
+// under the namespace's defense policy, so it is exactly what a model
+// would later see), its provenance labels and its byte range in the
+// assembled source text. Bytes and EmbedBytes are exact counts: the
+// stored body, and the keyed input write-time embedding sends
+// (embedText). EstimatedTokens and EstimatedEmbedTokens are
+// EstimateTokens over those exact strings - punk counts tokens as
+// bytes/4, so they estimate what the model's tokenizer would report and
+// are not a measurement, however exact the bytes behind them are.
+type PreviewChunk struct {
+	Key                  string `json:"key"`
+	Body                 string `json:"body"`
+	Section              string `json:"section,omitempty"`
+	Ordinal              int    `json:"ordinal"`
+	Start                int    `json:"start"`
+	End                  int    `json:"end"`
+	Bytes                int    `json:"bytes"`
+	EmbedBytes           int    `json:"embed_bytes"`
+	EstimatedTokens      int    `json:"estimated_tokens"`
+	EstimatedEmbedTokens int    `json:"estimated_embed_tokens"`
+}
+
+// DocumentPreview is the read-only answer to "what would this document
+// change, and what enrichment work would that create": the counters
+// WriteDocumentSource returns, plus the changed chunks themselves so a
+// caller can size the stage work they would trigger.
+type DocumentPreview struct {
+	ContentHash string         `json:"content_hash"`
+	Chunks      int            `json:"chunks"`
+	Changed     []PreviewChunk `json:"changed"`
+	Unchanged   int            `json:"unchanged"`
+	Removed     []string       `json:"removed"`
+	Blocked     int            `json:"blocked"`
+	MetaBlocked bool           `json:"meta_blocked"`
+	// Malformed lists the live chunks under prefix whose stored
+	// attributes will not decode. A real WriteDocumentSource quarantines
+	// each one - moving the row out of the namespace - before it diffs,
+	// so a chunk landing on such a key would be written: the preview
+	// counts that chunk changed and names the row here rather than
+	// reading the corruption as absence. The preview repairs nothing.
+	Malformed []MalformedRow `json:"malformed,omitempty"`
+}
+
+// liveChunkSnapshot is liveChunkFacts with the quarantine repair off: the
+// same keys, the same query, and the rows that will not decode reported
+// instead of moved. A preview must not change the store it describes, and
+// a poisoned chunk is exactly the case where an ordinary read writes.
+func (s *Store) liveChunkSnapshot(ctx context.Context, ns, prefix string) ([]Fact, []MalformedRow, error) {
+	keys, err := s.ListKeys(ctx, ns, prefix+"/chunk-")
+	if err != nil {
+		return nil, nil, err
+	}
+	out := []Fact{}
+	var bad []MalformedRow
+	for i := 0; i < len(keys); i += 500 {
+		facts, malformed, err := s.liveByKeysReadOnly(ctx, ns, keys[i:min(i+500, len(keys))])
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, facts...)
+		bad = append(bad, malformed...)
+	}
+	sort.Slice(bad, func(i, j int) bool { return bad[i].Key < bad[j].Key })
+	return out, bad, nil
+}
+
+// PreviewDocumentSource diffs doc against the live chunks under prefix
+// with WriteDocumentSource's own rules - the same chunker
+// (chunkTextOffsets), the same chunk identity (chunkIDKey over
+// sourceOwner), the same destination-ownership boundary (chunkOwner) and
+// the same defense scrub/block semantics - and reports what that call
+// would write, keep, tombstone and block. It is strictly read-only: the
+// live snapshot comes from liveChunkSnapshot, which reports a row it
+// cannot decode instead of quarantining it, and nothing is written,
+// forgotten, embedded, extracted or enqueued, so a preview costs no model
+// calls and leaves no state behind - not even the repair an ordinary read
+// would make.
+//
+// A blocked chunk (a sensitive body under "block", or a destination key
+// whose live occupant this source does not own) is counted and kept out
+// of Changed: it would never be written, so it creates no enrichment
+// work. Removals are listed and create no work either - a tombstone
+// records no stage run (persistPipelineWork skips a key with no live
+// revision). Sensitive source metadata blocks the whole document, exactly
+// as the write path does: MetaBlocked is set, every chunk is counted
+// blocked and nothing would be written.
+//
+// A live chunk whose stored attributes will not decode is reported in
+// Malformed. The write path quarantines such a row before diffing, so the
+// key is free by the time it compares bodies: a chunk landing there is
+// counted changed, which is what the real call would write. The preview
+// neither performs that quarantine nor pretends the row was absent.
+func (s *Store) PreviewDocumentSource(ctx context.Context, ns, prefix string, doc SourceDocument) (*DocumentPreview, error) {
+	if err := ValidateKey(prefix); err != nil {
+		return nil, err
+	}
+	mode := s.defenseMode(ns)
+	src := doc.Source
+	sections := make([]DocumentSection, len(doc.Sections))
+	copy(sections, doc.Sections)
+	metaSensitive := false
+	scrubMeta := func(v string) string {
+		switch mode {
+		case "redact":
+			v, _ = Scrub(v)
+		case "block":
+			if _, labels := Scrub(v); len(labels) > 0 {
+				metaSensitive = true
+			}
+		}
+		return v
+	}
+	src.ID = scrubMeta(src.ID)
+	src.URI = scrubMeta(src.URI)
+	src.Revision = scrubMeta(src.Revision)
+	src.MediaType = scrubMeta(src.MediaType)
+	for i := range sections {
+		sections[i].Name = scrubMeta(sections[i].Name)
+	}
+
+	texts := make([]string, len(sections))
+	for i, sec := range sections {
+		texts[i] = sec.Text
+	}
+	full := strings.Join(texts, "\n\n")
+	sum := sha256.Sum256([]byte(full))
+	out := &DocumentPreview{ContentHash: hex.EncodeToString(sum[:])}
+
+	var chunks []sourceChunk
+	base := 0
+	for i, sec := range sections {
+		for _, c := range chunkTextOffsets(sec.Text, s.chunkMax(), base) {
+			c.section = i
+			chunks = append(chunks, c)
+		}
+		base += len(sec.Text) + 2
+	}
+	out.Chunks = len(chunks)
+	if metaSensitive {
+		out.MetaBlocked = true
+		out.Blocked = len(chunks)
+		return out, nil
+	}
+
+	existing, malformed, err := s.liveChunkSnapshot(ctx, ns, prefix)
+	if err != nil {
+		return nil, err
+	}
+	out.Malformed = malformed
+	owner := sourceOwner(src)
+	byKey := map[string]string{}  // key -> live body owned by this source
+	occupied := map[string]bool{} // every live key under the chunk prefix
+	for _, f := range existing {
+		occupied[f.Key] = true
+		if fo, owned := chunkOwner(f); owned && fo == owner {
+			byKey[f.Key] = f.Body
+		}
+	}
+	occurrences := map[string]int{}
+	for i, c := range chunks {
+		body := c.body
+		switch mode {
+		case "redact":
+			body, _ = Scrub(body)
+		case "block":
+			if _, labels := Scrub(body); len(labels) > 0 {
+				out.Blocked++
+				occurrences[body]++
+				delete(byKey, chunkIDKey(prefix, owner, body, occurrences[body]))
+				continue
+			}
+		}
+		occurrences[body]++
+		key := chunkIDKey(prefix, owner, body, occurrences[body])
+		if byKey[key] == body {
+			out.Unchanged++
+			delete(byKey, key)
+			continue
+		}
+		if _, mine := byKey[key]; !mine && occupied[key] {
+			out.Blocked++
+			continue
+		}
+		embed := embedText(key, body)
+		out.Changed = append(out.Changed, PreviewChunk{
+			Key: key, Body: body, Section: sections[c.section].Name,
+			Ordinal: i + 1, Start: c.start, End: c.end,
+			Bytes:                len(body),
+			EmbedBytes:           len(embed),
+			EstimatedTokens:      EstimateTokens(body),
+			EstimatedEmbedTokens: EstimateTokens(embed),
+		})
+		delete(byKey, key)
+	}
+	for key := range byKey {
+		out.Removed = append(out.Removed, key)
+	}
+	sort.Strings(out.Removed)
+	return out, nil
 }

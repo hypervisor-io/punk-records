@@ -97,6 +97,7 @@ Usage:
   punk      import    read a JSONL export from stdin into a namespace
   punk      ingest    load a document file or explicit URL into memory with source provenance (ingest --ns NS --prefix P [flags] <file>)
                       loaders: text, markdown, html, incident-json; pdf via an external adapter (--pdf-adapter, docs/CONFIG.md#document-ingest)
+                      --dry-run previews the writes and enrichment work an ingest would create (tokens, model calls, cost) and changes nothing
   punk      seed      seed memory from a code-knowledge tool (seed rinnegan [--ns NS] [--dir DIR] < map.json)
   punk      skills    propose SKILL.md drafts mined from completed task ledgers (propose --min-count N --out DIR); distill a namespace's memory into proposed CLAUDE.md additions (insights --ns NS --out DIR)
   punk      hook      run as an agent hook: forward stdin payload, inject context on SessionStart (--url URL, --from AGENT)
@@ -1221,20 +1222,30 @@ func cmdValidate(args []string) error {
 }
 
 func openMemory(cfgPath string) (*memory.Store, func(), error) {
+	_, mem, closeDB, err := openMemoryConfig(cfgPath)
+	return mem, closeDB, err
+}
+
+// openMemoryConfig is openMemory plus the configuration it loaded. A
+// dry-run needs the configured model IDs and the price-table path without
+// constructing the dependencies those names belong to: building the local
+// embedder downloads a model on first use and building an LLM client reads
+// its API key env, side effects a preview must not have.
+func openMemoryConfig(cfgPath string) (*config.Config, *memory.Store, func(), error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	db, err := store.Open(cfg.DB.Driver, cfg.DB.DSN)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	mem := memory.New(db, nil)
 	mem.SetDefense(cfg.Memory.Defense)
 	for ns, mode := range cfg.Memory.DefensePolicies {
 		mem.SetDefensePolicy(ns, mode)
 	}
-	return mem, func() { _ = db.Close() }, nil
+	return cfg, mem, func() { _ = db.Close() }, nil
 }
 
 // newEmbedder builds the configured embedder, or nil when embeddings are
@@ -1376,6 +1387,15 @@ func cmdImport(args []string) error {
 // PDF extraction needs an external adapter (--pdf-adapter or
 // PUNK_INGEST_PDF_ADAPTER); without one a PDF ingest fails with the
 // configuration instructions and writes nothing.
+//
+// --dry-run previews that work instead of doing it: what the delta write
+// would touch, and what the configured enrichment stages would run later
+// when the server drains the outbox, with exact byte counts, estimated
+// token counts and a rated cost. This command's own writer opens memory
+// with no embedder or extractor wired, so the preview attributes no
+// embedding to write time and predicts it for the deferred embed_link
+// stage instead. It writes nothing, calls no model and - unless
+// --allow-adapter is passed - spawns no adapter.
 func cmdIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")
@@ -1389,6 +1409,8 @@ func cmdIngest(args []string) error {
 	maxBytes := fs.Int64("max-bytes", ingest.DefaultMaxBytes, "size cap on input and adapter output")
 	timeout := fs.Duration("timeout", ingest.DefaultTimeout, "time cap on loading, fetching and external adapters")
 	pdfAdapter := fs.String("pdf-adapter", os.Getenv("PUNK_INGEST_PDF_ADAPTER"), "external PDF extractor command (adapter contract: docs/CONFIG.md#document-ingest)")
+	dryRun := fs.Bool("dry-run", false, "preview the write and enrichment work this ingest would create, then exit: no writes, no model calls, no adapter subprocess")
+	allowAdapter := fs.Bool("allow-adapter", false, "with --dry-run: run the external PDF adapter so the preview measures the text it would extract")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1417,6 +1439,17 @@ func cmdIngest(args []string) error {
 	if *pdfAdapter != "" {
 		spec.PDFAdapter = strings.Fields(*pdfAdapter)
 	}
+	if *allowAdapter && !*dryRun {
+		return errors.New("ingest: --allow-adapter only applies to --dry-run")
+	}
+	if *dryRun {
+		cfg, mem, closeDB, err := openMemoryConfig(*cfgPath)
+		if err != nil {
+			return err
+		}
+		defer closeDB()
+		return printIngestEstimate(context.Background(), cfg, mem, *ns, *prefix, spec, *allowAdapter)
+	}
 	mem, closeDB, err := openMemory(*cfgPath)
 	if err != nil {
 		return err
@@ -1428,6 +1461,135 @@ func cmdIngest(args []string) error {
 	}
 	fmt.Printf("ingested %s: %d written, %d unchanged, %d removed, %d blocked\n", *prefix, w, u, r, b)
 	return nil
+}
+
+// configuredPipelineStages names the enrichment stages this deployment
+// would run, from configuration alone: the same stage list
+// persistPipelineWork records work for, derived without constructing the
+// dependencies those names belong to (see openMemoryConfig). Both cmd/punk
+// extractors implement a batch interface, so the entity stage batches
+// whenever an extractor is wired at all.
+func configuredPipelineStages(cfg *config.Config) []memory.PipelineStage {
+	embedModel := cfg.AI.Embeddings.Model
+	if cfg.AI.Embeddings.Provider == "local" && embedModel == "" {
+		// newEmbedder's own default: the catalog model the local provider
+		// loads when the configuration names none.
+		embedModel = embedlocal.DefaultModel
+	}
+	extractModel := ""
+	if cfg.AI.Enabled && cfg.Memory.Entities {
+		// the entity extractor rides the default profile, and
+		// llm.Manager.Client refuses a profile with no model - so an empty
+		// model here means no extractor gets wired.
+		extractModel = cfg.AI.Profiles["default"].Model
+	}
+	return memory.PipelineStagesForModels(embedModel, extractModel, extractModel != "")
+}
+
+// printIngestEstimate renders a dry-run: the delta the write path would
+// apply, the work each configured stage would then do, and what that work
+// costs - a missing price stays visibly unknown instead of printing a
+// confident zero, and every approximation the preview makes is listed
+// under "not counted" so the figure is never read as an invoice.
+func printIngestEstimate(ctx context.Context, cfg *config.Config, mem *memory.Store, ns, prefix string, spec ingest.Spec, allowAdapter bool) error {
+	prices, err := llm.LoadPrices(cfg.Budgets.PriceTablePath)
+	if err != nil {
+		return err
+	}
+	est, err := ingest.DryRun(ctx, mem, ns, prefix, spec, ingest.EstimateOptions{
+		Pipeline:     configuredPipelineStages(cfg),
+		Prices:       prices,
+		AllowAdapter: allowAdapter,
+	})
+	if err != nil {
+		return err
+	}
+	if est.Unestimated != "" {
+		fmt.Printf("dry-run ingest %s: unestimated - %s\n", prefix, est.Unestimated)
+		fmt.Println("no chunk count and no cost is reported for an input the preview would not measure; --allow-adapter lets it run the external extractor")
+		printEstimateExclusions(est)
+		return nil
+	}
+	fmt.Printf("dry-run ingest %s: %d chunks, %d would change, %d unchanged, %d removed, %d blocked\n",
+		prefix, est.Chunks, est.Changed, est.Unchanged, est.Removed, est.Blocked)
+	if len(est.Malformed) > 0 {
+		fmt.Printf("  warning: %d live chunk(s) have undecodable attributes; a real ingest quarantines them before writing (this preview changed nothing)\n",
+			len(est.Malformed))
+		for _, m := range est.Malformed {
+			fmt.Printf("    %s: %s\n", m.Key, m.Reason)
+		}
+	}
+	if est.Embedding != nil {
+		fmt.Printf("  write-time embedding %s: %d call(s), %d exact keyed input bytes (key + body), ~%d estimated prompt tokens, %s\n",
+			estimateModel(est.Embedding.Model), est.Embedding.Calls, est.Embedding.InputBytes,
+			est.Embedding.EstimatedPromptTokens, estimateCost(est.Embedding.Cost))
+	} else if estimateHasStage(est, memory.StageEmbedLink) {
+		fmt.Printf("  write-time embedding: none - no embedder is wired on this store, so the writer stores every chunk unembedded; the %s stage below predicts the %d embedding call(s) the configured server makes over the stored bodies when it drains the outbox\n",
+			memory.StageEmbedLink, est.Changed)
+	} else {
+		fmt.Println("  write-time embedding: none - no embedder is wired on this store, and no embed_link stage is configured to embed later")
+	}
+	for _, st := range est.Stages {
+		fmt.Printf("  %s v%d %s: %d run(s), %d model call(s), %d exact input bytes (what the stage sends), ~%d estimated prompt + ~%d estimated completion tokens, %s\n",
+			st.Stage, st.Version, estimateModel(st.Model), st.Runs, st.ModelCalls, st.InputBytes,
+			st.EstimatedPromptTokens, st.EstimatedCompletionTokens, estimateCost(st.Cost))
+	}
+	fmt.Printf("  total: %d exact body bytes + %d exact keyed embedding bytes, ~%d estimated input tokens, ~%d estimated output tokens, %s\n",
+		est.InputBytes, est.EmbedInputBytes, est.EstimatedInputTokens, est.EstimatedOutputTokens,
+		estimateCost(est.Cost.Rating()))
+	if len(est.Cost.Unpriced) > 0 {
+		fmt.Printf("  no price entry for: %s\n", strings.Join(est.Cost.Unpriced, ", "))
+	}
+	printEstimateExclusions(est)
+	return nil
+}
+
+func printEstimateExclusions(est *ingest.Estimate) {
+	if len(est.Exclusions) == 0 {
+		return
+	}
+	fmt.Println("not counted:")
+	for _, x := range est.Exclusions {
+		fmt.Printf("  - %s\n", x)
+	}
+}
+
+// estimateCost renders one rated workload: a rated figure in dollars, or
+// the honesty state that stands in for a figure the price table cannot
+// produce. A total is the sum of the estimated priced workloads, never an
+// invoice.
+func estimateCost(r cost.Rating) string {
+	switch r.Status {
+	case cost.CostPriced:
+		return fmt.Sprintf("cost $%.6f (estimated)", float64(r.MicroUSD)/1e6)
+	case cost.CostPricedZero:
+		return "cost $0 (the price table rates this model at zero)"
+	case cost.CostRoundedZero:
+		return "cost below $0.000001 (nonzero unit price, workload too small to rate: not free)"
+	case cost.CostNoWork:
+		return "no model call predicted"
+	default:
+		return "cost unknown (no price entry)"
+	}
+}
+
+func estimateModel(model string) string {
+	if model == "" {
+		return "model unknown"
+	}
+	return model
+}
+
+// estimateHasStage reports whether the configured processor would run this
+// stage, which is what decides where a preview attributes the embedding
+// work when the writer itself has no embedder wired.
+func estimateHasStage(est *ingest.Estimate, stage string) bool {
+	for _, st := range est.Stages {
+		if st.Stage == stage {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdSeed backfills memory from a tool that reads an existing codebase.

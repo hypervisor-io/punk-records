@@ -766,16 +766,31 @@ func (s *Store) Recall(ctx context.Context, ns, prefix string, limit int) ([]Fac
 
 // liveByKeys returns the latest live fact for each exact key given
 // (bridge discovery resolves candidate keys this way, not by prefix).
+// A row that will not decode is quarantined, as every ordinary read is.
 func (s *Store) liveByKeys(ctx context.Context, ns string, keys []string) ([]Fact, error) {
+	facts, _, err := s.queryLiveByKeys(ctx, ns, keys, true)
+	return facts, err
+}
+
+// liveByKeysReadOnly runs liveByKeys' own query with the quarantine
+// repair switched off: a row that will not decode comes back in the
+// second result instead of being moved out of the namespace. A read-only
+// caller - a preview describing what a write would do - uses this, so
+// describing the store never changes it.
+func (s *Store) liveByKeysReadOnly(ctx context.Context, ns string, keys []string) ([]Fact, []MalformedRow, error) {
+	return s.queryLiveByKeys(ctx, ns, keys, false)
+}
+
+func (s *Store) queryLiveByKeys(ctx context.Context, ns string, keys []string, repair bool) ([]Fact, []MalformedRow, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	nsID, ok, err := s.namespaceID(ctx, ns)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ok {
-		return []Fact{}, nil
+		return []Fact{}, nil, nil
 	}
 	ph := make([]string, len(keys))
 	args := []any{nsID}
@@ -798,10 +813,50 @@ WHERE m.namespace_id = $1 AND m.action <> 'tombstone'
 ORDER BY m.key`
 	rows, err := s.db.QueryContext(ctx, s.db.Rebind(q), args...)
 	if err != nil {
-		return nil, fmt.Errorf("live by keys query: %w", err)
+		return nil, nil, fmt.Errorf("live by keys query: %w", err)
 	}
 	defer rows.Close()
-	return s.scanFacts(ctx, ns, nsID, rows)
+	if repair {
+		facts, err := s.scanFacts(ctx, ns, nsID, rows)
+		return facts, nil, err
+	}
+	return scanFactsNoRepair(ns, rows)
+}
+
+// MalformedRow is a live row a read-only pass could not decode. An
+// ordinary read or write quarantines such a row - one poisoned record
+// must never brick a namespace - but a read-only caller reports it
+// instead: repairing the store is not part of describing it. Reason is
+// the decode failure; the raw payload stays inside the store, so a
+// report cannot leak what the row held.
+type MalformedRow struct {
+	Key    string `json:"key"`
+	ID     string `json:"id,omitempty"`
+	Reason string `json:"reason"`
+}
+
+// scanFactsNoRepair decodes rows exactly as scanFacts does and reports the
+// malformed ones instead of quarantining them.
+func scanFactsNoRepair(ns string, rows *sql.Rows) ([]Fact, []MalformedRow, error) {
+	out := []Fact{}
+	var bad []MalformedRow
+	for rows.Next() {
+		f, _, err := scanFactRow(rows, 0)
+		if err != nil {
+			var re *rowError
+			if errors.As(err, &re) {
+				bad = append(bad, MalformedRow{Key: re.key, ID: re.id, Reason: re.reason})
+				continue
+			}
+			return nil, nil, err
+		}
+		f.Namespace = ns
+		out = append(out, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("recall rows: %w", err)
+	}
+	return out, bad, nil
 }
 
 // RecallAsOf reads the facts that were valid at a past instant: the
@@ -839,7 +894,7 @@ LIMIT $4`), nsID, likePrefix(prefix), at, limit)
 // scanFactRow reads one factCols row (+nExtra trailing columns returned
 // to the caller). Errors that indicate a poisoned row surface as
 // *rowError so scanFacts can quarantine instead of bricking reads.
-type rowError struct{ id, raw, reason string }
+type rowError struct{ id, key, raw, reason string }
 
 func (e *rowError) Error() string { return e.reason }
 
@@ -860,7 +915,7 @@ func scanFactRow(rows *sql.Rows, nExtra int) (*Fact, []any, error) {
 	}
 	t, err := store.TimeFromDB(createdAt)
 	if err != nil {
-		return nil, nil, &rowError{f.ID, createdAt, "bad created_at: " + err.Error()}
+		return nil, nil, &rowError{f.ID, f.Key, createdAt, "bad created_at: " + err.Error()}
 	}
 	f.CreatedAt = t
 	if f.ValidAt, err = store.TimeFromDB(validAt); err != nil {
@@ -877,7 +932,7 @@ func scanFactRow(rows *sql.Rows, nExtra int) (*Fact, []any, error) {
 	parseNullT(expiresAt, &f.ExpiresAt)
 	if attrsJSON != "" && attrsJSON != "{}" {
 		if err := json.Unmarshal([]byte(attrsJSON), &f.Attributes); err != nil {
-			return nil, nil, &rowError{f.ID, attrsJSON, "bad attributes json: " + err.Error()}
+			return nil, nil, &rowError{f.ID, f.Key, attrsJSON, "bad attributes json: " + err.Error()}
 		}
 	}
 	return &f, extras, nil
