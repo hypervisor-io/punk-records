@@ -141,6 +141,123 @@ func TestSearchTemporalDoesNotHijackHybrid(t *testing.T) {
 	}
 }
 
+// TestSearchStrategyEnvelope covers R01's routed surface: strategy=auto
+// routes identifier text (a version year) to exact instead of the legacy
+// temporal window, an explicit strategy wins over temporal language, and
+// an unknown strategy is a 400. With no strategy param the legacy path
+// must stay byte-identical: a bare fact array, no envelope.
+func TestSearchStrategyEnvelope(t *testing.T) {
+	s := testServer(t)
+	do(t, s, http.MethodPost, "/v1/namespaces/susanoo/memories",
+		`{"key":"/svc/api","body":"release v2024.1 shipped fixes","author":"tester"}`)
+
+	// Legacy default: plain array of facts, no envelope keys.
+	rr := do(t, s, http.MethodGet, "/v1/namespaces/susanoo/memories/search?q=release+v2024.1", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("legacy search = %d: %s", rr.Code, rr.Body)
+	}
+	var legacy []memory.Fact
+	if err := json.Unmarshal(rr.Body.Bytes(), &legacy); err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy search body = %s (err %v), want a bare 1-fact array", rr.Body, err)
+	}
+
+	// strategy=auto: the identifier guard keeps "v2024.1" out of temporal.
+	rr = do(t, s, http.MethodGet, "/v1/namespaces/susanoo/memories/search?q=release+v2024.1&strategy=auto", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("routed search = %d: %s", rr.Code, rr.Body)
+	}
+	var env memory.RouteResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("routed envelope decode: %v (%s)", err, rr.Body)
+	}
+	if env.Mode != memory.RouteExact || env.RequestedMode != memory.RouteAuto {
+		t.Fatalf("envelope mode=%s requested=%s, want exact/auto", env.Mode, env.RequestedMode)
+	}
+	if len(env.Reasons) == 0 || env.Reasons[0] != "identifier:version" {
+		t.Fatalf("envelope reasons = %v, want identifier:version first", env.Reasons)
+	}
+	if len(env.Hits) != 1 || env.Hits[0].Fact == nil || env.Hits[0].Fact.Key != "/svc/api" {
+		t.Fatalf("envelope hits = %+v, want /svc/api", env.Hits)
+	}
+
+	// Explicit mode wins over temporal language: written at the server's
+	// now, "last week" would window this fact out; exact must not window.
+	rr = do(t, s, http.MethodGet, "/v1/namespaces/susanoo/memories/search?q=release+last+week&strategy=exact", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("explicit exact = %d: %s", rr.Code, rr.Body)
+	}
+	env = memory.RouteResult{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Mode != memory.RouteExact || len(env.Hits) != 1 {
+		t.Fatalf("explicit exact: mode=%s hits=%d, want exact with the fact", env.Mode, len(env.Hits))
+	}
+
+	// Unknown strategy: 400, not a silent legacy fallback.
+	rr = do(t, s, http.MethodGet, "/v1/namespaces/susanoo/memories/search?q=release&strategy=bogus", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown strategy = %d: %s, want 400", rr.Code, rr.Body)
+	}
+}
+
+// TestSearchStrategyWindowContract: an explicit since/until window with
+// an explicit strategy must never be silently ignored (reviewer
+// preflight 3). historical carries the window; auto resolves to
+// historical; modes without window support reject the combination with a
+// clear 400.
+func TestSearchStrategyWindowContract(t *testing.T) {
+	s := testServer(t)
+	do(t, s, http.MethodPost, "/v1/namespaces/susanoo/memories",
+		`{"key":"/svc/rollout","body":"rollout checklist v2024.1","author":"tester"}`)
+	sinceAll := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	untilAll := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	untilNone := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+
+	// historical carries the explicit window: all-inclusive -> hit,
+	// window ending 2001 (fact written at the server's 2026 clock) -> no hit.
+	rr := do(t, s, http.MethodGet,
+		"/v1/namespaces/susanoo/memories/search?q=rollout&strategy=historical&since="+sinceAll+"&until="+untilAll, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("historical+window = %d: %s", rr.Code, rr.Body)
+	}
+	var env memory.RouteResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Mode != memory.RouteHistorical || len(env.Hits) != 1 {
+		t.Fatalf("historical+window: mode=%s hits=%d, want historical with the fact", env.Mode, len(env.Hits))
+	}
+	rr = do(t, s, http.MethodGet,
+		"/v1/namespaces/susanoo/memories/search?q=rollout&strategy=historical&since="+sinceAll+"&until="+untilNone, "")
+	env = memory.RouteResult{}
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &env) != nil || len(env.Hits) != 0 {
+		t.Fatalf("historical+narrow window = %d hits=%d: window must filter, not be ignored", rr.Code, len(env.Hits))
+	}
+
+	// auto with an explicit window resolves to historical.
+	rr = do(t, s, http.MethodGet,
+		"/v1/namespaces/susanoo/memories/search?q=rollout&strategy=auto&since="+sinceAll+"&until="+untilAll, "")
+	env = memory.RouteResult{}
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &env) != nil || env.Mode != memory.RouteHistorical {
+		t.Fatalf("auto+window = %d mode=%s, want 200 historical", rr.Code, env.Mode)
+	}
+
+	// exact has no window semantics: clear 400, not silent ignorance.
+	rr = do(t, s, http.MethodGet,
+		"/v1/namespaces/susanoo/memories/search?q=rollout&strategy=exact&since="+sinceAll+"&until="+untilAll, "")
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "window") {
+		t.Fatalf("exact+window = %d: %s, want a 400 naming the window conflict", rr.Code, rr.Body)
+	}
+
+	// since without until stays a 400 on the strategy path too.
+	rr = do(t, s, http.MethodGet,
+		"/v1/namespaces/susanoo/memories/search?q=rollout&strategy=historical&since="+sinceAll, "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("historical+since-only = %d, want 400", rr.Code)
+	}
+}
+
 func TestProfileAndDiagnoseEndpoints(t *testing.T) {
 	s := testServer(t)
 	rr := do(t, s, http.MethodPost, "/v1/namespaces/ns/memories",

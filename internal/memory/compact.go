@@ -68,7 +68,9 @@ func CompactFacts(facts []Fact, maxRunes int) []CompactHit {
 
 // CompactUnified projects unified hits. A relation renders its endpoints
 // and edge type as the key ("/x -> leads_to -> /y") and the edge
-// description as the body, so the agent sees the relation itself.
+// description as the body, so the agent sees the relation itself. A
+// skill renders its discovery-document key and description (metadata
+// only; the procedure body moves through LoadSkill).
 func CompactUnified(hits []UnifiedHit, maxRunes int) []CompactHit {
 	out := make([]CompactHit, 0, len(hits))
 	for _, h := range hits {
@@ -86,6 +88,13 @@ func CompactUnified(hits []UnifiedHit, maxRunes int) []CompactHit {
 				Body:  clipRunes(h.Triplet.Description, maxRunes),
 				Score: h.Score,
 				Flags: []string{"relation"},
+			})
+		case h.Skill != nil:
+			out = append(out, CompactHit{
+				Key:   skillDocKey(h.Skill.Name, h.Skill.Version),
+				Body:  clipRunes(h.Skill.Description, maxRunes),
+				Score: h.Score,
+				Flags: []string{"skill"},
 			})
 		}
 	}

@@ -5,13 +5,15 @@ import (
 	"sort"
 )
 
-// UnifiedHit is one entry of a unified recall: either a ranked fact or a
-// ranked relation-triplet, with a fused rank score. Exactly one of Fact
-// / Triplet is set.
+// UnifiedHit is one entry of a unified recall: either a ranked fact, a
+// ranked relation-triplet, or (routed procedural retrieval, R01) a skill
+// metadata record, with a fused rank score. Exactly one of Fact /
+// Triplet / Skill is set.
 type UnifiedHit struct {
-	Kind    string      `json:"kind"` // "fact" | "relation"
+	Kind    string      `json:"kind"` // "fact" | "relation" | "skill"
 	Fact    *ScoredFact `json:"fact,omitempty"`
 	Triplet *Triplet    `json:"triplet,omitempty"`
+	Skill   *SkillMeta  `json:"skill,omitempty"`
 	Score   float64     `json:"score"` // reciprocal-rank-fused
 }
 

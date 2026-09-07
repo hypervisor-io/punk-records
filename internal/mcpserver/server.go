@@ -565,6 +565,7 @@ type searchIn struct {
 	Scored       bool     `json:"scored,omitempty" jsonschema:"with hybrid, return each hit's score and its fts/vector/recency/importance/access components"`
 	Fusion       string   `json:"fusion,omitempty" jsonschema:"rrf (default) or interleave"`
 	Temporal     bool     `json:"temporal,omitempty" jsonschema:"parse a time window from the query text (e.g. 'errors last month') and search within it"`
+	Strategy     string   `json:"strategy,omitempty" jsonschema:"explicit retrieval route exact|semantic|historical|relationship|procedural|auto; compact hits plus routed mode/reasons/fallback meta"`
 	Expand       bool     `json:"expand,omitempty" jsonschema:"with hybrid+scored, expand the query into up to 3 LLM reformulations and union results (ignored when no model configured)"`
 	Limit        int      `json:"limit,omitempty"`
 	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"cap result payload in ~tokens (default 8000; -1 for no cap)"`
@@ -573,13 +574,39 @@ type searchIn struct {
 	RepoRevision string   `json:"repo_revision,omitempty" jsonschema:"current git revision of the workspace; code-map hits seeded from another revision are flagged stale"`
 }
 
+// routeMeta is the inspectable routing evidence of a strategy call
+// (R01): which mode actually ran, what was requested, the router's
+// reasons (rule names, vetoes, alias rewrites) and any degradation
+// fallback. The hits ride the tool's usual compact projection, so the
+// wire cost of routing metadata stays a closed-form bound. Like the
+// sibling out structs it carries no jsonschema prose - the wire budget
+// is ratcheted in guidance_budget_test.go.
+type routeMeta struct {
+	Mode          string   `json:"mode"`
+	RequestedMode string   `json:"requested_mode"`
+	Reasons       []string `json:"reasons,omitempty"`
+	Fallback      string   `json:"fallback,omitempty"`
+}
+
+func routeMetaOf(res memory.RouteResult) *routeMeta {
+	return &routeMeta{
+		Mode:          string(res.Mode),
+		RequestedMode: string(res.RequestedMode),
+		Reasons:       res.Reasons,
+		Fallback:      res.Fallback,
+	}
+}
+
 // searchOut is search's response shape: plain facts, or (with Hybrid+Scored)
 // facts plus the score breakdown that explains why each one ranked where it did.
 // With Format=compact, Hits carries the token-lean projection instead.
+// With Strategy, Hits carries the routed hits in the same compact
+// projection and Route carries the routing evidence.
 type searchOut struct {
 	Facts     []memory.Fact       `json:"facts,omitempty"`
 	Results   []memory.ScoredFact `json:"results,omitempty"`
 	Hits      []memory.CompactHit `json:"hits,omitempty"`
+	Route     *routeMeta          `json:"route,omitempty"`
 	Truncated bool                `json:"truncated,omitempty"`
 	Total     int                 `json:"total,omitempty"`
 	Note      string              `json:"note,omitempty"`
@@ -731,6 +758,31 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, searchOut{}, err
 			}
+			// R01: an explicit strategy opts into inspectable routed
+			// retrieval. Hits ride the compact projection (compaction
+			// before budgeting, same as finishSearch) and the routing
+			// evidence rides Route; the legacy knobs below are bypassed
+			// only on this opt-in path, never by default. Namespace was
+			// resolved and authorized above, so the response stays inside
+			// the A02 guard.
+			if in.Strategy != "" {
+				res, err := d.Mem.RoutedSearch(ctx, ns, memory.RouteRequest{
+					Mode:    memory.RouteMode(in.Strategy),
+					Query:   in.Query,
+					Limit:   in.Limit,
+					Anchors: in.Anchors,
+				})
+				if err != nil {
+					return nil, searchOut{}, err
+				}
+				hits := memory.CompactUnified(res.Hits, 0)
+				kept := memory.TokenBudgetCompact(hits, effectiveMaxTokens(in.MaxTokens))
+				if len(kept) == 0 && len(hits) > 0 {
+					kept = hits[:1]
+				}
+				out := searchOut{Hits: kept, Route: routeMetaOf(res)}
+				return nil, out.markTruncated(len(kept), len(hits)), nil
+			}
 			// Temporal is plain-search only: if Hybrid or Fusion=interleave
 			// is also set, that path wins and Temporal is ignored (WindowedSearch
 			// is FTS-only and can't do hybrid/scored/interleave).
@@ -860,6 +912,18 @@ func registerMemoryV2Tools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
 			if err != nil {
 				return nil, unifiedSearchOut{}, err
+			}
+			// R01: with an explicit strategy the caller wants the routed
+			// retrieval and its evidence instead of the fused listing;
+			// hits ride the same compact projection as format=compact.
+			if in.Strategy != "" {
+				res, err := d.Mem.RoutedSearch(ctx, ns, memory.RouteRequest{
+					Mode: memory.RouteMode(in.Strategy), Query: in.Query, Limit: in.K,
+				})
+				if err != nil {
+					return nil, unifiedSearchOut{}, err
+				}
+				return nil, unifiedSearchOut{Compact: memory.CompactUnified(res.Hits, 0), Route: routeMetaOf(res)}, nil
 			}
 			hits, err := d.Mem.UnifiedSearch(ctx, ns, in.Query, in.K)
 			if err != nil {
@@ -1186,11 +1250,13 @@ type unifiedSearchIn struct {
 	Query     string `json:"query"`
 	K         int    `json:"k,omitempty"`
 	Format    string `json:"format,omitempty" jsonschema:"'' or 'compact': key, clipped body, score, flags; relations render as 'from -> type -> to'"`
+	Strategy  string `json:"strategy,omitempty" jsonschema:"explicit retrieval route exact|semantic|historical|relationship|procedural|auto; compact hits plus routed meta instead of the fused listing"`
 }
 
 type unifiedSearchOut struct {
 	Hits    []memory.UnifiedHit `json:"hits,omitempty"`
 	Compact []memory.CompactHit `json:"compact,omitempty"`
+	Route   *routeMeta          `json:"route,omitempty"`
 }
 
 type neighborsIn struct {

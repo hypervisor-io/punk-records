@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/memory"
@@ -50,8 +51,12 @@ type Manifest struct {
 	Commit     string `json:"commit"`
 	EmbedderID string `json:"embedder_id"` // "none" when no embedder is wired (FTS-only)
 	RerankerID string `json:"reranker_id"` // "none" when no reranker is wired
-	Strategy   string `json:"strategy"`    // "hybrid" | "hybrid-reranked"
-	K          int    `json:"k"`
+	// Strategy names the retrieval pipeline: "hybrid" | "hybrid-reranked"
+	// | "route-"+mode for R01 routed runs ("route-exact", "route-auto",
+	// ...). Two runs differing only in strategy must differ here so
+	// their manifests never compare equal.
+	Strategy string `json:"strategy"`
+	K        int    `json:"k"`
 	// RecencyHalfLife is the recency half-life passed to search. membench
 	// always disables recency ("0s") so ingestion time cannot affect
 	// scoring; recorded so the setting is part of the reproducibility
@@ -80,6 +85,27 @@ type QueryResult struct {
 	// outcome. Distinct from Error: the retrieval itself succeeded. Set by
 	// RunDetailed only for Rerank runs; see Summary.RerankDegraded.
 	RerankDegraded bool `json:"rerank_degraded,omitempty"`
+	// RoutedMode records the mode RoutedSearch actually ran for this
+	// query on route-* runs (R01): for an auto run it is the router's
+	// decision, the value compared against the scenario's
+	// expect_strategy label. Empty on non-routed runs.
+	RoutedMode string `json:"routed_mode,omitempty"`
+	// RouteFallback is RoutedSearch's degradation evidence for this
+	// query (e.g. "no-embedder:lexical", "identifier-guard:lexical"):
+	// the nominal mode was selected but a CAPABILITY fallback ran part
+	// of the pipeline lexically. Distinct from RouteMisroute, which is a
+	// SELECTION error - E01 strategy comparisons must not read a
+	// degraded ranking as a clean run of the nominal strategy.
+	// RouteReasons persists the router's per-query reason log
+	// (explicit-mode, rule names, vetoes, alias rewrites).
+	RouteFallback string   `json:"route_fallback,omitempty"`
+	RouteReasons  []string `json:"route_reasons,omitempty"`
+	// RouteMisroute marks a routed query whose RoutedMode diverges from
+	// its expect_strategy label - an observable auto-router mistake,
+	// counted in Summary.RouteMisroutes. Orthogonal to Hit: a misrouted
+	// query can still retrieve its gold keys. Never set on unlabeled
+	// queries (no label, no judgment).
+	RouteMisroute bool `json:"route_misroute,omitempty"`
 }
 
 // Summary is the aggregate over one run's query records. Denominator
@@ -103,6 +129,22 @@ type Summary struct {
 	// Always 0 outside rerank runs, so a silent reranker fallback can
 	// never be read as a successful reranked ablation.
 	RerankDegraded int `json:"rerank_degraded,omitempty"`
+	// RouteMisroutes counts route-* run queries whose routed mode
+	// diverged from the scenario's expect_strategy label (R01's
+	// routing-mistake metric). Orthogonal like Failed: a misrouted query
+	// still retrieves and stays in the metric denominators. Always 0 on
+	// non-routed runs, so a misrouting auto router can never read as a
+	// clean ablation.
+	RouteMisroutes int `json:"route_misroutes,omitempty"`
+	// RouteDegraded counts route-* run queries whose retrieval degraded
+	// to a capability fallback (RoutedSearch Fallback != "", e.g.
+	// semantic/relationship without an embedder, or an identifier-year
+	// veto of historical). The rerank-degradation honesty contract
+	// applied to routed runs: a degraded query's ranking is lexical
+	// fallback, not evidence of the nominal strategy's quality.
+	// Orthogonal to RouteMisroutes (selection error vs capability
+	// fallback); always 0 on non-routed runs.
+	RouteDegraded int `json:"route_degraded,omitempty"`
 	// HitAtK is the fraction of answerable queries with >=1 expected key
 	// in the top-k. EvidenceRecallAtK is the mean per-answerable-query
 	// fraction of unique expected keys retrieved in the top-k (duplicate
@@ -267,14 +309,21 @@ func CorpusHash(recs []Record) (string, error) {
 
 // RunOptions configures one detailed run.
 type RunOptions struct {
-	Name       string // report name ("baseline", "top1", ...)
-	K          int    // top-k per query (<=0 defaults to 5)
-	Rerank     bool   // route queries through HybridSearchReranked
-	Mode       string // "cold" (ingest then query; default) | "warm" (query only, reuse an already-ingested corpus)
-	Seed       int64  // recorded in the manifest; retrieval itself is deterministic
-	Commit     string // build/commit identifier recorded in the manifest
-	EmbedderID string // model ID recorded in the manifest ("none" when unwired)
-	RerankerID string // model/endpoint ID recorded in the manifest ("none" when unwired)
+	Name   string // report name ("baseline", "top1", ...)
+	K      int    // top-k per query (<=0 defaults to 5)
+	Rerank bool   // route queries through HybridSearchReranked
+	// RouteStrategy routes queries through memory.RoutedSearch with this
+	// mode ("exact"|"semantic"|"historical"|"relationship"|"procedural"|
+	// "auto"), making the run manifest "route-"+mode and recording the
+	// routed mode per query (R01's per-strategy quality/cost evidence and
+	// auto-router misroute counting). Mutually exclusive with Rerank: a
+	// ranking must be attributable to exactly one pipeline.
+	RouteStrategy string
+	Mode          string // "cold" (ingest then query; default) | "warm" (query only, reuse an already-ingested corpus)
+	Seed          int64  // recorded in the manifest; retrieval itself is deterministic
+	Commit        string // build/commit identifier recorded in the manifest
+	EmbedderID    string // model ID recorded in the manifest ("none" when unwired)
+	RerankerID    string // model/endpoint ID recorded in the manifest ("none" when unwired)
 }
 
 // RunDetailed ingests the fact records (cold mode only) and scores every
@@ -315,6 +364,9 @@ func RunDetailed(ctx context.Context, s *memory.Store, ns string, recs []Record,
 	if mode != "cold" && mode != "warm" {
 		return RunReport{}, fmt.Errorf("membench: mode %q: want cold or warm", mode)
 	}
+	if o.Rerank && o.RouteStrategy != "" {
+		return RunReport{}, fmt.Errorf("membench: rerank and route strategy %q are mutually exclusive", o.RouteStrategy)
+	}
 	hash, err := CorpusHash(recs)
 	if err != nil {
 		return RunReport{}, err
@@ -322,6 +374,9 @@ func RunDetailed(ctx context.Context, s *memory.Store, ns string, recs []Record,
 	strategy := "hybrid"
 	if o.Rerank {
 		strategy = "hybrid-reranked"
+	}
+	if o.RouteStrategy != "" {
+		strategy = "route-" + o.RouteStrategy
 	}
 	run := RunReport{
 		Name:      o.Name,
@@ -361,7 +416,24 @@ func RunDetailed(ctx context.Context, s *memory.Store, ns string, recs []Record,
 		qr := QueryResult{Q: r.Q, Expect: r.Expect}
 		t0 := time.Now()
 		var facts []memory.Fact
-		if o.Rerank {
+		if o.RouteStrategy != "" {
+			res, err := s.RoutedSearch(ctx, ns, memory.RouteRequest{
+				Mode: memory.RouteMode(o.RouteStrategy), Query: r.Q, Limit: k,
+			})
+			if err != nil {
+				qr.Error = err.Error()
+			} else {
+				qr.RoutedMode = string(res.Mode)
+				qr.RouteFallback = res.Fallback
+				qr.RouteReasons = res.Reasons
+				if res.Fallback != "" {
+					sum.RouteDegraded++
+				}
+				for _, h := range res.Hits {
+					facts = append(facts, memory.Fact{Key: routedHitKey(h)})
+				}
+			}
+		} else if o.Rerank {
 			scored, err := s.HybridSearchReranked(ctx, ns, r.Q, k, 0)
 			if err != nil {
 				qr.Error = err.Error()
@@ -392,6 +464,10 @@ func RunDetailed(ctx context.Context, s *memory.Store, ns string, recs []Record,
 			}
 		}
 		qr.LatencyNanos = time.Since(t0).Nanoseconds()
+		if o.RouteStrategy != "" && r.ExpectStrategy != "" && qr.RoutedMode != "" && qr.RoutedMode != r.ExpectStrategy {
+			qr.RouteMisroute = true
+			sum.RouteMisroutes++
+		}
 
 		expect := map[string]bool{}
 		for _, e := range r.Expect {
@@ -446,9 +522,36 @@ func RunDetailed(ctx context.Context, s *memory.Store, ns string, recs []Record,
 			run.Reason = "no reranked results: every query errored or returned no candidates, so there is no evidence the configured reranker ran"
 		}
 	}
+	if o.RouteStrategy != "" {
+		var notes []string
+		if sum.RouteMisroutes > 0 {
+			notes = append(notes, fmt.Sprintf("auto router misrouted %d of %d queries: routed mode diverged from the scenario's expect_strategy label (see queries[].route_misroute)", sum.RouteMisroutes, sum.Queries))
+		}
+		if sum.RouteDegraded > 0 {
+			notes = append(notes, fmt.Sprintf("%d of %d queries degraded to a capability fallback (see queries[].route_fallback): the nominal strategy did not fully run, so their rankings are lexical fallback, not strategy-quality evidence", sum.RouteDegraded, sum.Queries))
+		}
+		run.Reason = strings.Join(notes, "; ")
+	}
 	run.Summary = &sum
 	run.DurationNanos = time.Since(start).Nanoseconds()
 	return run, nil
+}
+
+// routedHitKey maps a routed hit to the ranking key evidence scoring
+// compares against Expect: fact hits use the fact key; relation and
+// skill hits use their CompactUnified-style rendering so the ranking is
+// honest about what was surfaced (gold keys are fact keys, so a relation
+// or skill hit simply never inflates recall).
+func routedHitKey(h memory.UnifiedHit) string {
+	switch {
+	case h.Fact != nil:
+		return h.Fact.Key
+	case h.Triplet != nil:
+		return h.Triplet.From.Key + " -> " + h.Triplet.LinkType + " -> " + h.Triplet.To.Key
+	case h.Skill != nil:
+		return "/skills/" + h.Skill.Name + "/" + h.Skill.Version
+	}
+	return ""
 }
 
 // hasRerankComponent reports whether memory.applyRerank actually applied

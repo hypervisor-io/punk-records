@@ -402,6 +402,59 @@ func TestSearchTemporalDoesNotHijackHybrid(t *testing.T) {
 	}
 }
 
+// TestSearchStrategyRouted covers R01's MCP surface: strategy=auto on
+// identifier text routes exact (the version year is not a time filter),
+// explicit strategy wins over temporal language, and unified_search with
+// a strategy returns the routed envelope instead of the fused listing.
+func TestSearchStrategyRouted(t *testing.T) {
+	cs := session(t)
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember", Arguments: map[string]any{
+		"namespace": "ns", "key": "/svc/api", "body": "release v2024.1 shipped fixes",
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("remember: %v %s", err, text(t, res))
+	}
+
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "search", Arguments: map[string]any{
+		"namespace": "ns", "query": "release v2024.1", "strategy": "auto",
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("search strategy=auto: %v %s", err, text(t, res))
+	}
+	out := text(t, res)
+	if !strings.Contains(out, `"mode":"exact"`) || !strings.Contains(out, `"requested_mode":"auto"`) {
+		t.Fatalf("search strategy=auto: %s (want routed envelope exact/auto)", out)
+	}
+	if !strings.Contains(out, "identifier:version") || !strings.Contains(out, "/svc/api") {
+		t.Fatalf("search strategy=auto: %s (want identifier reason and the hit)", out)
+	}
+
+	// Explicit exact wins over temporal language.
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "search", Arguments: map[string]any{
+		"namespace": "ns", "query": "release last week", "strategy": "exact",
+	}})
+	if err != nil || res.IsError || !strings.Contains(text(t, res), `"mode":"exact"`) || !strings.Contains(text(t, res), "/svc/api") {
+		t.Fatalf("search strategy=exact: %v %s", err, text(t, res))
+	}
+
+	// unified_search with a strategy returns the routed envelope.
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "unified_search", Arguments: map[string]any{
+		"namespace": "ns", "query": "release v2024.1", "strategy": "auto",
+	}})
+	if err != nil || res.IsError || !strings.Contains(text(t, res), `"mode":"exact"`) {
+		t.Fatalf("unified_search strategy=auto: %v %s", err, text(t, res))
+	}
+
+	// Unknown strategy is an error, not a silent fallback.
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "search", Arguments: map[string]any{
+		"namespace": "ns", "query": "release", "strategy": "bogus",
+	}})
+	if err != nil || !res.IsError {
+		t.Fatalf("search strategy=bogus: %v %s (want tool error)", err, text(t, res))
+	}
+}
+
 // TestProfileAndDiagnoseTools exercises the profile and diagnose tools
 // end to end through the real MCP protocol (Task 1.7), mirroring
 // TestMemoryV2Tools's session/CallTool/text shape.

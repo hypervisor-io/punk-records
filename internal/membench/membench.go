@@ -23,6 +23,12 @@ type Record struct {
 	Body   string   `json:"body,omitempty"`
 	Q      string   `json:"q,omitempty"`
 	Expect []string `json:"expect,omitempty"` // keys that answer the query
+	// ExpectStrategy labels the retrieval route a correct auto router
+	// should pick for this query (R01): on route-* runs, a routed mode
+	// diverging from the label is counted as a routing mistake
+	// (QueryResult.RouteMisroute, Summary.RouteMisroutes). It never
+	// affects hit/recall scoring.
+	ExpectStrategy string `json:"expect_strategy,omitempty"`
 }
 
 // Result is the aggregate score over every query record in a scenario.

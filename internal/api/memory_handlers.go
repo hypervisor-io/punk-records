@@ -124,6 +124,49 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, memory.TokenBudgetScored(scored, maxTokens))
 	}
+	// R01: an explicit strategy opts out of the legacy path below into an
+	// inspectable routed search; the envelope carries the selected mode,
+	// router reasons and any fallback. strategy="" keeps the legacy
+	// behavior byte-identical (including its auto-parsed temporal
+	// windows). The namespace is the path parameter enforced by the A01
+	// hook, so the envelope can never escape the authz guard, and
+	// max_tokens is applied inside RoutedSearch. An explicit since/until
+	// window is CARRIED through historical (and resolves auto to
+	// historical); a windowed strategy that cannot honor it fails 400 -
+	// the combination is never silently ignored.
+	if strategy := r.URL.Query().Get("strategy"); strategy != "" {
+		req := memory.RouteRequest{
+			Mode:      memory.RouteMode(strategy),
+			Query:     q,
+			Limit:     limit,
+			MaxTokens: maxTokens,
+			Anchors:   r.URL.Query()["anchor"],
+		}
+		if sinceRaw, untilRaw := r.URL.Query().Get("since"), r.URL.Query().Get("until"); sinceRaw != "" || untilRaw != "" {
+			if sinceRaw == "" || untilRaw == "" {
+				writeErr(w, http.StatusBadRequest, errors.New("memory: since requires until"))
+				return
+			}
+			since, err := time.Parse(time.RFC3339, sinceRaw)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+			until, err := time.Parse(time.RFC3339, untilRaw)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+			req.Window = &memory.RouteWindow{From: since, To: until}
+		}
+		res, err := s.mem.RoutedSearch(r.Context(), ns, req)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
 	if sinceRaw, untilRaw := r.URL.Query().Get("since"), r.URL.Query().Get("until"); sinceRaw != "" || untilRaw != "" {
 		if sinceRaw == "" || untilRaw == "" {
 			writeErr(w, http.StatusBadRequest, errors.New("memory: since requires until"))

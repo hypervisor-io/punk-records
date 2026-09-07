@@ -198,6 +198,13 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // Re-measured for S01 round 2 (search_skills/load_skill admitted to the
 // agent toolset): agent tools/list wire is now 24380 bytes, ~6095 tokens
 // (18 tools). The tool entries were otherwise untouched.
+//
+// Re-measured for R01 (strategy field on search/unified-search plus the
+// routed-meta output and UnifiedHit's skill variant): agent tools/list
+// wire is now 25707 bytes, ~6427 tokens. The 1327-byte growth is the
+// inspectable-routing surface itself; the routed hits deliberately ride
+// the existing compact-hit schema instead of a new RouteResult subtree,
+// which is what keeps the growth to the meta block.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
@@ -210,7 +217,11 @@ const (
 	// slack. The re-measurement is the budgeted ratchet step the task
 	// sanctions; this still forbids any further growth of the per-tool
 	// payload through this package.
-	agentToolsetBudgetTokens = 6111
+	// R01 ratchet step: 6095 + 332 measured for the strategy field on
+	// search/unified_search, the routed-meta output schema and
+	// UnifiedHit's skill variant (see the re-measurement note above)
+	// + 16 slack.
+	agentToolsetBudgetTokens = 6443
 	// sessionOpenBudgetTokens is the two parts summed: what a host pays
 	// per session for punk's server-owned guidance with the lean toolset.
 	sessionOpenBudgetTokens = instructionsBudgetTokens + agentToolsetBudgetTokens

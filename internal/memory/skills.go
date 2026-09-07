@@ -709,7 +709,7 @@ func (s *Store) SearchSkills(ctx context.Context, ns, query string, limit int) (
 				skillVec = append(skillVec, f)
 			}
 		}
-		ranked = rrfFuseSkills(fts, skillVec)
+		ranked = rrfFuseFacts(fts, skillVec)
 	}
 	out := []SkillMeta{}
 	seen := map[string]bool{}
@@ -727,10 +727,10 @@ func (s *Store) SearchSkills(ctx context.Context, ns, query string, limit int) (
 	return out, nil
 }
 
-// rrfFuseSkills fuses two ranked lists (slice position = rank) with
+// rrfFuseFacts fuses ranked lists (slice position = rank) with
 // Reciprocal Rank Fusion at k=60, the canonical constant HybridSearch
 // uses. Ties break by key ascending so output is deterministic.
-func rrfFuseSkills(arms ...[]Fact) []Fact {
+func rrfFuseFacts(arms ...[]Fact) []Fact {
 	const k = 60.0
 	score := map[string]float64{}
 	byID := map[string]Fact{}
