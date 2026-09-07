@@ -157,26 +157,89 @@ func nullableString(v string) any {
 // "in" returns incoming edges instead. Closed edges (invalid_at set) are
 // live-edge filtered out, same as every other default link read.
 func (s *Store) Neighbors(ctx context.Context, ns, key, direction string) ([]Link, error) {
-	col, other := "from_key", "to_key"
+	// Preserve the original API: only "in" selects incoming edges;
+	// every other direction selects outgoing edges.
+	dir := "out"
 	if direction == "in" {
-		col, other = "to_key", "from_key"
+		dir = "in"
 	}
-	rows, err := s.db.QueryContext(ctx, s.db.Rebind(fmt.Sprintf(`
-		SELECT namespace, from_key, to_key, link_type, weight, COALESCE(description,'') FROM memory_links
-		WHERE namespace = $1 AND %s = $2 AND invalid_at IS NULL ORDER BY %s`, col, other)), ns, key)
+	page, err := s.NeighborsBounded(ctx, ns, key, NeighborQuery{Direction: dir})
 	if err != nil {
 		return nil, err
 	}
+	return page.Links, nil
+}
+
+// NeighborPage is one bounded read of a key's live links: the links (at
+// most Limit when bounded) plus the observable truncation signal.
+type NeighborPage struct {
+	Links []Link
+	// HasMore is true when at least one further live link exists beyond
+	// this page in order, so a caller reading a single bounded page
+	// observes truncation explicitly instead of silently seeing a
+	// complete neighborhood.
+	HasMore bool
+}
+
+// NeighborQuery bounds one deterministic neighbor read of a key.
+// Direction is "out" (edges from key) or "in" (edges to key); the page
+// is ordered by opposite-end key, then link type. Limit <= 0 reads every
+// live link (the legacy Neighbors behavior). A positive Limit returns the
+// first bounded set and reports HasMore; this API does not expose a cursor.
+type NeighborQuery struct {
+	Direction string
+	Limit     int
+}
+
+// NeighborsBounded reads one page of a key's live links with bounded
+// returned rows: the query carries a LIMIT (limit+1 result rows at most,
+// the extra row driving HasMore), so a high-degree key never
+// materializes its whole neighborhood in one call. Ordering, liveness
+// filtering and column list are identical to Neighbors.
+func (s *Store) NeighborsBounded(ctx context.Context, ns, key string, q NeighborQuery) (NeighborPage, error) {
+	col, other := "from_key", "to_key"
+	switch q.Direction {
+	case "out":
+	case "in":
+		col, other = "to_key", "from_key"
+	default:
+		return NeighborPage{}, fmt.Errorf("memory: neighbor direction %q: want out or in", q.Direction)
+	}
+	if q.Limit == int(^uint(0)>>1) {
+		return NeighborPage{}, fmt.Errorf("memory: neighbor limit overflows lookahead")
+	}
+	lookup := 0
+	if q.Limit > 0 {
+		lookup = q.Limit + 1
+	}
+	args := []any{ns, key}
+	if lookup > 0 {
+		args = append(args, lookup)
+	}
+	clause := ""
+	if lookup > 0 {
+		clause = fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(fmt.Sprintf(`
+		SELECT namespace, from_key, to_key, link_type, weight, COALESCE(description,'') FROM memory_links
+		WHERE namespace = $1 AND %s = $2 AND invalid_at IS NULL ORDER BY %s, link_type%s`, col, other, clause)), args...)
+	if err != nil {
+		return NeighborPage{}, err
+	}
 	defer rows.Close()
-	out := []Link{}
+	page := NeighborPage{Links: []Link{}}
 	for rows.Next() {
 		var l Link
 		if err := rows.Scan(&l.Namespace, &l.FromKey, &l.ToKey, &l.LinkType, &l.Weight, &l.Description); err != nil {
-			return nil, err
+			return NeighborPage{}, err
 		}
-		out = append(out, l)
+		if lookup > 0 && len(page.Links) == q.Limit {
+			page.HasMore = true
+			break
+		}
+		page.Links = append(page.Links, l)
 	}
-	return out, rows.Err()
+	return page, rows.Err()
 }
 
 // InvalidateLink closes the live edge's validity window (invalid_at set);

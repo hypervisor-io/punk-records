@@ -182,6 +182,13 @@ type ComposerConfig struct {
 	Model       string `json:"model,omitempty"`
 	Endpoint    string `json:"endpoint,omitempty"`
 	ModelBacked bool   `json:"model_backed"`
+	// ExpandEvidence records that the composer's reflect loop ran with
+	// opt-in bounded evidence expansion (reflect.Opts.ExpandEvidence).
+	// The E02/R02 comparison is the plain reflect composer run against
+	// the expanding one on the same fixtures under the same budget; the
+	// flag is what makes the two reports distinguishable. Default (and
+	// the plain composer) stays off.
+	ExpandEvidence bool `json:"expand_evidence,omitempty"`
 }
 
 // JudgeEvidence is one cited fact resolved against the stage's retrieval:
@@ -277,9 +284,10 @@ func (extractiveComposer) Compose(_ context.Context, _ string, facts []memory.Fa
 // straight onto ComposeResult. Constructing one requires an explicitly
 // configured model client.
 type reflectComposer struct {
-	eng *reflect.Engine
-	ns  string
-	cfg ComposerConfig
+	eng    *reflect.Engine
+	ns     string
+	cfg    ComposerConfig
+	expand bool
 }
 
 // NewReflectComposer wraps a reflect engine as the answer composer. The
@@ -290,6 +298,20 @@ func NewReflectComposer(eng *reflect.Engine, ns, endpoint, model string) Compose
 		eng: eng,
 		ns:  ns,
 		cfg: ComposerConfig{Provider: "reflect", Model: model, Endpoint: endpoint, ModelBacked: true},
+	}
+}
+
+// NewReflectExpandingComposer is the opt-in R02 comparison arm: the same
+// reflect composer with bounded evidence expansion enabled on every run
+// (reflect.Opts.ExpandEvidence). Token budgets flow through unchanged -
+// the comparison contract is equal budgets - and the report's composer
+// config flags the expansion so the two arms are distinguishable.
+func NewReflectExpandingComposer(eng *reflect.Engine, ns, endpoint, model string) Composer {
+	return &reflectComposer{
+		eng:    eng,
+		ns:     ns,
+		expand: true,
+		cfg:    ComposerConfig{Provider: "reflect", Model: model, Endpoint: endpoint, ModelBacked: true, ExpandEvidence: true},
 	}
 }
 
@@ -307,7 +329,7 @@ func (c *reflectComposer) composeWithin(ctx context.Context, q string, _ []memor
 }
 
 func (c *reflectComposer) compose(ctx context.Context, q string, maxTokens int) (ComposeResult, error) {
-	ans, err := c.eng.ReflectWith(ctx, c.ns, q, reflect.Opts{MaxTokens: maxTokens})
+	ans, err := c.eng.ReflectWith(ctx, c.ns, q, reflect.Opts{MaxTokens: maxTokens, ExpandEvidence: c.expand})
 	if err != nil {
 		// Retain the usage and the per-call unknown count the loop
 		// consumed before failing (Composer contract): a budget stop or
@@ -647,6 +669,63 @@ type AnswerReport struct {
 	BudgetTokens   int                `json:"budget_tokens,omitempty"`
 	Summary        AnswerSummary      `json:"summary"`
 	Cases          []AnswerCaseResult `json:"cases"`
+}
+
+// AnswerDelta is the R02 paired-run comparison artifact: the SAME answer
+// scenario run twice - the plain reflect composer versus the expanding
+// one (NewReflectComposer / NewReflectExpandingComposer) - on the same
+// fixtures, the same K and the same token budget. Every field is
+// expanded minus baseline, so a positive quality delta with a positive
+// cost delta is the expected shape; whether the added evidence work
+// justifies the added cost is the caller's judgment, recorded here as
+// data rather than decided. Token deltas are VOLATILE (measured cost,
+// like their sources) and never stable-manifest material. A rate is
+// nil-delta when either side's denominator was empty - never a vacuous
+// number. Only the delta fields that matter for the expansion acceptance
+// (answer quality against added cost) are carried; the underlying
+// reports remain the full evidence.
+type AnswerDelta struct {
+	Queries int `json:"queries"` // shared scenario size (must match across runs)
+
+	// Quality: end-to-end exact-match rate (nil when either side was not
+	// graded), answered cases, answerable abstentions (negative delta is
+	// the expansion earning answers), confident answers to unanswerable
+	// questions (a positive delta is a regression), retrieval misses and
+	// failed cases.
+	ExactMatchRateDelta        *float64 `json:"exact_match_rate_delta,omitempty"`
+	AnsweredDelta              int      `json:"answered_delta"`
+	AbstainedAnswerableDelta   int      `json:"abstained_answerable_delta"`
+	ConfidentUnanswerableDelta int      `json:"confident_unanswerable_delta"`
+	RetrievalMissesDelta       int      `json:"retrieval_misses_delta"`
+	FailedDelta                int      `json:"failed_delta"`
+
+	// Cost: measured composer and judge token usage and the per-call
+	// unknown-usage count - the added price the quality delta must
+	// justify.
+	TokensDelta       int `json:"tokens_delta"`
+	JudgeTokensDelta  int `json:"judge_tokens_delta"`
+	UsageUnknownDelta int `json:"usage_unknown_delta"`
+}
+
+// CompareAnswerReports diffs an expansion pair (baseline first). The
+// reports must come from the same scenario: the delta's Queries echoes
+// the baseline count, and callers comparing different scenario hashes
+// are comparing different corpora, not arms of one comparison.
+func CompareAnswerReports(base, expanded AnswerReport) AnswerDelta {
+	d := AnswerDelta{Queries: base.Summary.Queries}
+	if base.Summary.ExactMatchRate != nil && expanded.Summary.ExactMatchRate != nil {
+		v := *expanded.Summary.ExactMatchRate - *base.Summary.ExactMatchRate
+		d.ExactMatchRateDelta = &v
+	}
+	d.AnsweredDelta = expanded.Summary.Answered - base.Summary.Answered
+	d.AbstainedAnswerableDelta = expanded.Summary.AbstainedAnswerable - base.Summary.AbstainedAnswerable
+	d.ConfidentUnanswerableDelta = expanded.Summary.ConfidentUnanswerable - base.Summary.ConfidentUnanswerable
+	d.RetrievalMissesDelta = expanded.Summary.RetrievalMisses - base.Summary.RetrievalMisses
+	d.FailedDelta = expanded.Summary.Failed - base.Summary.Failed
+	d.TokensDelta = expanded.Summary.Tokens - base.Summary.Tokens
+	d.JudgeTokensDelta = expanded.Summary.JudgeTokens - base.Summary.JudgeTokens
+	d.UsageUnknownDelta = expanded.Summary.UsageUnknown - base.Summary.UsageUnknown
+	return d
 }
 
 // RunAnswers runs the answer stage over one scenario: per query, retrieve
