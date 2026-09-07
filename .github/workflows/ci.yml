@@ -17,7 +17,9 @@ jobs:
       - name: Build
         run: make build
       - name: Test
-        run: go test ./... -race -count=1
+        # The full SQLite memory race suite exceeds Go's default 10m package
+        # timeout (about 13m in acceptance). Keep every check with a 20m budget.
+        run: go test ./... -race -count=1 -timeout=20m
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
