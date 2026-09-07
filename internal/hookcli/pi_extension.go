@@ -613,19 +613,9 @@ var nulJSStringLiteral = func() string {
 	return `"` + string(backslash) + "u0000" + `"`
 }()
 
-// piExtensionContent renders the full extension source with serverURL
-// baked in as the PUNK_URL fallback default - still overridable at
-// runtime via the PUNK_URL environment variable, see the rendered
-// extension's own header comment and punkServerURL() - and the NUL-escape
-// string literal (see nulJSStringLiteral) spliced into the fallback
-// prompt_id derivation.
-func piExtensionContent(serverURL string) string {
-	return piExtensionContentNS(serverURL, "")
-}
-
-// piExtensionContentNS is piExtensionContent with a namespace override
-// literal baked in (punk connect pi --project); "" renders an empty
-// string and the extension derives the namespace per session instead.
+// piExtensionContentNS renders the extension with the server URL fallback,
+// NUL escape for prompt identity, and optional project namespace baked in.
+// An empty namespace lets the extension derive it per session.
 func piExtensionContentNS(serverURL, namespace string) string {
 	return fmt.Sprintf(piExtensionTemplate, jsStringLiteral(serverURL), nulJSStringLiteral, jsStringLiteral(namespace))
 }

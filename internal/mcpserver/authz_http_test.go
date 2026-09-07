@@ -208,7 +208,7 @@ func TestMCPAuthzStdioTrustedTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "remember",
 		Arguments: map[string]any{"namespace": "ns-b", "key": "/k", "body": "v"}})
 	if err != nil || res.IsError {

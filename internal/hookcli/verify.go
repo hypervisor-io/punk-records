@@ -60,6 +60,7 @@ func verifyMCP(ctx context.Context, endpoint, apiKey, cwd, pinNS string) (Verify
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "punk-connect-verify", Version: "1"}, nil)
 	if cwd != "" {
+		//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 		client.AddRoots(&mcp.Root{URI: fileURI(cwd), Name: filepath.Base(cwd)})
 	}
 	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}

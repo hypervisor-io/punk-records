@@ -56,7 +56,7 @@ func TestTraceMiddlewareSurvivesNilParamsOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("tools/list with nil params: %v", err)

@@ -33,7 +33,7 @@ func recallChunks(t *testing.T, dsn, ns, prefix string) []memory.Fact {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	facts, err := memory.New(db, nil).Recall(context.Background(), ns, prefix, 100)
 	if err != nil {
 		t.Fatal(err)

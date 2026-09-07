@@ -20,6 +20,7 @@ func TestVerifyMCPAgainstInMemoryServer(t *testing.T) {
 		func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, out, error) {
 			// Mirror the real server: the namespace resolves from the
 			// client's advertised roots when present, else the default.
+			//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 			roots, err := req.Session.ListRoots(ctx, nil)
 			if err != nil {
 				return nil, out{}, err

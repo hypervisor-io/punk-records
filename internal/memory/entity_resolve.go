@@ -420,7 +420,7 @@ func (s *Store) ProposeEntityMerges(ctx context.Context, ns string, opts MergePr
 				// by a shared source revision. Shared sources alone are
 				// co-occurrence - context, never identity - and similarity
 				// alone is context too: no broad fuzzy-name auto-merge.
-				if !declared && !(nameEq && shared) {
+				if !declared && (!nameEq || !shared) {
 					continue
 				}
 				if protected && (!declared || !opts.IncludeProtected) {

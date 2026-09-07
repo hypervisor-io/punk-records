@@ -110,7 +110,7 @@ func (l PDFLoader) Load(ctx context.Context, in LoadInput) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	pdfPath := filepath.Join(dir, "input.pdf")
 	if err := os.WriteFile(pdfPath, in.Body, 0o600); err != nil {
 		return nil, err

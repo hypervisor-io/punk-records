@@ -194,7 +194,7 @@ func embeddedChunks(t *testing.T, dsn, prefix string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var n int
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM memories WHERE key LIKE '`+prefix+`/chunk-%' AND embedding IS NOT NULL`).Scan(&n); err != nil {

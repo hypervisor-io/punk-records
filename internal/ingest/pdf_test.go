@@ -26,26 +26,26 @@ func TestPDFHelperProcess(t *testing.T) {
 	}
 	switch mode {
 	case "ok":
-		io.WriteString(os.Stdout, `{"revision":"pdf-r1","sections":[{"name":"Page 1","page":1,"text":"extracted page one"},{"name":"Page 2","page":2,"text":"extracted page two"}]}`)
+		_, _ = io.WriteString(os.Stdout, `{"revision":"pdf-r1","sections":[{"name":"Page 1","page":1,"text":"extracted page one"},{"name":"Page 2","page":2,"text":"extracted page two"}]}`)
 		os.Exit(0)
 	case "empty":
-		io.WriteString(os.Stdout, `{"sections":[]}`)
+		_, _ = io.WriteString(os.Stdout, `{"sections":[]}`)
 		os.Exit(0)
 	case "badjson":
-		io.WriteString(os.Stdout, "not json at all")
+		_, _ = io.WriteString(os.Stdout, "not json at all")
 		os.Exit(0)
 	case "fail":
-		io.WriteString(os.Stderr, "corrupt pdf stream")
+		_, _ = io.WriteString(os.Stderr, "corrupt pdf stream")
 		os.Exit(3)
 	case "noisystderr":
-		io.WriteString(os.Stderr, strings.Repeat("e", 6000)) // >4KiB stderr, no newline
-		io.WriteString(os.Stdout, `{"revision":"noisy","sections":[{"name":"Page 1","page":1,"text":"extracted despite noise"}]}`)
+		_, _ = io.WriteString(os.Stderr, strings.Repeat("e", 6000)) // >4KiB stderr, no newline
+		_, _ = io.WriteString(os.Stdout, `{"revision":"noisy","sections":[{"name":"Page 1","page":1,"text":"extracted despite noise"}]}`)
 		os.Exit(0)
 	case "sleep":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	case "toobig":
-		io.WriteString(os.Stdout, strings.Repeat("x", 200))
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 200))
 		os.Exit(0)
 	}
 	os.Exit(2)

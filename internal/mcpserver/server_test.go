@@ -1094,7 +1094,7 @@ func TestInstructionsShareRoutingWithSkill(t *testing.T) {
 		t.Fatal("MCP instructions must embed the skill's routing section verbatim so the two cannot drift")
 	}
 	cs := session(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	if got := cs.InitializeResult().Instructions; !strings.Contains(got, "unified_search") {
 		t.Fatalf("instructions not served: %s", got)
 	}

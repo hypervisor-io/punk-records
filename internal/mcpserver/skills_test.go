@@ -97,6 +97,7 @@ func TestSearchSkillsToolMetadataOnly(t *testing.T) {
 // namespace argument keeps the normal roots-based resolution.
 func TestSearchSkillsDefaultsToSkillIndexNamespace(t *testing.T) {
 	cs, mem := sessionWithStore(t, func(c *mcp.Client) {
+		//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 		c.AddRoots(&mcp.Root{URI: "file:///work/x", Name: "ws"})
 	})
 	ctx := context.Background()

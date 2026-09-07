@@ -121,6 +121,7 @@ func verifyWhoamiServer(t *testing.T) *httptest.Server {
 					return nil, out{Namespace: h, Source: "header"}, nil
 				}
 			}
+			//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 			if res, err := req.Session.ListRoots(ctx, nil); err == nil {
 				for _, r := range res.Roots {
 					if u, perr := url.Parse(r.URI); perr == nil && u.Scheme == "file" && u.Path != "" {
@@ -352,12 +353,18 @@ func TestConnectCodexVerifyRejectsForeignMCPEndpoint(t *testing.T) {
 func TestCodexAuthProblemMissingBearerEnvIsUnverified(t *testing.T) {
 	const name = "REVIEWER_C05_MISSING_BEARER"
 	prev, ok := os.LookupEnv(name)
-	os.Unsetenv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		if ok {
-			os.Setenv(name, prev)
+			if err := os.Setenv(name, prev); err != nil {
+				t.Fatal(err)
+			}
 		} else {
-			os.Unsetenv(name)
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
 		}
 	})
 	sc := hookcli.CodexMCPEffective{BearerEnv: name, BearerEnvFrom: "fixture.toml"}

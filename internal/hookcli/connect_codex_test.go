@@ -621,8 +621,12 @@ func TestDedupeCodexHookScopesPreservesDifferentHookMetadata(t *testing.T) {
 	projectPath := filepath.Join(dir, "project.json")
 	global := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":10}]}]}}`
 	project := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":30}]}]}}`
-	os.WriteFile(globalPath, []byte(global), 0o600)
-	os.WriteFile(projectPath, []byte(project), 0o600)
+	if err := os.WriteFile(globalPath, []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(project), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	_, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
 	if err != nil {
@@ -641,8 +645,12 @@ func TestDedupeCodexHookScopesRemovesExactlyIdenticalGroups(t *testing.T) {
 	globalPath := filepath.Join(dir, "global.json")
 	projectPath := filepath.Join(dir, "project.json")
 	payload := `{"hooks":{"SessionStart":[{"matcher":"startup|resume","hooks":[{"type":"command","command":"/bin/punk hook --url http://localhost:9090 --from codex","timeout":10}]}]}}`
-	os.WriteFile(globalPath, []byte(payload), 0o600)
-	os.WriteFile(projectPath, []byte(payload), 0o600)
+	if err := os.WriteFile(globalPath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	_, changed, err := DedupeCodexHookScopes(globalPath, projectPath, "/bin/punk")
 	if err != nil || !changed {
@@ -1201,9 +1209,9 @@ func TestRunFromCodexContextLostAfterResponseIsIssuedNotAcked(t *testing.T) {
 			// Announce more bytes than will ever arrive, send half the
 			// body, then hard-close: the client's read fails mid-body.
 			fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(body)+256)
-			buf.Write(body[:len(body)/2])
-			buf.Flush()
-			conn.Close()
+			_, _ = buf.Write(body[:len(body)/2])
+			_ = buf.Flush()
+			_ = conn.Close()
 			return
 		}
 		handler.ServeHTTP(w, r)

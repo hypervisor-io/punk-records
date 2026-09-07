@@ -422,7 +422,7 @@ func (s *Store) reconcileGroup(ctx context.Context, ns, group string, leaves []F
 		// A node stays a parent when it must split (owned > fanout) or when
 		// the established topology already made it a parent and it is not
 		// empty: preserve, never collapse non-empty structure.
-		if len(owned) <= fanout && !(curIsParent && len(owned) > 0) {
+		if len(owned) <= fanout && (!curIsParent || len(owned) == 0) {
 			node.leafItems = true
 			keys := make([]string, len(owned))
 			for i, f := range owned {
@@ -772,7 +772,7 @@ func expectedSummaryChildKeys(group string, path []int, leaves []Fact, fanout in
 	if len(owned) == 0 {
 		return nil, nil
 	}
-	if len(owned) <= fanout && !(selfIsParent && len(owned) > 0) {
+	if len(owned) <= fanout && (!selfIsParent || len(owned) == 0) {
 		keys := make([]string, len(owned))
 		for i, f := range owned {
 			keys[i] = f.Key

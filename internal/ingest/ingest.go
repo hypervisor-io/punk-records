@@ -251,7 +251,7 @@ func Load(ctx context.Context, spec Spec) (*memory.SourceDocument, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ingest: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		if fi, err := f.Stat(); err == nil && fi.Size() > spec.maxBytes() {
 			return nil, fmt.Errorf("ingest: %s exceeds max_bytes (%d)", spec.Path, spec.maxBytes())
 		}

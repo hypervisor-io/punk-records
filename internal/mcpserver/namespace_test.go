@@ -19,6 +19,7 @@ func sessionWithRoots(t *testing.T, rootURIs ...string) *mcp.ClientSession {
 	t.Helper()
 	return sessionOpts(t, func(c *mcp.Client) {
 		for _, u := range rootURIs {
+			//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 			c.AddRoots(&mcp.Root{URI: u, Name: "ws"})
 		}
 	})
@@ -75,6 +76,7 @@ func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 	client := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 	client.AddRoots(&mcp.Root{URI: "file:///tmp/other"})
 	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint:   ts.URL,
@@ -83,7 +85,7 @@ func TestNamespaceFromHeaderBeatsRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +119,7 @@ func TestWhoamiPinnedNamespaceWithoutRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +143,7 @@ func TestClaimWorkDefaultsHolderToIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	ctx := context.Background()
 	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "claim_work",
 		Arguments: map[string]any{"namespace": "ns", "key": "/tasks/T1"}}); err != nil {
@@ -173,6 +175,7 @@ func TestClientSupportsRoots(t *testing.T) {
 	if clientSupportsRoots(&mcp.InitializeParams{Capabilities: &mcp.ClientCapabilities{}}) {
 		t.Fatal("capabilities without roots must not support roots")
 	}
+	//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 	if !clientSupportsRoots(&mcp.InitializeParams{Capabilities: &mcp.ClientCapabilities{RootsV2: &mcp.RootCapabilities{}}}) {
 		t.Fatal("roots capability must be detected")
 	}

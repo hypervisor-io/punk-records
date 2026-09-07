@@ -45,6 +45,7 @@ func alignmentWhoamiServer(t *testing.T) *httptest.Server {
 					return nil, out{Namespace: h, Source: "header"}, nil
 				}
 			}
+			//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 			if res, err := req.Session.ListRoots(ctx, nil); err == nil {
 				for _, r := range res.Roots {
 					if u, perr := url.Parse(r.URI); perr == nil && u.Scheme == "file" && u.Path != "" {

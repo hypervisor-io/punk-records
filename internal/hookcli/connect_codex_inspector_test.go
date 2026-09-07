@@ -79,12 +79,18 @@ env_http_headers = { "X-Punk-Namespace" = "REVIEWER_C05_NAMESPACE" }
 func TestInspectCodexMCPScopeEnvHeaderUnsetKeepsStatic(t *testing.T) {
 	const name = "REVIEWER_C05_UNSET_NAMESPACE"
 	prev, ok := os.LookupEnv(name)
-	os.Unsetenv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		if ok {
-			os.Setenv(name, prev)
+			if err := os.Setenv(name, prev); err != nil {
+				t.Fatal(err)
+			}
 		} else {
-			os.Unsetenv(name)
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
 		}
 	})
 	p := filepath.Join(t.TempDir(), "config.toml")

@@ -212,6 +212,7 @@ func (g *mcpAuthzRig) connectOpts(t *testing.T, extra http.Header, roots []strin
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "a02", Version: "0"}, opts)
 	for _, r := range roots {
+		//nolint:staticcheck // Keep MCP roots compatibility for existing clients during the deprecation window.
 		client.AddRoots(&mcp.Root{URI: r})
 	}
 	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
@@ -302,7 +303,7 @@ func TestToolPermissionInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	tools, err := cs.ListTools(ctx, nil)
 	if err != nil {

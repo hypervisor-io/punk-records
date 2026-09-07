@@ -148,7 +148,7 @@ func TestBrainEventsStream(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		s.Router().ServeHTTP(rec, req)
-		pw.Close()
+		_ = pw.Close()
 		close(done)
 	}()
 
