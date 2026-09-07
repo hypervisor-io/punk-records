@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased (improvement pipeline, integrated locally 2026-09-07)
+## v1.9.0 (2026-09-08)
 
-Twenty-three reviewed tasks on the local branch
-`feat/punk-improvement-pipeline` (baseline `9ab2b8f`, tip `9159cb0`).
-Acceptance evidence: `docs/reports/punk-improvement-pipeline.md`. None
-of this is deployed, released or tagged; the live installation is
-unchanged.
+The improvement pipeline includes twenty-three feature tasks and a final
+acceptance gate, all reviewed and accepted. Validation and limitations:
+`docs/reports/punk-improvement-pipeline.md` (acceptance commit `b8738c3`).
+This release adds migrations 0022 and 0023; back up the database before
+upgrading. Namespace authorization enforcement and model-backed features
+remain opt-in.
 
 ### Added
 - Codex CLI 0.153.4 integration: native hook event normalization (the
