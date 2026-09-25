@@ -817,9 +817,14 @@ func TestOpenCodeMessagingNonOKSSEBackoff(t *testing.T) {
   // Backoff base 40ms: attempts must space 40 / 80 / 160 (setTimeout never
   // fires early, so the gaps can only be at least these). A backoff reset
   // bug would collapse them all to ~40.
-  must(gap1 >= 40, "first retry waited the base backoff, gap=" + gap1)
-  must(gap2 >= 80, "second retry doubled the backoff, gap=" + gap2)
-  must(gap3 >= 160, "third retry doubled again, gap=" + gap3)
+  // Node timers can fire up to 1ms before Date.now() says they should:
+  // libuv caches the loop time at millisecond granularity, so a timer of
+  // 80ms measured with Date.now() has been observed at 79. Allow 2ms of
+  // slack; a backoff reset would still collapse every gap to ~40.
+  const slack = 2
+  must(gap1 >= 40 - slack, "first retry waited the base backoff, gap=" + gap1)
+  must(gap2 >= 80 - slack, "second retry doubled the backoff, gap=" + gap2)
+  must(gap3 >= 160 - slack, "third retry doubled again, gap=" + gap3)
   must(gap3 > gap1, "backoff escalated across non-OK attempts (no reset), gaps=" + gap1 + "/" + gap2 + "/" + gap3)
 
   console.log("PASS non-ok-sse-backoff")
