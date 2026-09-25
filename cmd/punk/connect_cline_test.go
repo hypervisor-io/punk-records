@@ -61,7 +61,7 @@ func TestCmdHookClineOneReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stdin.Close()
+	defer func() { _ = stdin.Close() }()
 	if _, err := stdin.WriteString(`{"taskId":"t","hookName":"Notification"}`); err != nil {
 		t.Fatal(err)
 	}

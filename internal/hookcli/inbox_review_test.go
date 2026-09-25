@@ -81,10 +81,7 @@ func TestInboxRenderHardCapIncludesEverything(t *testing.T) {
 				}
 				shown = shown[:i]
 			}
-			raw := strings.ReplaceAll(shown, "\n> ", "\n")
-			if strings.HasPrefix(raw, "> ") {
-				raw = raw[2:]
-			}
+			raw := strings.TrimPrefix(strings.ReplaceAll(shown, "\n> ", "\n"), "> ")
 			if len(raw)+dropped != len(m.Body) || !strings.HasPrefix(m.Body, raw) {
 				t.Fatalf("total=%d msg %s: shown %d + dropped %d != body %d", total, m.ID, len(raw), dropped, len(m.Body))
 			}

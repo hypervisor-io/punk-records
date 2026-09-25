@@ -31,27 +31,27 @@ func TestClineCombinedCaptureMemoryAndInbox(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
 						t.Error(err)
 					}
-					io.WriteString(w, `{"status":"stored"}`)
+					_, _ = io.WriteString(w, `{"status":"stored"}`)
 				case "/v1/agent/context":
-					io.WriteString(w, `{"context":"memory facts"}`)
+					_, _ = io.WriteString(w, `{"context":"memory facts"}`)
 				case "/v1/agent/namespace":
-					io.WriteString(w, `{"namespace":"team"}`)
+					_, _ = io.WriteString(w, `{"namespace":"team"}`)
 				case "/v1/namespaces/team/members":
 					requests++
-					io.WriteString(w, `{"status":"registered"}`)
+					_, _ = io.WriteString(w, `{"status":"registered"}`)
 				case "/v1/namespaces/team/messages":
 					requests++
 					if r.URL.Query().Get("agent") != "cline:task-1" || r.URL.Query().Get("leased_by") == "" {
 						t.Error("bad address/lease")
 					}
-					io.WriteString(w, `{"messages":[{"id":"m","namespace":"team","sender":"lead","recipient":"cline:task-1","body":"peer body","created_at":"now"}]}`)
+					_, _ = io.WriteString(w, `{"messages":[{"id":"m","namespace":"team","sender":"lead","recipient":"cline:task-1","body":"peer body","created_at":"now"}]}`)
 				case "/v1/namespaces/team/messages/ack":
 					// The composed reply, not an intermediate buffer, must already be written.
 					if !strings.Contains(out.String(), "memory facts") || !strings.Contains(out.String(), "peer body") {
 						t.Error("ACK before composed stdout")
 					}
 					ack++
-					io.WriteString(w, `{"acked":1}`)
+					_, _ = io.WriteString(w, `{"acked":1}`)
 				default:
 					t.Errorf("unexpected %s", r.URL.Path)
 					w.WriteHeader(404)
@@ -143,21 +143,21 @@ func TestClineCombinedFailedStdoutNeverACKs(t *testing.T) {
 		defer mu.Unlock()
 		switch r.URL.Path {
 		case "/v1/agent/hooks":
-			io.WriteString(w, `{"status":"stored"}`)
+			_, _ = io.WriteString(w, `{"status":"stored"}`)
 		case "/v1/agent/context":
-			io.WriteString(w, `{"context":"memory"}`)
+			_, _ = io.WriteString(w, `{"context":"memory"}`)
 		case "/v1/agent/namespace":
-			io.WriteString(w, `{"namespace":"team"}`)
+			_, _ = io.WriteString(w, `{"namespace":"team"}`)
 		case "/v1/namespaces/team/members":
-			io.WriteString(w, `{"status":"registered"}`)
+			_, _ = io.WriteString(w, `{"status":"registered"}`)
 		case "/v1/namespaces/team/messages":
-			io.WriteString(w, `{"messages":[{"id":"m","namespace":"team","sender":"lead","recipient":"cline:t","body":"peer","created_at":"now"}]}`)
+			_, _ = io.WriteString(w, `{"messages":[{"id":"m","namespace":"team","sender":"lead","recipient":"cline:t","body":"peer","created_at":"now"}]}`)
 		case "/v1/namespaces/team/messages/ack":
 			ack++
-			io.WriteString(w, `{"acked":1}`)
+			_, _ = io.WriteString(w, `{"acked":1}`)
 		case "/v1/namespaces/team/messages/release":
 			released++
-			io.WriteString(w, `{"released":1}`)
+			_, _ = io.WriteString(w, `{"released":1}`)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
 		}

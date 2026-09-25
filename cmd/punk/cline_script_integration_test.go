@@ -40,11 +40,11 @@ func TestClineGeneratedHookExecutableRoundtrip(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/agent/hooks":
 			captures++
-			io.WriteString(w, `{"status":"stored"}`)
+			_, _ = io.WriteString(w, `{"status":"stored"}`)
 		case "/v1/agent/context":
-			io.WriteString(w, `{"context":"memory context"}`)
+			_, _ = io.WriteString(w, `{"context":"memory context"}`)
 		case "/v1/namespaces/team/members":
-			io.WriteString(w, `{"status":"registered"}`)
+			_, _ = io.WriteString(w, `{"status":"registered"}`)
 		case "/v1/namespaces/team/messages":
 			reads++
 			if r.URL.Query().Get("agent") != "cline:t1" {
@@ -53,7 +53,7 @@ func TestClineGeneratedHookExecutableRoundtrip(t *testing.T) {
 			fmt.Fprintf(w, `{"messages":[{"id":"m%d","namespace":"team","sender":"lead","recipient":"cline:t1","body":"hello worker","created_at":"now"}]}`, reads)
 		case "/v1/namespaces/team/messages/ack":
 			acks++
-			io.WriteString(w, `{"acked":1}`)
+			_, _ = io.WriteString(w, `{"acked":1}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			w.WriteHeader(404)

@@ -48,7 +48,7 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if _, err := db.MigrateUp(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -128,7 +128,9 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 				raw := fixture
 				if stop && client != "antigravity" {
 					var p map[string]any
-					json.Unmarshal(raw, &p)
+					if err := json.Unmarshal(raw, &p); err != nil {
+						t.Fatal(err)
+					}
 					p["hook_event_name"] = stopEvent
 					raw, _ = json.Marshal(p)
 				}

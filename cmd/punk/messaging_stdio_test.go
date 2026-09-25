@@ -45,7 +45,7 @@ func TestMessagingStdioConfigAndEnvironment(t *testing.T) {
 			if _, err := db.MigrateUp(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			db.Close()
+			_ = db.Close()
 			config := filepath.Join(dir, "config.yaml")
 			// JSON strings are valid YAML scalars; quote platform-specific paths.
 			dsn, _ := json.Marshal(dbPath)
@@ -63,7 +63,7 @@ func TestMessagingStdioConfigAndEnvironment(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer cs.Close()
+			defer func() { _ = cs.Close() }()
 			res, err := cs.ListTools(ctx, nil)
 			if err != nil {
 				t.Fatal(err)

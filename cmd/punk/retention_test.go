@@ -19,7 +19,7 @@ func TestMessageRetentionMaintenanceEntrypoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if _, err := db.MigrateUp(ctx); err != nil {
 		t.Fatal(err)
 	}
