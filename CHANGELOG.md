@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.10.0 (2026-09-25)
+
+Agents registered to a namespace can now message each other. Eleven
+messaging tasks were implemented and reviewed; automated verification and
+remaining limits are recorded in
+`docs/reports/2026-09-25-agent-messaging-review.md`. This release adds
+migrations 0024 and 0025; back up the database before upgrading. Messaging
+is opt-in on the server and per client.
+
+### Added
+- Durable namespace-scoped agent inboxes with registered session addresses,
+  idempotent sends, threaded replies, owner-scoped delivery leases and
+  release, explicit ACK, unread count, sender receipt view and authorized
+  full-message recovery after ACK. Atomic unread cap defaults to 200;
+  hourly retention deletes ACKed messages after 30 days, never unread ones.
+  Idempotency lasts only while the message is retained, not forever.
+- Opt-in MCP messaging (`messaging.enabled` / `PUNK_MESSAGING`), shared by
+  HTTP and local stdio. Default lean schemas and guidance budget are
+  preserved; historical full-toolset member discovery remains available.
+  HTTP messaging routes retain namespace-grant checks independent of the
+  MCP tool switch. SSE checks credentials and grants on idle keepalives.
+- Shared inbox hooks for Claude Code, Codex, Cursor, Copilot CLI,
+  Antigravity, Hermes and new Cline target, using each client's verified
+  context/continuation fields. Client continuation caps, lease ownership,
+  ACK-after-handoff and untrusted envelopes. ACK is host handoff, not proof
+  of model completion. Hard total render caps include all envelope overhead;
+  below the minimum safe envelope, no message is delivered/ACKed. Bounded
+  leased-page allowlist scans avoid repeatedly fetching the same denied
+  page (`PUNK_MESSAGING_SCAN_LIMIT`: subprocess default 200, clamp 50-1000).
+- Pi/OpenCode idle-wake bridges and OpenClaw catch-up-only integration;
+  extensions require runtime `PUNK_MESSAGING=1`. No unsupported OpenClaw
+  wake or universal async-hook idle wake is claimed. Current OpenClaw
+  manifest format is generated with user-file preservation. OpenCode now
+  shares the renderer, owner-scoped leases and wake caps with the other
+  generated bridges; extension scans are fixed at five pages of 50.
+- Built-binary native-client and stdio gates, generated-JS behavioral
+  coverage, opt-in guidance, client matrix and owner-only rollout notes in
+  `docs/agent-messaging.md`. Real installed-client acceptance remains a
+  release gate, not inferred from automated mocks. The seven-client
+  installed-hook gate runs real `connect --messaging` output, not only
+  direct `hook inbox` commands. PowerShell and Postgres runtime coverage
+  remain unverified in this environment.
+
+### Upgrade notes
+- Migrations 0024 and 0025 apply through the normal owner-operated upgrade
+  path after backup. 0025 rollback preserves messages; 0024 rollback drops
+  them. No worker modifies or restarts the live coordination server.
+
 ## v1.9.0 (2026-09-08)
 
 The improvement pipeline includes twenty-three feature tasks and a final

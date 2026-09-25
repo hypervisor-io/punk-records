@@ -4,7 +4,7 @@ Punk Records is a self-hosted memory and coordination service for AI agents. It 
 
 Use it to help a coding assistant remember project decisions, let several agents work from shared knowledge, turn operational investigations into reusable procedures, or build an auditable agent workflow around your own tools.
 
-**Availability — v1.9.0, 8 September 2026:** "Core" means functionality present before the improvement pipeline; "Integrated" means the reviewed additions included in v1.9.0. All twenty-three feature tasks and the final acceptance gate are complete. The [pipeline acceptance report](reports/punk-improvement-pipeline.md) records verification and limitations at acceptance commit `b8738c3`. The installed version and enabled configuration determine what a deployment provides. Bounded reflect expansion and hierarchical summaries are Go-library opt-ins; they do not yet have dedicated CLI, MCP, or configuration switches.
+**Availability — v1.10.0, 25 September 2026:** "Core" means functionality present before the improvement pipeline; "Integrated" means reviewed additions included in v1.9.0 or v1.10.0. v1.10.0 adds opt-in agent-to-agent messaging (section 5); its [implementation review](reports/2026-09-25-agent-messaging-review.md) records automated verification and the limits still open (no live-client transcripts, Postgres and Windows runtime unverified). The installed version and enabled configuration determine what a deployment provides. Bounded reflect expansion and hierarchical summaries are Go-library opt-ins; they do not yet have dedicated CLI, MCP, or configuration switches.
 
 ## 1. Persistent project and team memory — Core
 
@@ -59,7 +59,7 @@ Connection targets in the current source include Claude Code, Cursor, OpenCode, 
 
 **Integrated:** Codex hook normalization, managed-integration reconciliation, namespace diagnostics, bounded guidance, safer default task waits, deduplicated context delivery, and the complete Codex 0.153.4 acceptance gate (native run evidence and the user-confirmed `terminal_title` mitigation are recorded in `docs/investigations/codex-0.153.4-terminal-spam.md`; the exact original renderer was not identified).
 
-## 5. Multi-agent work coordination — Core
+## 5. Multi-agent work coordination — Core; agent messaging Integrated (opt-in)
 
 - Register agents in a shared coordination namespace.
 - Define tasks, dependencies, and explicit completion criteria.
@@ -69,6 +69,10 @@ Connection targets in the current source include Claude Code, Cursor, OpenCode, 
 - Share handoffs, questions, answers, implementation evidence, and review feedback.
 - Wait for task, claim, and status changes through MCP or event streams.
 - Build a worker/reviewer workflow that requires reviewed completion before dependent work begins.
+
+- Send durable, namespace-scoped messages between registered agent sessions: idempotent sends, threaded replies, owner-scoped delivery leases, explicit ACK, unread counts and sender receipts.
+- Deliver messages into a running coding agent through its own hook events (Claude Code, Codex, Cursor, Copilot CLI, Antigravity, Hermes, Cline), or wake an idle session where the client supports it (Pi, OpenCode); OpenClaw catches up on its next prompt.
+- Enable per server (`messaging.enabled` or `PUNK_MESSAGING=1`) and per client (`punk connect <client> --messaging`); disabled deployments keep the unchanged lean tool set. Details and limits: [agent messaging](agent-messaging.md).
 
 Claims coordinate cooperating agents; workers must report their status and respect ownership. External coding workers are launched by their host or coordinator. Punk supplies the shared state and coordination tools.
 
