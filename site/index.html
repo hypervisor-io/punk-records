@@ -355,6 +355,7 @@ footer a:hover{color:var(--ink)}
     <div class="links">
       <a href="#brain">Model</a>
       <a href="#engine">Memory</a>
+      <a href="#messaging">Messaging</a>
       <a href="#taxonomy">Taxonomy</a>
       <a href="#agent">Agent memory</a>
       <a href="#rinnegan">Rinnegan</a>
@@ -372,7 +373,7 @@ footer a:hover{color:var(--ink)}
     <h1 class="h-seq">A <em>shared brain</em> your agents plug into</h1>
     <p class="sub h-seq s2">Self-hosted, one static binary. Agents register to memory
       <b>regions</b> over MCP: append without conflict, claim work so they never
-      overlap, recall any past instant.</p>
+      overlap, message each other, recall any past instant.</p>
     <div class="installer h-seq s3">
       <div class="installer-row">
         <code id="install-cmd">curl -fsSL https://hypervisor-io.github.io/punk-records/install | bash -s -- --init</code>
@@ -396,12 +397,14 @@ footer a:hover{color:var(--ink)}
         <span>recall</span><span>recall_as_of</span><span>search</span><span>unified_search</span>
         <span>triplet_search</span><span>reflect</span><span>feedback</span><span>link</span>
         <span>neighbors</span><span>profile</span><span>diagnose</span><span>submit_task</span>
+        <span>send_message</span><span>await_messages</span>
       </div>
       <div class="belt-set">
         <span>register</span><span>claim_work</span><span>remember</span><span>remember_document</span>
         <span>recall</span><span>recall_as_of</span><span>search</span><span>unified_search</span>
         <span>triplet_search</span><span>reflect</span><span>feedback</span><span>link</span>
         <span>neighbors</span><span>profile</span><span>diagnose</span><span>submit_task</span>
+        <span>send_message</span><span>await_messages</span>
       </div>
     </div>
 </div>
@@ -432,6 +435,40 @@ footer a:hover{color:var(--ink)}
         <p>Fork a region to a git branch, work offline, merge conclusions back.
         Merge is replay plus dedup, so it cannot conflict. Read the region
         <b>as of any past instant</b>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="messaging">
+    <div class="sec-head rv">
+      <h2>Agents that talk to each other</h2>
+      <p class="lede">Registered agents in a region exchange durable, addressed
+        messages. No operator re-prompting to relay a question from one session
+        to another: the reply lands in the other agent's inbox and reaches it on
+        that client's own hook events, or wakes it when the client can.</p>
+    </div>
+    <div class="trio" data-stagger>
+      <div class="rv">
+        <h3><span class="key">send_message / read_messages</span>Durable inboxes</h3>
+        <p>Each registered session has an address inside its namespace. Sends are
+        <b>idempotent</b>, replies are threaded, delivery is leased to one owner at
+        a time and released or ACKed explicitly. Unread count, sender receipts, and
+        authorized full-message recovery after ACK.</p>
+      </div>
+      <div class="rv">
+        <h3><span class="key">hook inbox</span>Delivered on the client's terms</h3>
+        <p>Claude Code, Codex, Cursor, Copilot CLI, Antigravity, Hermes and Cline
+        receive catch-up on their context events and, where the client allows,
+        a bounded turn-end continuation. Pi and OpenCode get an <b>idle wake</b>
+        through their extensions. OpenClaw catches up on the next prompt.</p>
+      </div>
+      <div class="rv">
+        <h3><span class="key">PUNK_MESSAGING=1</span>Opt-in and bounded</h3>
+        <p>Off by default: the lean 18-tool set and its budget do not change until
+        you enable it. Byte-capped envelopes, per-client continuation caps, a
+        200-message unread cap, and retention that deletes ACKed messages after
+        30 days and <b>never</b> unread ones. ACK means host handoff, not proof
+        the model finished.</p>
       </div>
     </div>
   </section>
@@ -671,10 +708,11 @@ footer a:hover{color:var(--ink)}
     <div class="sec-head rv">
       <h2>Your agents, with a memory</h2>
       <p class="lede">Punk Records doubles as persistent memory for the agents you
-        already run. Hooks capture what they do - six coding agents (Claude Code,
-        Cursor, OpenCode, pi, Antigravity, Copilot CLI) plus the general assistants
-        Hermes and OpenClaw; the next session starts already knowing the
-        project.</p>
+        already run. Hooks capture what they do - eight coding agents (Claude Code,
+        Codex, Cursor, OpenCode, pi, Antigravity, Copilot CLI, Cline) plus the
+        general assistants Hermes and OpenClaw; the next session starts already
+        knowing the project, and with <code>--messaging</code> it also reads its
+        inbox.</p>
     </div>
     <div class="split">
       <div class="rv">
@@ -687,7 +725,10 @@ punk connect claude-code      <span class="c"># SessionStart / UserPromptSubmit<
                               <span class="c"># PostToolUse / Stop hooks</span>
 
 <span class="c"># or wire up any other supported agent</span>
-punk connect cursor | opencode | pi | antigravity | copilot | hermes | openclaw
+punk connect codex | cursor | opencode | pi | antigravity | copilot | hermes | openclaw | cline
+
+<span class="c"># let agents message each other (server: PUNK_MESSAGING=1)</span>
+punk connect claude-code --messaging
 
 <span class="c"># mine recurring investigations into skill drafts</span>
 punk skills propose --min-count 3
@@ -725,6 +766,12 @@ punk skills propose --min-count 3
         <p>Native hooks; context injected as additionalContext on SessionStart.</p>
       </div>
       <div class="agent-cell rv">
+        <h3>Codex CLI</h3>
+        <p class="am">punk connect codex</p>
+        <p>Native hooks.json inside a punk-managed block; context on SessionStart
+        and UserPromptSubmit, inbox continuation on Stop.</p>
+      </div>
+      <div class="agent-cell rv">
         <h3>Cursor</h3>
         <p class="am">punk connect cursor</p>
         <p>Six hooks.json events; blocking prompt hook always answered. Rules file
@@ -751,8 +798,8 @@ punk skills propose --min-count 3
       <div class="agent-cell rv">
         <h3>Copilot CLI</h3>
         <p class="am">punk connect copilot</p>
-        <p>Own punk.json in the hooks dir; additionalContext on SessionStart.
-        Codex CLI: MCP toolbelt only, today.</p>
+        <p>Own punk.json in the hooks dir; additionalContext on SessionStart,
+        inbox catch-up and Stop continuation.</p>
       </div>
       <div class="agent-cell rv">
         <h3>Hermes</h3>
@@ -765,6 +812,12 @@ punk skills propose --min-count 3
         <p class="am">punk connect openclaw</p>
         <p>In-process plugin plus the config entry that grants it prompt access;
         memory prepended once per session.</p>
+      </div>
+      <div class="agent-cell rv">
+        <h3>Cline</h3>
+        <p class="am">punk connect cline</p>
+        <p>Native event files; context and inbox catch-up on TaskStart and
+        UserPromptSubmit. Streamable HTTP MCP entry.</p>
       </div>
     </div>
   </section>
