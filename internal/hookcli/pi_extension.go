@@ -12,11 +12,14 @@ const piExtensionMarker = "// managed by punk connect pi"
 
 // piExtensionTemplate is the full source ConnectPi writes for the pi
 // coding agent (github.com/earendil-works/pi, package
-// @mariozechner/pi-coding-agent, pi.dev), with exactly one substitution
-// point: the PUNK_URL fallback default (see punkServerURL below), rendered
-// via jsStringLiteral (opencode_plugin.go) so a serverURL containing a
-// quote or backslash can never break out of the string literal it's
-// spliced into.
+// @mariozechner/pi-coding-agent, pi.dev), with four substitution points,
+// in order of appearance: the PUNK_URL fallback default (see punkServerURL
+// below), the NUL escape for the fallback prompt id, the agent-messaging
+// bridge (piMessagingBridgeJS), and the optional baked namespace override.
+// Every string is rendered via jsStringLiteral (opencode_plugin.go) or is
+// generated code that contains no unescaped verbs, so a serverURL
+// containing a quote or backslash can never break out of the string
+// literal it's spliced into.
 //
 // Sources (fetched directly, not guessed - re-check if pi's extension API
 // changes): https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/docs/extensions.md
@@ -28,6 +31,7 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     (project-local) for auto-discovery." A plain "punk-memory.ts"
 //     directly in either directory matches the "*.ts" auto-discovery
 //     pattern, so no index.ts subdirectory is needed.
+//
 //   - Module shape: an extension exports a default factory function that
 //     receives ExtensionAPI - a default export shaped like
 //     "export default function (pi) {...}" - and its factory "can be
@@ -51,11 +55,13 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     this template reads process.env directly with no "typeof process
 //     !== undefined" hedge the way opencode_plugin.go's punkServerURL
 //     needs for its Bun-or-Node ambiguity.
+//
 //   - pi.on(eventName, handler): docs describe this plainly as "Subscribe
 //     to events" - registered directly on the pi API object passed into
 //     the factory;
 //     unlike OpenCode's plugin (which returns a Hooks object), pi
 //     extensions call pi.on(...) as a side effect of running the factory.
+//
 //   - Session start: "session_start" - docs: "Fired when a session is
 //     started, loaded, or reloaded." - fires with event.reason set to one
 //     of startup, reload, new, resume, or fork (the docs' code comment
@@ -67,10 +73,12 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     capture is replay-deduped per key, per README's agent-memory
 //     section), and staying inclusive is simpler and strictly safer than
 //     guessing which reasons "really" mean a fresh session.
+//
 //   - Session id / cwd: not carried on most event objects themselves -
 //     every handler below reads "ctx.sessionManager.getSessionId()" and
 //     ctx.cwd off ctx (the second handler argument, per
 //     ExtensionContext's documented shape), not off the event itself.
+//
 //   - User prompt capture: "input" - "event.text - raw input (before
 //     skill/template expansion)", "event.source -
 //     'interactive' (typed), 'rpc' (API), or 'extension'". Per docs'
@@ -93,6 +101,7 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     (fnv1a hash, NUL-separator join) already used by
 //     opencode_plugin.go's chat.message handler and hookcli's own
 //     promptIDFallback (normalize.go).
+//
 //   - Tool result capture: "tool_result" fires with event.toolName,
 //     event.toolCallId, event.input, event.content, event.details,
 //     event.isError, and event.usage (the docs' code comment lists just
@@ -101,6 +110,7 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     LLM sees it; this template
 //     returns undefined (implicitly, by never returning) so tool output is
 //     never altered - it only observes.
+//
 //   - Session end: pi has no single event named like Claude Code's "Stop"
 //     or OpenCode's "session.idle". "agent_settled" - docs: "Use
 //     agent_settled for status integrations that need to know Pi will not
@@ -123,6 +133,7 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     extractAssistantText below joins every {type:"text", text: string}
 //     part's text with "\n", mirroring OpenCode's own text-part-joining
 //     logic in its chat.message handler.
+//
 //   - Context injection: pi has no dedicated "session start" context hook
 //     either. "before_agent_start" - "Fired after user submits prompt,
 //     before agent loop" - is the closest analog to OpenCode's
@@ -137,6 +148,58 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     gated to fire at most once per session (on that session's first
 //     submitted prompt) rather than re-fetching context on every
 //     subsequent prompt.
+//
+//   - Agent messaging bridge (task M8, opt-in PUNK_MESSAGING=1), verified
+//     2026-09-25 against the same docs page plus the exact type sources it
+//     now points at:
+//     https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/core/extensions/types.ts
+//     (ExtensionAPI.sendMessage/sendUserMessage signatures, event result
+//     types, ExtensionContext incl. isIdle/hasPendingMessages and
+//     ReadonlySessionManager incl. getSessionId),
+//     .../src/core/messages.ts (CustomMessage shape) and
+//     .../src/core/session-manager.ts (UUIDv7 session ids persisted in the
+//     session header, assertValidSessionId charset [A-Za-z0-9._-]).
+//     Key corrections vs the plan's 2026-09-25 wording, all evidence in
+//     /research/extension-clients/pi (punk-agent-messaging namespace):
+//
+//   - pi.sendMessage does NOT take plain text. Its first argument is
+//     an object Pick<CustomMessage, "customType"|"content"|"display"|
+//     "details">; options are {triggerTurn?, deliverAs?: "steer"|
+//     "followUp"|"nextTurn"}. It returns void: a synchronous enqueue
+//     with no completion signal, so the bridge ACKs after the enqueue
+//     call returns (host handoff, NOT model completion) and defers
+//     further delivery until agent_settled - documented in
+//     docs/agent-messaging.md.
+//
+//   - The docs' "Respect the runtime lifecycle" rule forbids sockets,
+//     watchers or timers in the factory: the bridge's SSE listener and
+//     registration retry sleeps start only from the session_start
+//     handler and are torn down by an idempotent session_shutdown
+//     handler (session_shutdown fires for reason quit|reload|new|
+//     resume|fork; reload replaces the whole runtime).
+//
+//   - Idle authority: agent_settled (final, notification-only) marks
+//     idle; agent_end may re-fire via auto-retry/compaction/queued
+//     work and is deliberately NOT an idle marker. ctx.isIdle() is
+//     consulted at bind time to resolve the initial tri-state and is
+//     not available inside the SSE-driven drain, so busy/idle is
+//     otherwise event-driven; unknown (null) defers delivery.
+//
+//   - Catch-up on a user turn rides before_agent_start's documented
+//     BeforeAgentStartEventResult.message return (a CustomMessage
+//     pick appended to the run), not session_start/turn_start, which
+//     are notification-only and cannot carry content. turn_start is
+//     wired purely as a busy marker (it also covers runs started by
+//     the bridge's own sendMessage wake, which may not fire
+//     before_agent_start).
+//
+//   - Delivery uses the M5 envelope (inboxRendererJS, byte-identical
+//     to hookcli.RenderInbox, pinned by inbox_render_parity_test.go)
+//     and the M10 delivery lease: every fetch carries lease_seconds
+//     and leased_by, ACKs carry the same owner, and the inline
+//     before_agent_start injection and the SSE drain are different
+//     consumers whose overlapping fetches the lease keeps from
+//     double-delivering.
 //
 // Hook classification - which handlers await their network call and which
 // don't (mirrors opencode_plugin.go's own "Hook classification" doc
@@ -177,7 +240,14 @@ const piExtensionTemplate = piExtensionMarker + `
 // punk-records server as Claude-shaped hook envelopes (POST
 // /v1/agent/hooks) and injects that project's stored memory into the
 // model's system prompt on the first turn of each session (GET
-// /v1/agent/context).
+// /v1/agent/context). With PUNK_MESSAGING=1 it additionally binds this
+// session to the punk messaging address pi:<session_id>, registers it as
+// a namespace member, listens for unread agent messages, wakes an idle
+// session through pi.sendMessage({deliverAs:"followUp", triggerTurn:
+// true}) and injects the inbox into a starting turn through the
+// before_agent_start message return (verified against
+// .../src/core/extensions/types.ts, fetched 2026-09-25; see
+// /research/extension-clients/pi).
 //
 // Sources (accurate as of writing - re-check if pi's extension API
 // changes): https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/docs/extensions.md
@@ -232,7 +302,7 @@ const piExtensionTemplate = piExtensionMarker + `
 // case the docs don't promise anything about - a handler that never
 // resolves, since no async-handler timeout contract is documented.
 
-export default function (pi) {
+export default function punkPiExtension(pi) {
   const injectedSessions = new Set()
   let lastAssistantText = ""
   let warnedEmptySessionID = false
@@ -355,6 +425,14 @@ export default function (pi) {
     return ""
   }
 
+  // ---- punk agent-messaging bridge (opt-in: PUNK_MESSAGING=1) ----
+  // Spliced in full by piMessagingBridgeJS (pi_extension.go): the shared
+  // M5 envelope renderer plus the bind/register/SSE/deliver machinery.
+  // Everything below this point that references punk* messaging state
+  // lives in that splice; see the doc comment above the template for the
+  // verified API contract it implements.
+%s
+
   // OBSERVATIONAL: nothing in the running session is waiting on this
   // capture, so postHook(...) is deliberately NOT awaited
   // (fire-and-forget). punkFetch never rejects (see above), so there is
@@ -367,6 +445,11 @@ export default function (pi) {
         cwd: cwdOf(ctx),
         source: "pi",
       })
+      // Messaging bind: resolves the initial busy state from ctx.isIdle()
+      // and starts the (fire-and-forget) registration retry loop, which
+      // is the only place long-lived work (SSE listener, retry sleeps)
+      // starts - per pi's runtime-lifecycle rule, never in the factory.
+      punkBindSession(sessionIdOf(ctx), ctx)
     } catch (err) {
       console.error("punk connect pi: session_start hook failed:", err && err.message ? err.message : err)
     }
@@ -379,6 +462,12 @@ export default function (pi) {
   // translation applies to its synthetic/ignored parts (opencode_plugin.go).
   pi.on("input", async (event, ctx) => {
     try {
+      // A submitted input means a run is imminent: busy for the messaging
+      // bridge regardless of source (a synthetic sendUserMessage from
+      // ANOTHER extension starts a real turn too; the bridge's own
+      // sendMessage deliveries never fire "input" at all). Marked before
+      // the capture exclusion below so every source counts.
+      punkMarkBusy(sessionIdOf(ctx))
       const source = event && event.source
       if (source === "extension") {
         return
@@ -442,6 +531,32 @@ export default function (pi) {
     }
   })
 
+  // BUSY MARKER ONLY (no capture - turn_start has no Claude Code hook
+  // equivalent, like turn_end). Wired for the messaging bridge: a turn
+  // starting means the session is busy, including runs started by the
+  // bridge's own sendMessage wake, which may not pass through
+  // before_agent_start. No network call at all.
+  pi.on("turn_start", (event, ctx) => {
+    try {
+      punkMarkBusy(sessionIdOf(ctx))
+    } catch (err) {
+      console.error("punk connect pi: turn_start busy mark failed:", err && err.message ? err.message : err)
+    }
+  })
+
+  // MESSAGING TEARDOWN (no capture). session_shutdown fires for reason
+  // quit|reload|new|resume|fork before the runtime is replaced or the
+  // process exits; the unbind is idempotent and aborts every timer,
+  // sleep and SSE connection the bridge owns for this session, and the
+  // id is never rebound in this runtime. No network call at all.
+  pi.on("session_shutdown", (event, ctx) => {
+    try {
+      punkUnbindSession(sessionIdOf(ctx))
+    } catch (err) {
+      console.error("punk connect pi: session_shutdown unbind failed:", err && err.message ? err.message : err)
+    }
+  })
+
   // OBSERVATIONAL (see session_start's comment above): not awaited.
   // agent_settled fires once pi has settled and will not continue
   // automatically - the closest pi analog to Claude Code's Stop /
@@ -460,6 +575,12 @@ export default function (pi) {
         cwd: cwdOf(ctx),
         source: "pi",
       })
+      // Authoritative idle for the messaging bridge: agent_settled is
+      // final (pi will not continue automatically), unlike agent_end
+      // which may re-fire via auto-retry, compaction or queued
+      // follow-ups. Marks idle and flushes anything that deferred while
+      // busy or unknown (fire-and-forget, like the capture above).
+      punkMarkIdle(sessionIdOf(ctx))
     } catch (err) {
       console.error("punk connect pi: agent_settled hook failed:", err && err.message ? err.message : err)
     }
@@ -472,36 +593,60 @@ export default function (pi) {
   // experimental.chat.system.transform is gated (opencode_plugin.go) -
   // context is fetched and appended to the system prompt once per
   // session, on that session's first submitted prompt, not re-fetched on
-  // every subsequent prompt.
+  // every subsequent prompt. The messaging catch-up fetch (M8) is NOT
+  // once-per-session: unread agent messages ride every turn, rendered by
+  // the shared M5 envelope into the documented
+  // BeforeAgentStartEventResult.message return value.
   pi.on("before_agent_start", async (event, ctx) => {
     try {
       const sessionID = sessionIdOf(ctx)
-      if (!sessionID || injectedSessions.has(sessionID)) {
+      // A run is starting: busy for the bridge, before the inbox fetch,
+      // so an SSE hint racing this handler defers instead of waking.
+      punkMarkBusy(sessionID)
+      if (!sessionID) {
         return undefined
       }
-      // Marked injected BEFORE the fetch, not after a successful response
-      // - deliberate tradeoff, same as opencode_plugin.go's own
-      // experimental.chat.system.transform: if this request fails
-      // (timeout, network error), injection is disabled for the REST of
-      // this session rather than retried on the next turn, so one
-      // transient failure never causes the 2-second stall to repeat on
-      // every subsequent turn.
-      injectedSessions.add(sessionID)
-      const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(cwdOf(ctx)))
-      if (data && typeof data.context === "string" && data.context.length > 0) {
-        const base = event && event.systemPrompt
-        if (typeof base !== "string" || base.length === 0) {
-          // event.systemPrompt is documented as always populated on
-          // before_agent_start, but if a future pi release ever omits or
-          // empties it, "" + "\n\n" + data.context would silently BECOME
-          // the entire system prompt for this turn instead of being
-          // appended to it - fail safe instead: no base prompt means no
-          // injection, never a punk-only system prompt.
-          return undefined
+      let systemPromptResult
+      if (!injectedSessions.has(sessionID)) {
+        // Marked injected BEFORE the fetch, not after a successful
+        // response - deliberate tradeoff, same as opencode_plugin.go's
+        // own experimental.chat.system.transform: if this request fails
+        // (timeout, network error), injection is disabled for the REST
+        // of this session rather than retried on the next turn, so one
+        // transient failure never causes the 2-second stall to repeat on
+        // every subsequent turn.
+        injectedSessions.add(sessionID)
+        const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(cwdOf(ctx)))
+        if (data && typeof data.context === "string" && data.context.length > 0) {
+          const base = event && event.systemPrompt
+          if (typeof base === "string" && base.length > 0) {
+            // event.systemPrompt is documented as always populated on
+            // before_agent_start, but if a future pi release ever omits
+            // or empties it, "" + "\n\n" + data.context would silently
+            // BECOME the entire system prompt for this turn instead of
+            // being appended to it - fail safe instead: no base prompt
+            // means no injection, never a punk-only system prompt.
+            systemPromptResult = base + "\n\n" + data.context
+          }
         }
-        return { systemPrompt: base + "\n\n" + data.context }
       }
-      return undefined
+      // Messaging catch-up (M8): fetch the leased unread set and render
+      // it into this turn. Delivered ids are only marked (pending ACK):
+      // the ACK rides the next observed fetch - by then the turn this
+      // message rode has actually run - so nothing is ever ACKed for a
+      // return value the host dropped.
+      const messageResult = await punkInboxInjection(sessionID, ctx)
+      if (systemPromptResult === undefined && messageResult === undefined) {
+        return undefined
+      }
+      const out = {}
+      if (systemPromptResult !== undefined) {
+        out.systemPrompt = systemPromptResult
+      }
+      if (messageResult !== undefined) {
+        out.message = messageResult
+      }
+      return out
     } catch (err) {
       console.error("punk connect pi: before_agent_start context injection failed:", err && err.message ? err.message : err)
       return undefined
@@ -614,8 +759,525 @@ var nulJSStringLiteral = func() string {
 }()
 
 // piExtensionContentNS renders the extension with the server URL fallback,
-// NUL escape for prompt identity, and optional project namespace baked in.
-// An empty namespace lets the extension derive it per session.
+// the full agent-messaging bridge, the NUL escape for prompt identity, and
+// the optional project namespace baked in. An empty namespace lets the
+// extension derive it per session. Verb order in the template is serverURL,
+// bridge, NUL escape, namespace, and the arguments follow it.
 func piExtensionContentNS(serverURL, namespace string) string {
-	return fmt.Sprintf(piExtensionTemplate, jsStringLiteral(serverURL), nulJSStringLiteral, jsStringLiteral(namespace))
+	return fmt.Sprintf(piExtensionTemplate, jsStringLiteral(serverURL), piMessagingBridgeJS(),
+		nulJSStringLiteral, jsStringLiteral(namespace))
+}
+
+// piBridgeCoreJS is the pi-specific half of the agent-messaging bridge:
+// everything except the shared envelope renderer (inboxRendererJS). It is
+// a plain raw-string constant - no fmt verbs, no backticks, no literal
+// percent characters - because it is spliced into piExtensionTemplate,
+// which fmt.Sprintf renders. The design mirrors the reviewed OpenCode
+// bridge (opencode_plugin.go) and deliberately re-applies every fix from
+// that review: registration is confirmed (never assumed) before any SSE
+// listener or delivery starts; SSE reconnects on a bounded exponential
+// backoff that only resets after a connection actually delivered bytes,
+// with connect and idle-heartbeat watchdogs; every timer and sleep is
+// cancellable on unbind; delivered-but-unacked ids are re-acked without
+// re-prompting; a session whose busy state is unknown defers delivery
+// instead of guessing idle. The two pi-specific deviations, both forced
+// by the verified API (see the template's doc comment):
+//   - delivery is pi.sendMessage's synchronous void enqueue, so the ACK
+//     after it records host handoff, not model completion, and only ONE
+//     message is enqueued per drain (the rest defer to agent_settled);
+//   - turn-start catch-up injects through before_agent_start's message
+//     return value, and its ACK is deferred to the next observed fetch
+//     (the turn has then actually run) instead of acking inline.
+const piBridgeCoreJS = `
+  // ---- punk agent-messaging bridge (opt-in: PUNK_MESSAGING=1) ----
+  // The client machinery - leased fetch passes (with the allowlist
+  // starvation fix), owner ACKs with partial-success handling, releases,
+  // the wake cap, and the scheduled re-acquire/re-ack and drain retry -
+  // is the shared inboxBridgeCoreJS spliced in BEFORE this block. What
+  // stays here is pi-specific: binding, the confirmed-registration loop,
+  // the SSE listener, the tri-state busy machine, the sendMessage wake,
+  // and the before_agent_start injection.
+  const punkMessagingEnabled = !!(process.env && process.env.PUNK_MESSAGING === "1")
+  const punkSessions = new Map()
+  const punkDeletedSessions = new Set()
+  // SSE watchdogs and backoff mirror the reviewed OpenCode bridge; the
+  // env overrides exist purely so behavioral tests can run fast.
+  const punkBackoffBase = punkInboxEnvInt("PUNK_MESSAGING_BACKOFF_MS", 500)
+  const punkBackoffMax = 30000
+  const punkConnectTimeoutMs = punkInboxEnvInt("PUNK_MESSAGING_CONNECT_TIMEOUT_MS", 10000)
+  const punkIdleTimeoutMs = punkInboxEnvInt("PUNK_MESSAGING_IDLE_TIMEOUT_MS", 45000)
+  let punkSendWarned = false
+
+  function punkSessionState(sessionID) {
+    if (!sessionID || punkDeletedSessions.has(sessionID)) return null
+    let st = punkSessions.get(sessionID)
+    if (st) return st
+    st = punkInboxState(sessionID, "pi")
+    st.busy = null
+    st.delivering = false
+    st.drainQueued = false
+    st.registered = false
+    st.registering = false
+    st.listening = false
+    st.ns = ""
+    st.backoff = punkBackoffBase
+    punkSessions.set(sessionID, st)
+    return st
+  }
+
+  // Identity guard after every await: results are never applied to a
+  // deleted, unbound or replaced session.
+  function punkAlive(st, sessionID) {
+    return (
+      st !== undefined &&
+      st !== null &&
+      !st.abortController.signal.aborted &&
+      punkSessions.get(sessionID) === st
+    )
+  }
+
+  // Namespace for messaging: PUNK_NAMESPACE env, the baked --project
+  // override, else the server's cwd lookup. Only successes cache (a
+  // failure retries on the next trigger); unlike the punkNamespace()
+  // helper below there is no "agent-default" fallback, because a wrong
+  // namespace would silently orphan the session's inbox.
+  let punkMsgNamespaceCache = ""
+  async function punkMessagingResolveNamespace(ctx) {
+    if (punkMsgNamespaceCache) return punkMsgNamespaceCache
+    const env = process.env && process.env.PUNK_NAMESPACE
+    if (env) {
+      punkMsgNamespaceCache = env
+      return env
+    }
+    if (PUNK_NAMESPACE_OVERRIDE) {
+      punkMsgNamespaceCache = PUNK_NAMESPACE_OVERRIDE
+      return PUNK_NAMESPACE_OVERRIDE
+    }
+    const data = await punkFetch("/v1/agent/namespace?cwd=" + encodeURIComponent((ctx && ctx.cwd) || ""))
+    if (data && typeof data.namespace === "string" && data.namespace) {
+      punkMsgNamespaceCache = data.namespace
+    }
+    return punkMsgNamespaceCache
+  }
+
+  function punkMarkBusy(sessionID) {
+    const st = punkSessions.get(sessionID)
+    if (st) st.busy = true
+  }
+
+  // Authoritative idle: agent_settled (or an observed ctx.isIdle() true
+  // at bind time). Marks idle and flushes anything deferred while busy
+  // or unknown.
+  function punkMarkIdle(sessionID) {
+    const st = punkSessions.get(sessionID)
+    if (!st) return
+    st.busy = false
+    punkRequestDrain(sessionID)
+  }
+
+  function punkUnbindSession(sessionID) {
+    if (!sessionID) return
+    punkDeletedSessions.add(sessionID)
+    const st = punkSessions.get(sessionID)
+    punkSessions.delete(sessionID)
+    if (st) {
+      try {
+        st.abortController.abort()
+      } catch (err) {
+        // abort() on an already-aborted controller is a no-op.
+      }
+    }
+  }
+
+  // Bind: resolve the tri-state busy from ctx.isIdle() when the host
+  // offers it (absent leaves null = unknown = defer), then start the
+  // registration flow. Inert when messaging is off, when the host has no
+  // sendMessage (older pi), or for an unbound session id.
+  function punkBindSession(sessionID, ctx) {
+    if (!punkMessagingEnabled || !sessionID || punkDeletedSessions.has(sessionID)) return
+    if (typeof pi.sendMessage !== "function") {
+      if (!punkSendWarned) {
+        punkSendWarned = true
+        console.error("punk connect pi: this pi build has no pi.sendMessage; the messaging bridge stays inert")
+      }
+      return
+    }
+    const st = punkSessionState(sessionID)
+    if (!st) return
+    if (ctx && typeof ctx.isIdle === "function") {
+      try {
+        const idle = ctx.isIdle()
+        if (idle === true) st.busy = false
+        else if (idle === false) st.busy = true
+      } catch (err) {
+        // Leave the state as-is; unknown defers.
+      }
+    }
+    if (st.registered || st.registering) return
+    st.registering = true
+    punkRegisterSession(sessionID, st, ctx)
+  }
+
+  // Registration is confirmed, not assumed: namespace resolution and the
+  // member POST retry on bounded exponential backoff until the server
+  // answers {status:"registered"}. Only a CONFIRMED registration starts
+  // the SSE listener and the first drain. Cancelled instantly by unbind.
+  async function punkRegisterSession(sessionID, st, ctx) {
+    try {
+      let attempt = 0
+      while (punkAlive(st, sessionID) && !st.registered) {
+        const ns = await punkMessagingResolveNamespace(ctx)
+        if (!punkAlive(st, sessionID) || st.registered) return
+        if (ns) {
+          const res = await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/members", {
+            method: "POST",
+            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
+          })
+          if (!punkAlive(st, sessionID) || st.registered) return
+          if (res && res.status === "registered") {
+            st.registered = true
+            st.registering = false
+            st.ns = ns
+            if (!st.listening) {
+              st.listening = true
+              punkListenSSE(sessionID, st, ns)
+            }
+            punkRequestDrain(sessionID)
+            return
+          }
+          console.error("punk connect pi: messaging registration not confirmed for " + st.agent + ", retrying")
+        } else {
+          console.error("punk connect pi: messaging namespace resolution failed for " + st.agent + ", retrying")
+        }
+        await punkInboxCancellableSleep(st, Math.min(punkBackoffBase * Math.pow(2, attempt), punkBackoffMax))
+        attempt++
+      }
+    } catch (err) {
+      console.error("punk connect pi: messaging registration loop failed:", err && err.message ? err.message : err)
+    } finally {
+      if (!st.registered) st.registering = false
+    }
+  }
+
+  // Drain scheduling: a trigger mid-drain queues exactly one follow-up
+  // drain (never lost, never stacked); busy or unknown sessions defer -
+  // their messages stay unread server-side until an authoritative idle.
+  function punkRequestDrain(sessionID) {
+    const st = punkSessions.get(sessionID)
+    if (!st || !st.registered) return
+    if (st.delivering) {
+      st.drainQueued = true
+      return
+    }
+    if (st.busy !== false) return
+    punkDeliverSession(sessionID)
+  }
+
+  // punkReadWithWatchdog races one reader.read() against the idle
+  // heartbeat timeout (the server pings every 15s; silence past the
+  // watchdog means the stream stalled: cancel and reconnect).
+  function punkReadWithWatchdog(reader, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let timer = null
+      const settle = (fn, arg) => {
+        if (timer === null) return
+        clearTimeout(timer)
+        timer = null
+        fn(arg)
+      }
+      timer = setTimeout(() => settle(reject, new Error("punk SSE idle watchdog")), timeoutMs)
+      reader.read().then(
+        (chunk) => settle(resolve, chunk),
+        (err) => settle(reject, err)
+      )
+    })
+  }
+
+  function punkHandleSSEBlock(sessionID, block) {
+    let name = ""
+    const lines = block.split("\n")
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (line.charCodeAt(0) === 58) continue
+      if (line.indexOf("event:") === 0) {
+        name = line.slice(6).trim()
+      }
+    }
+    if (name !== "inbox") return
+    if (!punkSessions.has(sessionID)) return
+    punkRequestDrain(sessionID)
+  }
+
+  // One SSE connection per registered session, reconnecting until
+  // unbind. Each connection has its OWN AbortController (watchdogs kill
+  // one connection, not the session); the connect phase is bounded by
+  // punkConnectTimeoutMs, the read phase by punkIdleTimeoutMs; non-OK
+  // bodies are cancelled and count as failed attempts on the SAME
+  // backoff as drops, which resets only after bytes actually arrived.
+  // Never rejects.
+  async function punkListenSSE(sessionID, st, ns) {
+    const path = punkInboxMessagesBase(ns) + "/events?agent=" + encodeURIComponent(st.agent)
+    while (punkAlive(st, sessionID)) {
+      const conn = new AbortController()
+      const onSessionAbort = () => {
+        try {
+          conn.abort()
+        } catch (err) {}
+      }
+      if (st.abortController.signal.aborted) return
+      st.abortController.signal.addEventListener("abort", onSessionAbort)
+      let res = null
+      const connectTimer = setTimeout(() => {
+        try {
+          conn.abort()
+        } catch (err) {}
+      }, punkConnectTimeoutMs)
+      try {
+        const headers = { Accept: "text/event-stream" }
+        const key = punkAPIKey()
+        if (key) headers["Authorization"] = "Bearer " + key
+        res = await fetch(punkServerURL() + path, { headers, signal: conn.signal })
+        if (!res.ok) {
+          if (res.body && typeof res.body.cancel === "function") {
+            res.body.cancel().catch(() => {})
+          }
+          res = null
+        }
+      } catch (err) {
+        res = null
+      } finally {
+        clearTimeout(connectTimer)
+      }
+      if (!res || !res.body) {
+        st.abortController.signal.removeEventListener("abort", onSessionAbort)
+        try {
+          conn.abort()
+        } catch (err) {}
+        if (!punkAlive(st, sessionID)) return
+        await punkInboxCancellableSleep(st, st.backoff)
+        st.backoff = Math.min(st.backoff * 2, punkBackoffMax)
+        continue
+      }
+      let gotBytes = false
+      try {
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ""
+        for (;;) {
+          if (st.abortController.signal.aborted || !punkAlive(st, sessionID)) {
+            try {
+              reader.cancel().catch(() => {})
+            } catch (err) {}
+            break
+          }
+          let chunk = null
+          try {
+            chunk = await punkReadWithWatchdog(reader, punkIdleTimeoutMs)
+          } catch (err) {
+            try {
+              reader.cancel().catch(() => {})
+            } catch (err2) {}
+            break
+          }
+          if (!chunk || chunk.done) break
+          if (!gotBytes) {
+            gotBytes = true
+            st.backoff = punkBackoffBase
+          }
+          buf += decoder.decode(chunk.value, { stream: true })
+          let sep = buf.indexOf("\n\n")
+          while (sep >= 0) {
+            const block = buf.slice(0, sep)
+            buf = buf.slice(sep + 2)
+            punkHandleSSEBlock(sessionID, block)
+            sep = buf.indexOf("\n\n")
+          }
+        }
+      } catch (err) {
+        // Fall through to the reconnect path.
+      } finally {
+        st.abortController.signal.removeEventListener("abort", onSessionAbort)
+        try {
+          conn.abort()
+        } catch (err) {}
+      }
+      if (!punkAlive(st, sessionID)) return
+      await punkInboxCancellableSleep(st, st.backoff)
+      if (!gotBytes) {
+        st.backoff = Math.min(st.backoff * 2, punkBackoffMax)
+      }
+    }
+  }
+
+  // Idle wake: one leased fetch pass, then enqueue exactly ONE message
+  // into the idle session through pi.sendMessage (object form: the
+  // verified ExtensionAPI signature; content is the shared M5 envelope).
+  // The call is synchronous and void - the ACK after it records HOST
+  // HANDOFF, not model completion - and the session is marked busy until
+  // agent_settled, so remaining messages defer to the next drain instead
+  // of stacking turns. A failed enqueue ACKs nothing; a failed or
+  // partial ACK (the server answers {acked:n} with n < len, e.g. the
+  // lease expired) keeps the id pending and schedules the post-expiry
+  // re-acquire/re-ack - it is never thrown away. Denied rows are
+  // released at pass end so they stay visible to later events. Never
+  // rejects.
+  async function punkDeliverSession(sessionID) {
+    const st = punkSessions.get(sessionID)
+    if (!st || !st.registered || st.busy !== false || st.delivering) return
+    st.delivering = true
+    try {
+      const ns = st.ns || (await punkMessagingResolveNamespace(null))
+      if (!ns || !punkAlive(st, sessionID) || st.busy !== false) return
+      const pass = await punkInboxFetchPass(ns, st)
+      if (!pass) {
+        // Non-OK or dead fetch: one bounded retry instead of waiting for
+        // the next external hint.
+        punkInboxScheduleDrainRetry(st, () => punkRequestDrain(sessionID))
+        return
+      }
+      if (!punkAlive(st, sessionID)) return
+      if (pass.reack.length) {
+        const ok = await punkInboxAckIds(ns, st, pass.reack)
+        if (!ok) punkInboxScheduleReackRetry(ns, st)
+      }
+      if (pass.deniedCount > 0) {
+        console.error("punk connect pi: held back " + pass.deniedCount + " message(s) from senders outside PUNK_MESSAGING_FROM")
+      }
+      const toAck = []
+      for (const m of pass.deliver) {
+        if (st.busy !== false || !punkAlive(st, sessionID)) break
+        if (!punkInboxWakeAllowed(st)) break
+        const rend = punkRenderInbox(ns, st.agent, [m])
+        if (!rend.text) continue
+        let ok = false
+        try {
+          pi.sendMessage(
+            {
+              customType: "punk-inbox",
+              content: rend.text,
+              display: true,
+              details: { kind: "punk-inbox", namespace: ns, address: st.agent, ids: [m.id] },
+            },
+            { deliverAs: "followUp", triggerTurn: true }
+          )
+          ok = true
+        } catch (err) {
+          console.error("punk connect pi: sendMessage delivery failed:", err && err.message ? err.message : err)
+          ok = false
+        }
+        if (!ok) break
+        st.delivered.add(m.id)
+        toAck.push(m.id)
+        punkInboxRecordWake(st)
+        // A turn is expected: busy until agent_settled, and exactly one
+        // message per drain so a burst is delivered one turn at a time,
+        // in order.
+        st.busy = true
+        break
+      }
+      if (toAck.length && punkAlive(st, sessionID)) {
+        const ok = await punkInboxAckIds(ns, st, toAck)
+        if (!ok) {
+          // Pending ACK kept; the recurrent pass reacquires it after
+          // lease expiry.
+          punkInboxScheduleReackRetry(ns, st)
+        }
+      }
+      const leftoverDeliver = []
+      for (const m of pass.deliver) {
+        if (toAck.indexOf(m.id) < 0) leftoverDeliver.push(m.id)
+      }
+      const leftover = leftoverDeliver.concat(pass.denied)
+      if (leftover.length) await punkInboxReleaseIds(ns, st, leftover)
+      // Cap-suppressed backlog: one cancellable wake at the next window
+      // expiry, so the remaining messages deliver themselves when the
+      // window rolls instead of waiting for an unrelated event. Skipped
+      // when the break was busy-driven (agent_settled drains then) or
+      // when waking is disabled outright (cap 0: no timer can ever help).
+      if (leftoverDeliver.length > 0 && !punkInboxWakeAllowed(st)) {
+        punkInboxScheduleWakeRetry(st, punkInboxNextWakeDelayMs(st), () => punkRequestDrain(sessionID))
+      }
+    } catch (err) {
+      console.error("punk connect pi: messaging delivery failed:", err && err.message ? err.message : err)
+    } finally {
+      st.delivering = false
+      if (st.drainQueued) {
+        st.drainQueued = false
+        if (punkAlive(st, sessionID)) {
+          punkDeliverSession(sessionID)
+        }
+      }
+    }
+  }
+
+  // Turn-start catch-up (M8): one leased fetch pass inside
+  // before_agent_start, rendered into one CustomMessage returned as
+  // BeforeAgentStartEventResult.message - the only documented way an
+  // extension can add content to the run that is already starting
+  // (session_start and turn_start are notification-only). Delivered ids
+  // are only MARKED here and a bounded recurrent re-ack pass (paced by
+  // lease expiry, cancellable, self-terminating once pending empties)
+  // confirms the ACK afterwards. This is HOST HANDOFF under
+  // at-least-once semantics, and is NOT proof of consumption: the return
+  // value is the only delivery signal and the host exposes no completion
+  // callback, so the post-expiry ACK records that the text was handed to
+  // the session's turn, not that the model provably consumed it - a host
+  // that drops the return value can cause a redelivery. The auxiliary
+  // re-ACK and release calls are deliberately NOT awaited: this handler
+  // blocks the start of a user turn, and every extra awaited request
+  // could add another full punkFetch timeout to it. Returns undefined
+  // whenever there is nothing to inject (fail-open). Never rejects.
+  async function punkInboxInjection(sessionID, ctx) {
+    if (!punkMessagingEnabled) return undefined
+    const st = punkSessions.get(sessionID)
+    if (!st || !st.registered) return undefined
+    try {
+      const ns = st.ns || (await punkMessagingResolveNamespace(ctx))
+      if (!ns || !punkAlive(st, sessionID)) return undefined
+      const pass = await punkInboxFetchPass(ns, st)
+      if (!pass || !punkAlive(st, sessionID)) return undefined
+      if (pass.reack.length) {
+        punkInboxAckIds(ns, st, pass.reack).then((ok) => {
+          if (!ok && punkInboxStAlive(st)) punkInboxScheduleReackRetry(ns, st)
+        })
+      }
+      if (pass.denied.length) punkInboxReleaseIds(ns, st, pass.denied)
+      if (pass.deniedCount > 0) {
+        console.error("punk connect pi: held back " + pass.deniedCount + " message(s) from senders outside PUNK_MESSAGING_FROM")
+      }
+      if (!pass.deliver.length) return undefined
+      const rend = punkRenderInbox(ns, st.agent, pass.deliver)
+      if (!rend.text) {
+        punkInboxReleaseIds(ns, st, pass.deliver.map((m) => m.id))
+        return undefined
+      }
+      for (const m of rend.used) st.delivered.add(m.id)
+      const usedIds = rend.used.map((m) => m.id)
+      const leftover = []
+      for (const m of pass.deliver) {
+        if (usedIds.indexOf(m.id) < 0) leftover.push(m.id)
+      }
+      if (leftover.length) punkInboxReleaseIds(ns, st, leftover)
+      // Pending marks get the recurrent expiry pass (host handoff; see
+      // the comment above).
+      punkInboxScheduleReackRetry(ns, st)
+      return {
+        customType: "punk-inbox",
+        content: rend.text,
+        display: true,
+        details: { kind: "punk-inbox", namespace: ns, address: st.agent, ids: usedIds },
+      }
+    } catch (err) {
+      console.error("punk connect pi: inbox injection failed:", err && err.message ? err.message : err)
+      return undefined
+    }
+  }
+
+`
+
+// piMessagingBridgeJS renders the complete messaging-bridge splice: the
+// shared envelope renderer (byte-identical to hookcli.RenderInbox, see
+// inbox_renderjs.go) followed by the pi-specific machinery above.
+func piMessagingBridgeJS() string {
+	return inboxBridgeJS() + piBridgeCoreJS
 }

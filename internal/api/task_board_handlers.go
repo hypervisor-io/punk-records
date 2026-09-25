@@ -148,3 +148,30 @@ func taskStateValid(s string) bool {
 	}
 	return false
 }
+
+// handleNamespaceIndex is GET /v1/namespaces: the directory the operator
+// console lists before opening a board. It is the one /v1 route that
+// spans namespaces, so the A01 path hook cannot gate it; every row is
+// filtered here against the verified subject's read grant, exactly as a
+// GET of that namespace would be. ?tasks=1 keeps only namespaces that
+// carry /tasks facts.
+func (s *Server) handleNamespaceIndex(w http.ResponseWriter, r *http.Request) {
+	sums, err := s.mem.NamespaceSummaries(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	onlyTasks := r.URL.Query().Get("tasks") == "1"
+	subject := verifiedSubject(r)
+	out := make([]memory.NamespaceSummary, 0, len(sums))
+	for _, sum := range sums {
+		if onlyTasks && sum.Tasks == 0 {
+			continue
+		}
+		if !s.allowNS(r.Context(), subject, sum.Name, authz.OpRead) {
+			continue
+		}
+		out = append(out, sum)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"namespaces": out})
+}

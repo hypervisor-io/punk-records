@@ -93,6 +93,10 @@ func RenderPlanSkill(o SkillOpts) string {
 		"Description": desc,
 		"Marker":      SkillMarker,
 	})
+	if o.Messaging {
+		b.WriteString(messagingSkillSection(o))
+		b.WriteString("Create /tasks facts first, then send a task-linked message to the worker's registered session address. Messages notify; task facts and claims remain authoritative. Review code and tests yourself; receipt is not approval.\n")
+	}
 	return b.String()
 }
 

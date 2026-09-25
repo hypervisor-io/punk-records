@@ -116,11 +116,14 @@ func (g *boardGate) dump() []httpCall {
 // streamableBoardSession mounts the real server (with a live bus, so
 // await_tasks genuinely waits) on a disposable httptest StreamableHTTP
 // endpoint and connects a real client to it.
-func streamableBoardSession(t *testing.T) (*mcp.ClientSession, *bus.Bus, *boardGate) {
+func streamableBoardSession(t *testing.T, tweaks ...func(*Deps)) (*mcp.ClientSession, *bus.Bus, *boardGate) {
 	t.Helper()
 	deps, _ := newTestDeps(t)
 	b := bus.New()
 	deps.Bus = b
+	for _, tweak := range tweaks {
+		tweak(&deps)
+	}
 	srv := New(deps)
 	g := &boardGate{}
 	ts := httptest.NewServer(g.wrap(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)))

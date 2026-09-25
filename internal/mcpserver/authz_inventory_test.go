@@ -76,6 +76,8 @@ var toolPermissionInventory = map[string]authz.Op{
 	"diagnose":            authz.OpRead,
 	"list_tasks":          authz.OpRead,
 	"await_tasks":         authz.OpRead,
+	"read_messages":       authz.OpRead,
+	"await_messages":      authz.OpRead,
 	"list_claims":         authz.OpRead,
 	"list_region_members": authz.OpRead,
 	"reflect":             authz.OpRead,
@@ -92,6 +94,8 @@ var toolPermissionInventory = map[string]authz.Op{
 	"claim_work":        authz.OpWrite,
 	"release_work":      authz.OpWrite,
 	"register":          authz.OpWrite,
+	"send_message":      authz.OpWrite,
+	"ack_messages":      authz.OpWrite,
 }
 
 // resourcePermissionInventory classifies the subscribable resource
@@ -115,7 +119,7 @@ type mcpAuthzRig struct {
 	token string // alice: read+write on ns-a only
 }
 
-func mcpAuthzRigNew(t *testing.T, enforce bool) *mcpAuthzRig {
+func mcpAuthzRigNew(t *testing.T, enforce bool, configure ...func(*mcp.Server)) *mcpAuthzRig {
 	t.Helper()
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "a02mcp.db"))
 	if err != nil {
@@ -151,7 +155,8 @@ func mcpAuthzRigNew(t *testing.T, enforce bool) *mcpAuthzRig {
 	b := bus.New()
 	regStore := region.New(db, nil)
 	srv := New(Deps{
-		Ledger: ledger, Router: route.New(db, reg, ledger, nil, now),
+		MessagingEnabled: true, // exercise auth on the complete opt-in surface
+		Ledger:           ledger, Router: route.New(db, reg, ledger, nil, now),
 		Reg: reg, Mem: mem, Region: regStore, Bus: b,
 		LLM:              doneLLM{},
 		A2ARemotes:       []A2ARemote{{Name: "remote-a", Endpoint: "http://127.0.0.1:9/a2a", Token: "t"}},
@@ -159,6 +164,9 @@ func mcpAuthzRigNew(t *testing.T, enforce bool) *mcpAuthzRig {
 		DefaultNamespace: "agent-default",
 		DefaultBudget:    task.Budget{Tokens: 1000, ToolCalls: 10},
 	})
+	for _, f := range configure {
+		f(srv)
+	}
 	keys := api.NewKeys(db, now)
 	az := authz.New(db, nil)
 	if enforce {
@@ -279,6 +287,12 @@ func bAttempt(name string) map[string]any {
 		base["key"] = "/tasks/T1"
 	case "await_tasks":
 		base["timeout_seconds"] = 1
+	case "send_message":
+		base["recipient"], base["body"] = "other", "x"
+	case "ack_messages":
+		base["ids"] = []string{"x"}
+	case "await_messages":
+		base["timeout_seconds"] = 1
 	}
 	return base
 }
@@ -289,6 +303,7 @@ func bAttempt(name string) map[string]any {
 // external surface must be inventoried).
 func TestToolPermissionInventory(t *testing.T) {
 	deps, _ := newTestDeps(t)
+	deps.MessagingEnabled = true
 	deps.Bus = bus.New()
 	deps.LLM = doneLLM{}
 	deps.A2ARemotes = []A2ARemote{{Name: "remote-a", Endpoint: "http://127.0.0.1:9/a2a", Token: "t"}}

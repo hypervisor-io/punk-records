@@ -36,6 +36,7 @@ type Deps struct {
 	Reg              *registry.Registry
 	Mem              *memory.Store
 	Region           *region.Store        // nil disables region tools
+	MessagingEnabled bool                 // opt-in four message tools and lean member discovery
 	Bus              *bus.Bus             // nil disables resource subscriptions
 	A2ARemotes       []A2ARemote          // outbound delegation targets; empty disables the delegate tool
 	LLM              llm.Client           // nil disables the reflect tool (deterministic-first)
@@ -515,6 +516,9 @@ func New(d Deps) *mcp.Server {
 
 	if d.Region != nil {
 		registerRegionTools(s, d, nsr)
+		if d.MessagingEnabled {
+			registerMessagingTools(s, d, nsr)
+		}
 	}
 	if len(d.A2ARemotes) > 0 {
 		registerA2ATools(s, d)
@@ -523,7 +527,7 @@ func New(d Deps) *mcp.Server {
 		registerReflectTool(s, d, nsr)
 	}
 
-	applyToolset(s, d.Toolset)
+	applyToolset(s, d.Toolset, d.MessagingEnabled)
 	return s
 }
 

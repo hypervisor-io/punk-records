@@ -80,6 +80,21 @@ const hermesHookTimeoutSec = 10
 // living in the same mapping as the event keys and holding a completely
 // different element shape (name/url/events/secret_env).
 func ConnectHermes(configPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectHermes(configPath, punkPath, serverURL, false)
+}
+
+// ConnectHermesMessaging is ConnectHermes plus a punk hook inbox entry
+// (from punk connect hermes --messaging) on pre_llm_call only: that
+// event's flat {"context": ...} reply is Hermes' sole content-carrying
+// hook contract (hermes-agent.nousresearch.com/docs/user-guide/features/
+// hooks), and it fires before every model call, so one entry gives
+// per-turn catch-up. Hermes has no continuation or wake contract, so no
+// other event is wired for the inbox.
+func ConnectHermesMessaging(configPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectHermes(configPath, punkPath, serverURL, true)
+}
+
+func connectHermes(configPath, punkPath, serverURL string, messaging bool) (changed bool, err error) {
 	doc, existing, err := loadHermesConfig(configPath)
 	if err != nil {
 		return false, err
@@ -98,6 +113,14 @@ func ConnectHermes(configPath, punkPath, serverURL string) (changed bool, err er
 			return false, err
 		}
 		entries.Content = mergeHermesEntries(entries.Content, punkPath, command)
+	}
+	if messaging {
+		entries, err := hermesChildSequence(hooks, "pre_llm_call", configPath)
+		if err != nil {
+			return false, err
+		}
+		entries.Content = mergeHermesInboxEntries(entries.Content, punkPath,
+			punkInboxHookCommand(punkPath, "hermes", "context", "", serverURL, ""))
 	}
 
 	out, err := encodeHermesConfig(doc)
@@ -305,6 +328,28 @@ func hermesEntryNode(command string) *yaml.Node {
 			{Kind: yaml.ScalarNode, Tag: "!!int", Value: fmt.Sprint(hermesHookTimeoutSec)},
 		},
 	}
+}
+
+// mergeHermesInboxEntries is mergeHermesEntries for punk's INBOX entry:
+// stale entries are detected by isPunkManagedInbox (inbox_wire.go), not
+// isPunkManagedHermes, so the capture entry ("punk hook --from hermes")
+// and the inbox entry ("punk hook inbox --client hermes") on the same
+// pre_llm_call list never dedup each other.
+func mergeHermesInboxEntries(entries []*yaml.Node, punkPath, command string) []*yaml.Node {
+	kept := make([]*yaml.Node, 0, len(entries)+1)
+	for _, e := range entries {
+		if e == nil || e.Kind != yaml.MappingNode {
+			kept = append(kept, e)
+			continue
+		}
+		cmd := yamlMapValue(e, "command")
+		if cmd != nil && cmd.Kind == yaml.ScalarNode && cmd.Value != "" &&
+			isPunkManagedInbox(cmd.Value, punkPath, "hermes") {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return append(kept, hermesEntryNode(command))
 }
 
 // isPunkManagedHermesEntry reports whether entry is a punk-managed Hermes

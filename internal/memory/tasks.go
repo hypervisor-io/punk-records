@@ -112,11 +112,18 @@ func ParseTaskState(body string, attrs map[string]any) string {
 	return "pending"
 }
 
+// taskFactLimit caps the /tasks/ facts one board read pulls. Each task
+// costs two facts (the task and its status), and long-lived planning
+// namespaces run to several hundred tasks, so the old 1000 silently
+// truncated their boards: the cap is the safety valve, not the working
+// size.
+const taskFactLimit = 20000
+
 // ListTasks reads every live /tasks/<id> and /tasks/<id>/status fact in
 // a namespace and returns one row per id, sorted by id. A status without
 // a task fact still yields a row (empty title) so nothing is hidden.
 func (s *Store) ListTasks(ctx context.Context, ns string) ([]TaskRow, error) {
-	facts, err := s.Recall(ctx, ns, "/tasks/", 1000)
+	facts, err := s.recallPrefix(ctx, ns, "/tasks/", taskFactLimit)
 	if err != nil {
 		return nil, err
 	}

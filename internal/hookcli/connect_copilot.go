@@ -69,6 +69,23 @@ var copilotHookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUs
 // because Copilot requires one shared file the way Claude Code/Cursor/
 // Antigravity do.
 func ConnectCopilot(hooksPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectCopilot(hooksPath, punkPath, serverURL, false)
+}
+
+// ConnectCopilotMessaging is ConnectCopilot plus punk hook inbox entries
+// (from punk connect copilot --messaging): an inbox command on
+// SessionStart (--mode context, answered with the flat additionalContext
+// Copilot documents for that event) and on Stop (--mode continue,
+// answered with decision:"block" + reason). UserPromptSubmit deliberately
+// gets NO inbox entry: docs.github.com/en/copilot/reference/
+// hooks-reference (fetched 2026-09-25) states config-file hook output for
+// that event is dropped (modifiedPrompt is SDK-only), so nothing printed
+// there is ever delivered.
+func ConnectCopilotMessaging(hooksPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectCopilot(hooksPath, punkPath, serverURL, true)
+}
+
+func connectCopilot(hooksPath, punkPath, serverURL string, messaging bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -92,6 +109,17 @@ func ConnectCopilot(hooksPath, punkPath, serverURL string) (changed bool, err er
 			}
 		}
 		hooksAny[ev] = mergeCopilotEntries(hooksAny[ev], punkPath, command)
+	}
+	if messaging {
+		// Both events are in copilotHookEvents, so their shape was
+		// validated above. Inbox entries carry timeoutSec like the
+		// capture entries (mergeCopilotEntries); the detector is
+		// isPunkManagedInbox (inbox_wire.go), independent of
+		// isPunkManagedCopilot.
+		hooksAny["SessionStart"] = mergeInboxFlatEntries(hooksAny["SessionStart"], punkPath, "copilot",
+			map[string]any{"type": "command", "command": punkInboxHookCommand(punkPath, "copilot", "context", "", serverURL, ""), "timeoutSec": 10})
+		hooksAny["Stop"] = mergeInboxFlatEntries(hooksAny["Stop"], punkPath, "copilot",
+			map[string]any{"type": "command", "command": punkInboxHookCommand(punkPath, "copilot", "continue", "", serverURL, ""), "timeoutSec": 10})
 	}
 	settings["hooks"] = hooksAny
 

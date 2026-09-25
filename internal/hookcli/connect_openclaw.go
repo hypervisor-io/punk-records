@@ -9,12 +9,16 @@ import (
 )
 
 // WriteOpenClawPlugin writes punk's OpenClaw plugin into pluginDir: the
-// entry file (index.js) plus the package.json that points OpenClaw at it.
-// changed reports whether anything on disk actually differs afterwards, so
-// a no-op reconnect can say so instead of touching mtimes.
+// entry file (index.js), the package.json that points OpenClaw at it, and
+// the openclaw.plugin.json manifest a current OpenClaw REQUIRES for every
+// native plugin (docs.openclaw.ai/plugins/manifest, fetched 2026-09-25:
+// "A missing or invalid manifest blocks config validation and is treated
+// as a plugin error"). changed reports whether anything on disk actually
+// differs afterwards, so a no-op reconnect can say so instead of touching
+// mtimes.
 //
-// Both files are refused rather than overwritten when they exist and are
-// not punk's:
+// All three files are refused rather than overwritten when they exist and
+// are not punk's:
 //
 //   - index.js must carry openClawPluginMarker as its first line. A file
 //     without it is a hand-authored plugin (or another tool's), and
@@ -22,6 +26,16 @@ import (
 //   - package.json must parse and declare "name" equal to OpenClawPluginID.
 //     A package.json naming a different plugin means pluginDir belongs to
 //     someone else even if index.js happens to be absent.
+//   - openclaw.plugin.json must carry openClawPluginMarker as its first
+//     line. Native manifests are parsed as JSON5, which accepts comments,
+//     so the marker doubles as the ownership proof; a manifest without it
+//     is hand-authored and is never overwritten.
+//
+// A prior punk-written package.json in the retired "openclaw".pluginEntry
+// shape still declares the punk name and is therefore punk's own output -
+// it is migrated in place to the current "openclaw".extensions shape (no
+// permissions block; the permission gates live in config.json, which
+// ConnectOpenClaw writes).
 //
 // Each write goes through writePreservingSymlinkAndMode (symlink resolved,
 // existing mode preserved, atomic temp file + rename), shared with every
@@ -29,13 +43,14 @@ import (
 func WriteOpenClawPlugin(pluginDir, serverURL string) (changed bool, err error) {
 	entryPath := filepath.Join(pluginDir, "index.js")
 	pkgPath := filepath.Join(pluginDir, "package.json")
+	manifestPath := filepath.Join(pluginDir, "openclaw.plugin.json")
 
 	existingEntry, err := readIfExists(entryPath)
 	if err != nil {
 		return false, err
 	}
 	if existingEntry != nil && !hasOpenClawMarker(string(existingEntry)) {
-		return false, fmt.Errorf("%s exists and is not managed by punk (missing %q marker); refusing to overwrite it",
+		return false, fmt.Errorf("%s exists and is not managed by punk (missing %q marker on its first line); refusing to overwrite it",
 			entryPath, openClawPluginMarker)
 	}
 
@@ -56,8 +71,18 @@ func WriteOpenClawPlugin(pluginDir, serverURL string) (changed bool, err error) 
 		}
 	}
 
+	existingManifest, err := readIfExists(manifestPath)
+	if err != nil {
+		return false, err
+	}
+	if existingManifest != nil && !hasOpenClawMarker(string(existingManifest)) {
+		return false, fmt.Errorf("%s exists and is not managed by punk (missing %q marker on its first line); refusing to overwrite it",
+			manifestPath, openClawPluginMarker)
+	}
+
 	entry := []byte(openClawPluginSource(serverURL))
 	pkgBody := []byte(openClawPackageJSON())
+	manifestBody := []byte(openClawPluginManifest())
 
 	if existingEntry == nil || string(existingEntry) != string(entry) {
 		if err := writePreservingSymlinkAndMode(entryPath, entry, 0o644); err != nil {
@@ -67,6 +92,12 @@ func WriteOpenClawPlugin(pluginDir, serverURL string) (changed bool, err error) 
 	}
 	if existingPkg == nil || string(existingPkg) != string(pkgBody) {
 		if err := writePreservingSymlinkAndMode(pkgPath, pkgBody, 0o644); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	if existingManifest == nil || string(existingManifest) != string(manifestBody) {
+		if err := writePreservingSymlinkAndMode(manifestPath, manifestBody, 0o644); err != nil {
 			return changed, err
 		}
 		changed = true

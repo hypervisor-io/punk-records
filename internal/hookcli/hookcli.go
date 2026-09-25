@@ -346,6 +346,9 @@ func fetchContext(baseURL, apiKey string, params url.Values, errw io.Writer) (st
 // or a bad --from flag must never break the user's coding session.
 func RunFrom(from string, stdin io.Reader, baseURL, apiKey string, out, errw io.Writer) error {
 	fromKey := strings.ToLower(from)
+	if fromKey == "cline" {
+		return RunFromCline(stdin, baseURL, apiKey, false, out, errw)
+	}
 	if fromKey == "" || fromKey == "claude" || fromKey == "claude-code" {
 		return Run(stdin, baseURL, apiKey, out, errw)
 	}
@@ -655,8 +658,15 @@ func RunFromAntigravity(event string, stdin io.Reader, baseURL, apiKey string, o
 // the agent to re-enter its execution loop instead of stopping - punk only
 // observes hook traffic and must never force continuation, so this always
 // picks a value from the doc's own "any other value allows the stop"
-// branch of that contract. Every other event prints nothing here: Stop is
-// the only one of the three wired events with a Required stdout field.
+// branch of that contract. The single exception is the OPT-IN messaging
+// path (punk hook inbox --client antigravity --mode continue, wired only
+// by punk connect antigravity --messaging): replyAntigravityInbox in
+// inbox_reply_antigravity.go answers decision:"continue" with the
+// rendered inbox in reason - the docs' only message carrier for a
+// continuation - and is bounded by punk's own continuation cap (inbox.go)
+// since Antigravity documents no client-side loop cap. Every other event
+// prints nothing here: Stop is the only one of the three wired events
+// with a Required stdout field.
 func printAntigravityStopReply(event string, out io.Writer) {
 	if event == "Stop" {
 		fmt.Fprintln(out, `{"decision":"allow"}`)

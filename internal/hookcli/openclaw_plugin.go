@@ -38,11 +38,17 @@ var nulSeparator = string(rune(0x5C)) + "u0000"
 // Design notes, since this is a JS file most readers will only ever see as
 // generated output:
 //
-//   - Plugin layout (a directory under the plugins root holding package.json
-//     plus an entry file, with the entry named by the package's own
-//     "openclaw.pluginEntry" field) and the hook API shape (a plugin object
-//     exposing id, name and register(api), with register calling
-//     api.on(<hook>, handler, opts)) are documented at
+//   - Plugin layout, per the CURRENT documented loader
+//     (docs.openclaw.ai/plugins/manifest and /plugins/manifest/package-json,
+//     fetched 2026-09-25; the hooks guide restructured into child pages
+//     since punk's first research): a directory under the plugins root
+//     holding openclaw.plugin.json (REQUIRED for every native plugin - a
+//     missing or invalid manifest blocks config validation), package.json
+//     (whose "openclaw".extensions array declares the entrypoints - the
+//     "openclaw".pluginEntry field punk wrote before M8 is absent from the
+//     current documented field list) plus the entry file. The hook API
+//     shape (a plugin object exposing id, name and register(api), with
+//     register calling api.on(<hook>, handler, opts)) is documented at
 //     docs.openclaw.ai/plugins/hooks. The docs' own examples wrap the plugin
 //     object in a definePluginEntry() helper imported from the openclaw
 //     plugin SDK; this file deliberately exports the plain object instead,
@@ -245,13 +251,24 @@ function punkLastAssistantText(messages) {
 // once-per-session result.
 const punkInjected = new Set();
 
-export default {
+%s
+
+// The plugin object is declared as a named const (not an anonymous export
+// literal) so punk's behavioral harness can call register() directly;
+// the default export shape OpenClaw loads is unchanged.
+const punkOpenClawPlugin = {
   id: PUNK_PLUGIN_ID,
   name: "punk memory",
   register(api) {
     api.on("session_start", async (event, ctx) => {
       try {
         punkCapture(punkEnvelope(event, ctx, "SessionStart"));
+        // Messaging bind (M8): starts the fire-and-forget registration
+        // retry loop for this session's address. OpenClaw documents no
+        // turn-start plugin API (verified 2026-09-25,
+        // /research/extension-clients/openclaw), so the bridge is
+        // catch-up only: no SSE listener, no wake, no busy state.
+        punkBindSession(event, ctx);
       } catch (err) {
         console.error("[punk] session_start:", err);
       }
@@ -268,13 +285,28 @@ export default {
             prompt_id: fnv1aHex(envelope.session_id + "%s" + prompt),
           });
         }
-        if (envelope.session_id && punkInjected.has(envelope.session_id)) {
-          return;
+        // Memory recall stays exactly as it was: once per session, marked
+        // only after a successful non-empty recall (the one-shot CLI tradeoff
+        // documented on punkInjected).
+        let prepend = "";
+        if (!envelope.session_id || !punkInjected.has(envelope.session_id)) {
+          const recalled = await punkContext(envelope.cwd);
+          if (recalled) {
+            if (envelope.session_id) punkInjected.add(envelope.session_id);
+            prepend = recalled;
+          }
         }
-        const recalled = await punkContext(envelope.cwd);
-        if (!recalled) return;
-        if (envelope.session_id) punkInjected.add(envelope.session_id);
-        return { prependContext: recalled };
+        // Messaging catch-up (M8): the leased unread set for this
+        // session, rendered with the shared M5 envelope and prepended to
+        // the same prompt the memory context rides. Delivery happens only
+        // through this hook - the ONLY documented seam a plugin has for
+        // adding content to an OpenClaw turn.
+        const inbox = await punkInboxCatchUp(envelope);
+        if (inbox) {
+          prepend = prepend ? prepend + "\n\n" + inbox : inbox;
+        }
+        if (!prepend) return;
+        return { prependContext: prepend };
       } catch (err) {
         console.error("[punk] before_prompt_build:", err);
         return;
@@ -338,26 +370,48 @@ export default {
         console.error("[punk] agent_end:", err);
       }
     });
+
+    // MESSAGING TEARDOWN (no capture). Gateway shutdown aborts every
+    // registration retry the bridge still has pending; the docs list
+    // gateway_stop as the lifecycle flush point. Idempotent, no network.
+    api.on("gateway_stop", async (event, ctx) => {
+      try {
+        punkTeardownAll();
+      } catch (err) {
+        console.error("[punk] gateway_stop:", err);
+      }
+    });
   },
 };
+
+export default punkOpenClawPlugin;
 `
 
-// openClawPluginSource renders the plugin entry file for serverURL.
+// openClawPluginSource renders the plugin entry file for serverURL. Verb
+// order in the template: managed marker, PUNK_URL fallback, plugin id,
+// the messaging-bridge splice (after the punkInjected declaration, before
+// the register body), then the four NUL separators inside the capture
+// handlers.
 func openClawPluginSource(serverURL string) string {
 	return fmt.Sprintf(openClawPluginTemplate,
 		openClawPluginMarker,
 		jsStringLiteral(serverURL),
 		jsStringLiteral(OpenClawPluginID),
+		openClawMessagingBridgeJS(),
 		nulSeparator, nulSeparator, nulSeparator, nulSeparator)
 }
 
-// openClawPackageJSON renders the plugin's package.json. "type":"module" is
-// required for the entry file's `export default` to parse as ESM;
-// "openclaw".pluginEntry is what points OpenClaw at the entry file; the
-// permissions block declares the two surfaces the registered hooks touch
-// (conversation content in before_prompt_build/agent_end, session identity
-// everywhere). The operator still has to grant the matching config-side
-// flags - see ConnectOpenClaw, which writes them.
+// openClawPackageJSON renders the plugin's package.json, following the
+// CURRENT documented loader (docs.openclaw.ai/plugins/manifest and
+// /plugins/manifest/package-json, fetched 2026-09-25): "type":"module" is
+// required for the entry file's `export default` to parse as ESM, and
+// package.json#openclaw.EXTENSIONS is the field that declares native
+// plugin entrypoints. The retired "openclaw".pluginEntry shape punk wrote
+// before M8 (and the package.json permissions block, whose gates actually
+// live in config.json under plugins.entries.<id>.hooks.* - see
+// ConnectOpenClaw, which writes them) are gone: a current OpenClaw
+// requires the openclaw.plugin.json manifest (openClawPluginManifest
+// below) and does not document pluginEntry at all.
 func openClawPackageJSON() string {
 	return `{
   "name": "` + OpenClawPluginID + `",
@@ -366,11 +420,33 @@ func openClawPackageJSON() string {
   "type": "module",
   "main": "./index.js",
   "openclaw": {
-    "pluginEntry": "./index.js",
-    "permissions": {
-      "conversation": true,
-      "sessions": true
-    }
+    "extensions": ["./index.js"]
+  }
+}
+`
+}
+
+// openClawPluginManifest renders the openclaw.plugin.json manifest every
+// native OpenClaw plugin MUST ship in its plugin root ("A missing or
+// invalid manifest blocks config validation and is treated as a plugin
+// error" - docs.openclaw.ai/plugins/manifest, fetched 2026-09-25). The
+// first line is the managed marker as a JSON5 comment: native manifests
+// are parsed with JSON5, which accepts comments, so the marker doubles as
+// punk's ownership proof for the never-overwrite rule in
+// WriteOpenClawPlugin. id must equal the plugins.entries key and the
+// package name (OpenClawPluginID is all three); configSchema is required
+// even for a plugin that accepts no config, and punk's config-side
+// settings all live in the operator's config.json, not here.
+func openClawPluginManifest() string {
+	return openClawPluginMarker + "\n" + `{
+  "id": "` + OpenClawPluginID + `",
+  "name": "punk memory",
+  "description": "punk-records agent memory and agent-message inbox catch-up for OpenClaw",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
   }
 }
 `
@@ -386,4 +462,197 @@ func hasOpenClawMarker(src string) bool {
 		first = src[:i]
 	}
 	return strings.TrimRight(first, "\r") == openClawPluginMarker
+}
+
+// openClawBridgeCoreJS is the OpenClaw-specific half of the
+// agent-messaging bridge: everything except the shared envelope renderer
+// (inboxRendererJS). A plain raw-string constant - no fmt verbs, no
+// backticks, no literal percent characters - spliced into
+// openClawPluginTemplate. Verified scope (2026-09-25,
+// /research/extension-clients/openclaw): OpenClaw documents NO plugin API
+// that can start a turn - enqueueNextTurnInjection only queues context
+// for the next prompt build, heartbeat_prompt_contribution fires only on
+// heartbeat turns, before_agent_run only blocks, and webhooks are
+// operator-configured Gateway HTTP endpoints - so this bridge is
+// CATCH-UP ONLY: bind, register (confirmed, retried), and inject the
+// leased unread set through before_prompt_build's prependContext, the one
+// documented seam for adding content to a turn. No SSE, no wake, no busy
+// state, no continuation. It re-applies the reviewed OpenCode bridge's
+// disciplines: confirmed registration before any delivery, bounded
+// cancellable retry sleeps, delivered-but-unacked ids re-acked without
+// re-rendering, and the sender allowlist.
+const openClawBridgeCoreJS = `
+  // ---- punk agent-messaging bridge (opt-in: PUNK_MESSAGING=1) ----
+  // Catch-up only: OpenClaw has no turn-start plugin API (verified). The
+  // client machinery - leased fetch passes (with the allowlist
+  // starvation fix), owner ACKs with partial-success handling, releases
+  // and the allowlist - is the shared inboxBridgeCoreJS spliced in
+  // BEFORE this block; what stays here is OpenClaw-specific: binding,
+  // the confirmed-registration retry loop, gateway_stop teardown, and
+  // the before_prompt_build catch-up itself.
+  const punkMessagingEnabled =
+    typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1";
+  const punkSessions = new Map();
+
+  function punkSessionState(sessionID) {
+    let st = punkSessions.get(sessionID);
+    if (st) return st;
+    st = punkInboxState(sessionID, "openclaw");
+    st.registered = false;
+    st.registering = false;
+    st.ns = "";
+    punkSessions.set(sessionID, st);
+    return st;
+  }
+
+  // Namespace: PUNK_NAMESPACE env, else the server's cwd lookup. Only
+  // successes cache; there is no "agent-default" fallback because a wrong
+  // namespace would silently orphan the session's inbox.
+  let punkMsgNamespaceCache = "";
+  async function punkMessagingResolveNamespace() {
+    if (punkMsgNamespaceCache) return punkMsgNamespaceCache;
+    const env = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE;
+    if (env) {
+      punkMsgNamespaceCache = env;
+      return env;
+    }
+    const data = await punkFetch("/v1/agent/namespace?cwd=" + encodeURIComponent(punkCwd()));
+    if (data && typeof data.namespace === "string" && data.namespace) {
+      punkMsgNamespaceCache = data.namespace;
+    }
+    return punkMsgNamespaceCache;
+  }
+
+  // Bind: start the registration flow for this session's address. Inert
+  // when messaging is off or the session id is unusable.
+  function punkBindSession(event, ctx) {
+    if (!punkMessagingEnabled) return;
+    const sid = punkSessionID(event, ctx);
+    if (!sid) return;
+    const st = punkSessionState(sid);
+    if (st.registered || st.registering) return;
+    st.registering = true;
+    punkRegisterSession(st);
+  }
+
+  // Registration is confirmed, not assumed: the member POST retries on
+  // bounded exponential backoff until the server answers
+  // {status:"registered"}; no inbox read happens before that. Cancelled
+  // instantly by teardown. Never rejects.
+  async function punkRegisterSession(st) {
+    try {
+      let attempt = 0;
+      while (punkInboxStAlive(st) && !st.registered) {
+        const ns = await punkMessagingResolveNamespace();
+        if (!punkInboxStAlive(st) || st.registered) return;
+        if (ns) {
+          const res = await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/members", {
+            method: "POST",
+            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
+          });
+          if (!punkInboxStAlive(st) || st.registered) return;
+          if (res && res.status === "registered") {
+            st.registered = true;
+            st.registering = false;
+            st.ns = ns;
+            return;
+          }
+          console.error("[punk] messaging registration not confirmed for " + st.agent + ", retrying");
+        } else {
+          console.error("[punk] messaging namespace resolution failed for " + st.agent + ", retrying");
+        }
+        await punkInboxCancellableSleep(st, Math.min(punkInboxEnvInt("PUNK_MESSAGING_BACKOFF_MS", 500) * Math.pow(2, attempt), 30000));
+        attempt++;
+      }
+    } catch (err) {
+      console.error("[punk] messaging registration loop failed:", err && err.message ? err.message : err);
+    } finally {
+      if (!st.registered) st.registering = false;
+    }
+  }
+
+  // Teardown for gateway_stop: abort every pending retry. Idempotent.
+  function punkTeardownAll() {
+    for (const st of punkSessions.values()) {
+      try {
+        st.abortController.abort();
+      } catch (err) {
+        // abort() on an already-aborted controller is a no-op.
+      }
+    }
+    punkSessions.clear();
+  }
+
+  // Catch-up: one leased fetch pass for the session in this prompt
+  // build, rendered with the shared M5 envelope and prepended to the
+  // same prompt the memory context rides. Delivery happens ONLY through
+  // this return value - the one documented seam a plugin has for adding
+  // content to an OpenClaw turn. Delivered ids are only MARKED here and
+  // a bounded recurrent re-ack pass (paced by lease expiry, cancellable,
+  // self-terminating once pending empties) confirms the ACK afterwards:
+  // HOST HANDOFF under at-least-once semantics, NOT proof of
+  // consumption - the return value is the only delivery signal and
+  // OpenClaw exposes no completion callback, so the post-expiry ACK
+  // records that the text was handed to the session's turn, not that the
+  // host provably consumed it, and a dropped return value can cause a
+  // redelivery. A failed or partial ACK ({acked:n} with n < len, e.g.
+  // the lease expired) keeps the ids pending inside that recurrent pass
+  // - a pending ACK is never thrown away. The auxiliary ACK and release
+  // calls here are deliberately NOT awaited: before_prompt_build blocks
+  // the start of a user turn, and every extra awaited request could add
+  // another full punkFetch timeout to it. Returns "" whenever there is
+  // nothing to inject (fail-open). Never rejects.
+  async function punkInboxCatchUp(envelope) {
+    if (!punkMessagingEnabled) return "";
+    const sid = envelope.session_id;
+    if (!sid) return "";
+    const st = punkSessions.get(sid);
+    if (!st || !st.registered) return "";
+    try {
+      const ns = st.ns;
+      const pass = await punkInboxFetchPass(ns, st);
+      if (!pass || !punkInboxStAlive(st)) return "";
+      if (pass.reack.length) {
+        punkInboxAckIds(ns, st, pass.reack).then((ok) => {
+          if (!ok && punkInboxStAlive(st)) {
+            // Failed or partial (expired-lease) ACK: the recurrent pass
+            // reacquires after the lease window; the pending marks are kept.
+            punkInboxScheduleReackRetry(ns, st);
+          }
+        });
+      }
+      if (pass.denied.length) punkInboxReleaseIds(ns, st, pass.denied);
+      if (pass.deniedCount > 0) {
+        console.error("[punk] held back " + pass.deniedCount + " message(s) from senders outside PUNK_MESSAGING_FROM");
+      }
+      if (!pass.deliver.length) return "";
+      const rend = punkRenderInbox(ns, st.agent, pass.deliver);
+      if (!rend.text) {
+        punkInboxReleaseIds(ns, st, pass.deliver.map((m) => m.id));
+        return "";
+      }
+      for (const m of rend.used) st.delivered.add(m.id);
+      const usedIds = rend.used.map((m) => m.id);
+      const leftover = [];
+      for (const m of pass.deliver) {
+        if (usedIds.indexOf(m.id) < 0) leftover.push(m.id);
+      }
+      if (leftover.length) punkInboxReleaseIds(ns, st, leftover);
+      // Pending marks get the recurrent expiry pass (host handoff; see
+      // the comment above).
+      punkInboxScheduleReackRetry(ns, st);
+      return rend.text;
+    } catch (err) {
+      console.error("[punk] inbox catch-up failed:", err && err.message ? err.message : err);
+      return "";
+    }
+  }
+
+`
+
+// openClawMessagingBridgeJS renders the complete messaging-bridge splice:
+// the shared envelope renderer (byte-identical to hookcli.RenderInbox,
+// see inbox_renderjs.go) followed by the OpenClaw-specific machinery.
+func openClawMessagingBridgeJS() string {
+	return inboxBridgeJS() + openClawBridgeCoreJS
 }

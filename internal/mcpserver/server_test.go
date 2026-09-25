@@ -154,7 +154,7 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(tools.Tools) != 34 {
-		t.Fatalf("tools = %d, want 34 (22 plus whoami, remember_many, 6 region tools, search_skills, load_skill)", len(tools.Tools))
+		t.Fatalf("tools = %d, want 34 with messaging disabled", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -498,8 +498,7 @@ func (doneLLM) Chat(context.Context, []llm.Turn, []llm.Tool) (*llm.Result, error
 func (doneLLM) Model() string { return "stub" }
 
 // TestReflectToolOnlyWiredWithLLM confirms the conditional registration
-// in New(): with Deps.LLM nil, reflect must be absent (existing tool
-// count of 21, unaffected by this change); with it set, reflect appears
+// in New(): with Deps.LLM nil, reflect must be absent; with it set, reflect appears
 // and answers end to end through the real MCP protocol.
 func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	cs := session(t) // Deps.LLM unset
@@ -509,7 +508,7 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(tools.Tools) != 34 {
-		t.Fatalf("tools = %d, want 34 (reflect must stay off without an LLM)", len(tools.Tools))
+		t.Fatalf("tools = %d, want 34 (reflect and messaging off)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))
@@ -1054,12 +1053,20 @@ func TestAgentToolsetIsLean(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
+	if len(got) != len(agentToolset) {
+		t.Fatalf("agent toolset has %d tools, want exactly %d", len(got), len(agentToolset))
+	}
 	for _, want := range agentToolset {
 		if !got[want] {
 			t.Fatalf("agent toolset missing %s; have %v", want, got)
 		}
 	}
-	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "list_region_members", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
+	for _, name := range []string{"send_message", "read_messages", "ack_messages", "await_messages", "list_region_members"} {
+		if got[name] {
+			t.Fatalf("default agent toolset exposes opt-in capability %s", name)
+		}
+	}
+	for _, name := range []string{"submit_task", "get_task", "list_agents", "reflect", "remember_model", "list_models", "diagnose", "recall_as_of", "neighbors", "link", "unlink", "forget"} {
 		if got[name] {
 			t.Fatalf("agent toolset must not expose %s", name)
 		}

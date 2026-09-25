@@ -13,6 +13,9 @@ var agentToolset = []string{
 	"list_tasks", "await_tasks", "search_skills", "load_skill",
 }
 
+// Only opt-in sessions pay the schema cost of messaging and lean discovery.
+var messagingToolset = []string{"send_message", "read_messages", "ack_messages", "await_messages", "list_region_members"}
+
 // fullOnlyTools are removed when Deps.Toolset is "agent". Keep in sync
 // with the AddTool calls in server.go; TestAgentToolsetIsLean guards it.
 // search_skills/load_skill are admitted to the lean set (S01 round 2:
@@ -23,12 +26,15 @@ var fullOnlyTools = []string{
 	"submit_task", "get_task", "list_agents", "delegate", "reflect",
 	"recall_as_of", "forget", "link", "unlink", "triplet_search", "neighbors",
 	"remember_model", "list_models", "list_entities", "profile", "diagnose",
-	"list_region_members", "list_agent_regions",
+	"list_agent_regions",
 }
 
 // applyToolset trims the server to the named set. Unknown or empty means full.
-func applyToolset(s *mcp.Server, toolset string) {
+func applyToolset(s *mcp.Server, toolset string, messaging bool) {
 	if toolset == "agent" {
 		s.RemoveTools(fullOnlyTools...)
+		if !messaging {
+			s.RemoveTools("list_region_members")
+		}
 	}
 }

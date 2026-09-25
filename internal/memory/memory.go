@@ -755,6 +755,14 @@ func (s *Store) Recall(ctx context.Context, ns, prefix string, limit int) ([]Fac
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
+	return s.recallPrefix(ctx, ns, prefix, limit)
+}
+
+// recallPrefix is Recall without its 1000-row page clamp. Retrieval
+// paths want a page; a read model that must be complete - the task
+// board joins every /tasks fact of a namespace - would silently lose
+// rows to that clamp, so it calls this with its own cap instead.
+func (s *Store) recallPrefix(ctx context.Context, ns, prefix string, limit int) ([]Fact, error) {
 	nsID, ok, err := s.namespaceID(ctx, ns)
 	if err != nil {
 		return nil, err

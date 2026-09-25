@@ -115,6 +115,24 @@ func ConnectClaudeCodeMCP(configPath string, o MCPEntryOpts, force bool) (bool, 
 		withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL)}, o), isPunkMCPEntry, nil, force)
 }
 
+// ConnectClineMCP uses the extension's explicit streamableHttp transport and
+// ${env:NAME} expansion syntax, not the default SSE or other hosts' ${NAME}.
+func ConnectClineMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
+	ours := func(e any) bool {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return false
+		}
+		u, _ := m["url"].(string)
+		return m["type"] == "streamableHttp" && strings.Contains(u, "/mcp")
+	}
+	entry := withHeaders(map[string]any{"type": "streamableHttp", "url": mcpEndpoint(o.ServerURL), "disabled": false, "autoApprove": []string{}}, o)
+	if o.APIKeyEnv != "" {
+		entry["headers"].(map[string]any)["Authorization"] = "Bearer ${env:" + o.APIKeyEnv + "}"
+	}
+	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force)
+}
+
 // ConnectCursorMCP registers punk in a Cursor mcp.json ({"mcpServers":{"punk":{"url":...}}}).
 func ConnectCursorMCP(mcpPath string, o MCPEntryOpts, force bool) (bool, error) {
 	ours := func(e any) bool {

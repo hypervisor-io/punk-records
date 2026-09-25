@@ -438,3 +438,77 @@ func TestIsPunkManagedAntigravityWordBoundary(t *testing.T) {
 		t.Fatal("relocation fallback must still recognize a stale-path punk antigravity command")
 	}
 }
+
+// --- --messaging inbox wiring (M7) -------------------------------------
+
+// With messaging on, punk's own top-level key gains inbox entries on
+// PreInvocation (--mode context --event PreInvocation) and Stop (--mode
+// continue --event Stop) with the flat type/command/timeout shape;
+// foreign hook-name keys and the capture entries are untouched.
+// Contract: antigravity.google/docs/hooks, fetched 2026-09-25
+// (PreInvocation injectSteps, Stop decision continue + reason).
+func TestConnectAntigravityMessagingAddsInboxEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	seed := `{"my-linter-hook": {"PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": "./lint.sh"}]}]}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := ConnectAntigravityMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readAntigravityHooks(t, path)
+	punk := m["punk"].(map[string]any)
+
+	assertInboxEntry := func(event, mode string) {
+		t.Helper()
+		entries, ok := punk[event].([]any)
+		if !ok || len(entries) != 2 {
+			t.Fatalf("%s: expected capture + inbox entries, got %v", event, punk[event])
+		}
+		var capture, inbox map[string]any
+		for _, e := range entries {
+			em := e.(map[string]any)
+			if strings.Contains(em["command"].(string), " hook inbox ") {
+				inbox = em
+			} else {
+				capture = em
+			}
+		}
+		if capture["command"] != "/usr/local/bin/punk hook --from antigravity --event "+event+" --url http://localhost:9090" {
+			t.Fatalf("%s: capture entry changed: %v", event, capture)
+		}
+		want := "/usr/local/bin/punk hook inbox --client antigravity --mode " + mode + " --event " + event + " --url http://localhost:9090 --messaging"
+		if inbox["command"] != want {
+			t.Fatalf("%s: inbox entry:\ngot:  %q\nwant: %q", event, inbox["command"], want)
+		}
+		if inbox["type"] != "command" || inbox["timeout"] != float64(10) {
+			t.Fatalf("%s: inbox entry shape: %v", event, inbox)
+		}
+	}
+	assertInboxEntry("PreInvocation", "context")
+	assertInboxEntry("Stop", "continue")
+
+	if _, ok := m["my-linter-hook"].(map[string]any); !ok {
+		t.Fatal("foreign hook-name key dropped")
+	}
+
+	changed, err = ConnectAntigravityMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || changed {
+		t.Fatalf("rerun: changed=%v err=%v", changed, err)
+	}
+}
+
+// Without messaging the written file contains no inbox command at all.
+func TestConnectAntigravityWithoutMessagingHasNoInboxEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	if _, err := ConnectAntigravity(path, "/usr/local/bin/punk", "http://localhost:9090"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), " hook inbox") {
+		t.Fatalf("non-messaging connect wrote an inbox entry: %s", raw)
+	}
+}

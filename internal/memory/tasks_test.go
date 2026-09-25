@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -118,6 +119,36 @@ func TestParseTaskState(t *testing.T) {
 	for _, c := range cases {
 		if got := ParseTaskState(c.body, c.attrs); got != c.want {
 			t.Errorf("ParseTaskState(%q, %v) = %q, want %q", c.body, c.attrs, got, c.want)
+		}
+	}
+}
+
+// TestListTasksBeyondRecallPage: the board is a read model, not a page -
+// a namespace with more than Recall's 1000-fact clamp must still list
+// every task.
+func TestListTasksBeyondRecallPage(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const n = 700 // 1400 facts: task + status each
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("T%04d", i)
+		if _, err := s.Remember(ctx, "big", "/tasks/"+id, "task "+id, nil, "planner"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Remember(ctx, "big", "/tasks/"+id+"/status", "done: landed", nil, "worker"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ListTasks(ctx, "big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != n {
+		t.Fatalf("ListTasks = %d rows, want %d", len(rows), n)
+	}
+	for _, r := range rows {
+		if r.State != "done" || r.Title == "" {
+			t.Fatalf("row %s = state %q title %q; want done with a title", r.ID, r.State, r.Title)
 		}
 	}
 }

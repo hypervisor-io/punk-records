@@ -15,13 +15,17 @@ import (
 type Store struct {
 	db  *store.DB
 	now func() time.Time
+	// Configure before serving requests. Nonpositive cap uses the default;
+	// nonpositive retention disables deletion, never unread delivery.
+	MaxUnreadPerRecipient int
+	MessageRetention      time.Duration
 }
 
 func New(db *store.DB, now func() time.Time) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{db: db, now: now}
+	return &Store{db: db, now: now, MaxUnreadPerRecipient: 200, MessageRetention: 30 * 24 * time.Hour}
 }
 
 // Member is one satellite registered to a region.

@@ -27,6 +27,13 @@ type Config struct {
 	Route     Route     `yaml:"route"`
 	Proposals Proposals `yaml:"proposals"`
 	Authz     Authz     `yaml:"authz"`
+	Messaging Messaging `yaml:"messaging"`
+}
+
+type Messaging struct {
+	Enabled               bool `yaml:"enabled"`                  // MCP message tools; HTTP routes keep namespace grants
+	MaxUnreadPerRecipient int  `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
+	RetentionDays         int  `yaml:"retention_days"`           // ACK age; 0 disables deletion
 }
 
 type HTTP struct {
@@ -197,6 +204,7 @@ func Default() *Config {
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
 		Authz:     Authz{Enforcement: "off"},
+		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30},
 	}
 }
 
@@ -279,6 +287,9 @@ func applyEnv(c *Config) error {
 	integer("PUNK_MEMORY_RETENTION_DAYS", &c.Memory.RetentionDays)
 	integer("PUNK_MEMORY_TURN_CONTEXT_TOKENS", &c.Memory.TurnContextTokens)
 	str("PUNK_AUTHZ_ENFORCEMENT", &c.Authz.Enforcement)
+	integer("PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT", &c.Messaging.MaxUnreadPerRecipient)
+	boolean("PUNK_MESSAGING", &c.Messaging.Enabled)
+	integer("PUNK_MESSAGING_RETENTION_DAYS", &c.Messaging.RetentionDays)
 
 	return errors.Join(errs...)
 }
@@ -313,6 +324,12 @@ func (c *Config) validate() error {
 	}
 	if c.Memory.RetentionDays < 0 {
 		errs = append(errs, errors.New("memory.retention_days: must be >= 0"))
+	}
+	if c.Messaging.MaxUnreadPerRecipient <= 0 {
+		errs = append(errs, errors.New("messaging.max_unread_per_recipient: must be > 0"))
+	}
+	if c.Messaging.RetentionDays < 0 || c.Messaging.RetentionDays > 106751 {
+		errs = append(errs, errors.New("messaging.retention_days: must be 0 to 106751"))
 	}
 	if c.AI.Embeddings.MaxInputTokens < 0 {
 		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))

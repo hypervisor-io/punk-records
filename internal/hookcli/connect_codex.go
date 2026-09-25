@@ -24,6 +24,20 @@ const codexSessionStartMatcher = "startup|resume"
 // ConnectCodexHooks merges punk hook entries into a Codex hooks.json
 // (~/.codex/hooks.json, or <repo>/.codex/hooks.json for --project).
 func ConnectCodexHooks(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, false)
+}
+
+// ConnectCodexHooksMessaging is ConnectCodexHooks plus the opt-in inbox
+// groups (punk connect codex --messaging): SessionStart (matcher
+// startup|resume, same as capture) and UserPromptSubmit in --mode
+// context, Stop in --mode continue. Codex hooks mirror Claude Code's
+// shape and reply contract (developers.openai.com/codex/hooks, fetched
+// 2026-09-25), so the Claude-shaped merge and reply writer are shared.
+func ConnectCodexHooksMessaging(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, true)
+}
+
+func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -49,6 +63,9 @@ func ConnectCodexHooks(hooksPath, punkPath, serverURL, ns string) (changed bool,
 			setPunkGroupMatcher(groups, punkPath, codexSessionStartMatcher)
 		}
 		hooksAny[ev] = groups
+	}
+	if messaging {
+		addClaudeShapedInbox(hooksAny, punkPath, "codex", serverURL, ns, codexSessionStartMatcher)
 	}
 	settings["hooks"] = hooksAny
 	out, err := encodeSettings(settings)
@@ -341,15 +358,20 @@ func DedupeCodexHookScopes(globalPath, projectPath, punkPath string) (notes []st
 		}
 		globalGroups, _ := globalHooks[ev].([]any)
 		var globalPunkCanon [][]byte
+		// Inbox groups (--messaging) dedupe exactly like capture groups:
+		// the same group in both scopes would run the inbox hook twice.
+		managed := func(g any) bool {
+			return isPunkManagedGroup(g, punkPath) || isPunkManagedInboxGroup(g, punkPath, "codex")
+		}
 		for _, g := range globalGroups {
-			if isPunkManagedGroup(g, punkPath) {
+			if managed(g) {
 				globalPunkCanon = append(globalPunkCanon, canonicalGroupJSON(g))
 			}
 		}
 
 		var keptGroups []any
 		for _, g := range groups {
-			if !isPunkManagedGroup(g, punkPath) {
+			if !managed(g) {
 				keptGroups = append(keptGroups, g)
 				continue
 			}

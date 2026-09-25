@@ -267,6 +267,24 @@ func isPunkManagedAntigravityFlatEntry(entry any, punkPath string) bool {
 //     rename) - shared with every other Connect* writer in this package,
 //     see connect.go's doc comment for the exact guarantees.
 func ConnectAntigravity(hooksPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectAntigravity(hooksPath, punkPath, serverURL, false)
+}
+
+// ConnectAntigravityMessaging is ConnectAntigravity plus punk hook inbox
+// entries (from punk connect antigravity --messaging) inside the same
+// punk-owned top-level key: an inbox command on PreInvocation (--mode
+// context, answered with injectSteps[].ephemeralMessage on EVERY
+// invocation while unread messages exist - unlike the capture path's
+// invocationNum==0 gate) and on Stop (--mode continue, answered with
+// decision:"continue" + reason, reason being the only message carrier
+// per antigravity.google/docs/hooks, fetched 2026-09-25). Both entries
+// bake --event into the command because Antigravity payloads do not name
+// the fired event (same workaround as punkAntigravityHookCommand).
+func ConnectAntigravityMessaging(hooksPath, punkPath, serverURL string) (changed bool, err error) {
+	return connectAntigravity(hooksPath, punkPath, serverURL, true)
+}
+
+func connectAntigravity(hooksPath, punkPath, serverURL string, messaging bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -299,6 +317,16 @@ func ConnectAntigravity(hooksPath, punkPath, serverURL string) (changed bool, er
 		}
 		command := punkAntigravityHookCommand(punkPath, ev, serverURL)
 		punkEntry[ev] = mergeAntigravityFlatEntries(punkEntry[ev], punkPath, command)
+	}
+	if messaging {
+		// Both events are in antigravityFlatEvents, so their shape was
+		// validated above. Inbox entries use the same flat handler shape
+		// (type/command/timeout) and are deduped by isPunkManagedInbox
+		// (inbox_wire.go), independent of isPunkManagedAntigravity.
+		punkEntry["PreInvocation"] = mergeInboxFlatEntries(punkEntry["PreInvocation"], punkPath, "antigravity",
+			map[string]any{"type": "command", "command": punkInboxHookCommand(punkPath, "antigravity", "context", "PreInvocation", serverURL, ""), "timeout": 10})
+		punkEntry["Stop"] = mergeInboxFlatEntries(punkEntry["Stop"], punkPath, "antigravity",
+			map[string]any{"type": "command", "command": punkInboxHookCommand(punkPath, "antigravity", "continue", "Stop", serverURL, ""), "timeout": 10})
 	}
 	settings[antigravityHookName] = punkEntry
 

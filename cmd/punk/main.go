@@ -106,7 +106,8 @@ Usage:
                       --from antigravity requires --event PostToolUse|PreInvocation|Stop (Antigravity's own hook payloads carry no event name)
                       --from copilot translates GitHub Copilot CLI's native hook payload (self-identifies its event; SessionStart injects via Copilot's own additionalContext shape)
                       --from hermes translates Hermes Agent's native shell-hook payload (self-identifies its event; first-turn pre_llm_call injects via Hermes' own {"context":...} shape)
-  punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex [--project] [--url URL])
+                      hook inbox --client NAME --mode context|continue|wait [--wait-seconds N] [--messaging]: deliver agent messages (opt-in PUNK_MESSAGING=1, docs/agent-messaging.md)
+  punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex|cline [--project] [--url URL])
   punk      skill     punk usage skill in the agent's skill directory (skill install|print|paths --agent NAME [--project] [--url URL] [--ns NS])
   punk      --version print version
 `
@@ -680,6 +681,8 @@ func cmdServe(args []string) error {
 		mem.SetDefensePolicy(ns, mode)
 	}
 	regionStore := region.New(db, nil)
+	regionStore.MaxUnreadPerRecipient = cfg.Messaging.MaxUnreadPerRecipient
+	regionStore.MessageRetention = time.Duration(cfg.Messaging.RetentionDays) * 24 * time.Hour
 	emb, err := newEmbedder(context.Background(), cfg, log)
 	if err != nil {
 		return err
@@ -787,7 +790,8 @@ func cmdServe(args []string) error {
 
 	mcpDeps := mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem, Region: regionStore, Bus: eventBus,
-		A2ARemotes: a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
+		MessagingEnabled: cfg.Messaging.Enabled,
+		A2ARemotes:       a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
 		DefaultBudget: task.Budget{
@@ -1066,8 +1070,7 @@ func cmdServe(args []string) error {
 		}()
 	}
 
-	if cfg.Memory.RetentionDays > 0 {
-		retention := time.Duration(cfg.Memory.RetentionDays) * 24 * time.Hour
+	if cfg.Memory.RetentionDays > 0 || cfg.Messaging.RetentionDays > 0 {
 		go func() {
 			tick := time.NewTicker(time.Hour)
 			defer tick.Stop()
@@ -1076,12 +1079,7 @@ func cmdServe(args []string) error {
 				case <-ctx.Done():
 					return
 				case <-tick.C:
-					n, err := mem.SweepRetention(ctx, retention)
-					if err != nil {
-						log.Error("retention sweep failed", "err", err)
-					} else if n > 0 {
-						log.Info("retention sweep", "rows", n)
-					}
+					runRetentionSweeps(ctx, log, mem, regionStore, cfg.Memory.RetentionDays)
 				}
 			}
 		}()
@@ -1846,6 +1844,8 @@ func cmdMCP(args []string) error {
 	}
 	srv := mcpserver.New(mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem,
+		Region: configuredMessageRegion(db, cfg), Bus: eventBus,
+		MessagingEnabled: cfg.Messaging.Enabled,
 		A2ARemotes:       a2aRemotes(cfg),
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
@@ -2901,11 +2901,15 @@ func answerRate(v *float64) string {
 // since a dead memory server or unrecognized --from must never break the
 // user's coding session.
 func cmdHook(args []string) error {
+	if len(args) > 0 && args[0] == "inbox" {
+		return cmdHookInbox(args[1:])
+	}
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
 	from := fs.String("from", "", "source agent the stdin payload is native to (default empty = Claude Code passthrough; e.g. \"cursor\")")
 	event := fs.String("event", "", "hook event name, required for agents whose native payload doesn't self-identify it (currently only antigravity: PostToolUse, PreInvocation, or Stop - see hookcli.ConnectAntigravity)")
 	nsFlag := fs.String("ns", "", "namespace override (written by punk connect --project)")
+	clineMessaging := fs.Bool("messaging", false, "enable composed inbox delivery for --from cline")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2940,7 +2944,42 @@ func cmdHook(args []string) error {
 	if strings.EqualFold(*from, "hermes") {
 		return hookcli.RunFromHermes(os.Stdin, baseURL, apiKey, os.Stdout, os.Stderr)
 	}
+	if strings.EqualFold(*from, "cline") {
+		return hookcli.RunFromCline(os.Stdin, baseURL, apiKey, *clineMessaging, os.Stdout, os.Stderr)
+	}
 	return hookcli.RunFrom(*from, os.Stdin, baseURL, apiKey, os.Stdout, os.Stderr)
+}
+
+// cmdHookInbox runs "punk hook inbox": the one client-side agent-message
+// delivery path every connected client's hooks call (see hookcli.Inbox).
+// It is inert unless PUNK_MESSAGING=1 or --messaging (written into the
+// hook entry by punk connect --messaging), and like cmdHook it always
+// exits 0: a bad flag value, a dead server or a malformed payload only
+// yields the client's minimum fail-open reply. Server and namespace
+// resolution are shared with cmdHook (--url, --ns).
+func cmdHookInbox(args []string) error {
+	fs := flag.NewFlagSet("hook inbox", flag.ContinueOnError)
+	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
+	client := fs.String("client", "", "client whose native hook payload is on stdin (claude-code, codex, cursor, copilot, antigravity, cline, hermes)")
+	mode := fs.String("mode", "context", "context | continue | wait")
+	wait := fs.Int("wait-seconds", 60, "wait mode bound in seconds (max 300)")
+	event := fs.String("event", "", "hook event name for clients whose payload does not name it (antigravity)")
+	nsFlag := fs.String("ns", "", "namespace override (else $PUNK_NAMESPACE, else derived from the payload cwd)")
+	messaging := fs.Bool("messaging", false, "enable delivery without PUNK_MESSAGING=1 (PUNK_MESSAGING=0 still disables)")
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		// Fail open: a mistyped hook entry must never break the session.
+		fmt.Fprintln(os.Stderr, "punk hook inbox:", err)
+		return nil
+	}
+	if *nsFlag != "" {
+		hookcli.SetNamespaceOverride(*nsFlag)
+	}
+	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	return hookcli.Inbox(hookcli.InboxOpts{
+		Client: *client, Mode: *mode, WaitSeconds: *wait, BaseURL: baseURL, APIKey: apiKey,
+		Namespace: *nsFlag, Event: *event, Enabled: *messaging,
+	}, os.Stdin, os.Stdout, os.Stderr)
 }
 
 // cmdConnect wires punk into an agent's hook/extension config. Four
@@ -2984,7 +3023,7 @@ func cmdHook(args []string) error {
 // rerun the command with --project inside a repo.
 func cmdConnect(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex [--project] [--url URL]")
+		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex|cline [--project] [--url URL]")
 	}
 	target := args[0]
 	switch target {
@@ -3006,10 +3045,12 @@ func cmdConnect(args []string) error {
 		return cmdConnectOpenClaw(args[1:])
 	case "codex":
 		return cmdConnectCodex(args[1:])
+	case "cline":
+		return cmdConnectCline(args[1:])
 	case "verify":
 		return cmdConnectVerify(args[1:])
 	default:
-		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", \"openclaw\", and \"codex\" are supported", target)
+		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", \"openclaw\", \"codex\", and \"cline\" are supported", target)
 	}
 }
 
@@ -3336,6 +3377,7 @@ func cmdConnectClaudeCode(args []string) error {
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3370,7 +3412,13 @@ func cmdConnectClaudeCode(args []string) error {
 	existedBefore := statErr == nil
 
 	var changed bool
-	if *project {
+	if *messaging {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCodeMessaging(settingsPath, punkPath, serverURL, projNS)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	} else if *project {
 		var hookErr error
 		changed, hookErr = hookcli.ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, projNS)
 		if hookErr != nil {
@@ -3393,6 +3441,9 @@ func cmdConnectClaudeCode(args []string) error {
 		}
 	} else {
 		fmt.Printf("punk: %s already has punk's Claude Code hooks up to date\n", settingsPath)
+	}
+	if *messaging {
+		fmt.Println("punk: messaging - inbox hooks on SessionStart, UserPromptSubmit and Stop (continuation capped at 5 per 10 min; no idle wake)")
 	}
 	mcpPath := filepath.Join(".mcp.json")
 	if !*project {
@@ -3421,7 +3472,7 @@ func cmdConnectClaudeCode(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("claude-code", *project, serverURL, projNS)
+		installSkillFor("claude-code", *project, serverURL, projNS, *messaging)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
@@ -3444,7 +3495,7 @@ func defaultAgentName() string {
 // loads skills from. A hand-written file at either path is reported and
 // left alone; a skill problem never fails the connect that hooks and MCP
 // already succeeded at.
-func installSkillFor(agent string, project bool, serverURL, ns string) {
+func installSkillFor(agent string, project bool, serverURL, ns string, messaging ...bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("punk: warning - skill not installed: %v\n", err)
@@ -3461,6 +3512,7 @@ func installSkillFor(agent string, project bool, serverURL, ns string) {
 	// rendered with the real ServerURL/Namespace as equivalent.
 	for i := range targets {
 		targets[i].Opts.ServerURL, targets[i].Opts.Namespace = serverURL, ns
+		targets[i].Opts.Messaging = messagingGuidanceEnabled(messaging...)
 	}
 	// Codex discovers both CODEX_HOME/skills and the shared
 	// ~/.agents/skills tree, so a global codex install must first be
@@ -3509,6 +3561,7 @@ func cmdConnectCursor(args []string) error {
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (sessionStart context catch-up, stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3544,9 +3597,12 @@ func cmdConnectCursor(args []string) error {
 	var hooksChanged bool
 	{
 		var hookErr error
-		if *project {
+		switch {
+		case *messaging:
+			hooksChanged, hookErr = hookcli.ConnectCursorMessaging(hooksPath, punkPath, serverURL, projNS)
+		case *project:
 			hooksChanged, hookErr = hookcli.ConnectCursorNS(hooksPath, punkPath, serverURL, projNS)
-		} else {
+		default:
 			hooksChanged, hookErr = hookcli.ConnectCursor(hooksPath, punkPath, serverURL)
 		}
 		if hookErr != nil {
@@ -3604,7 +3660,7 @@ func cmdConnectCursor(args []string) error {
 			}
 		}
 		if !*noSkill {
-			installSkillFor("cursor", *project, serverURL, projNS)
+			installSkillFor("cursor", *project, serverURL, projNS, *messaging)
 		}
 		return nil
 	}
@@ -3614,7 +3670,7 @@ func cmdConnectCursor(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("cursor", *project, serverURL, projNS)
+		installSkillFor("cursor", *project, serverURL, projNS, *messaging)
 	}
 	fmt.Print(cursorMCPRegistrationNote(serverURL))
 	return nil
@@ -3852,6 +3908,7 @@ func cmdConnectAntigravity(args []string) error {
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (PreInvocation context on every invocation, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3883,7 +3940,12 @@ func cmdConnectAntigravity(args []string) error {
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
 
-	changed, err := hookcli.ConnectAntigravity(hooksPath, punkPath, serverURL)
+	var changed bool
+	if *messaging {
+		changed, err = hookcli.ConnectAntigravityMessaging(hooksPath, punkPath, serverURL)
+	} else {
+		changed, err = hookcli.ConnectAntigravity(hooksPath, punkPath, serverURL)
+	}
 	if err != nil {
 		return fmt.Errorf("connect antigravity: %w", err)
 	}
@@ -3926,7 +3988,7 @@ func cmdConnectAntigravity(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("antigravity", *project, serverURL, projNS)
+		installSkillFor("antigravity", *project, serverURL, projNS, *messaging)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
@@ -3988,6 +4050,7 @@ func cmdConnectCopilot(args []string) error {
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4014,7 +4077,12 @@ func cmdConnectCopilot(args []string) error {
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
 
-	changed, err := hookcli.ConnectCopilot(hooksPath, punkPath, serverURL)
+	var changed bool
+	if *messaging {
+		changed, err = hookcli.ConnectCopilotMessaging(hooksPath, punkPath, serverURL)
+	} else {
+		changed, err = hookcli.ConnectCopilot(hooksPath, punkPath, serverURL)
+	}
 	if err != nil {
 		return fmt.Errorf("connect copilot: %w", err)
 	}
@@ -4056,7 +4124,7 @@ func cmdConnectCopilot(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("copilot", *project, serverURL, "")
+		installSkillFor("copilot", *project, serverURL, "", *messaging)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
@@ -4096,6 +4164,7 @@ func cmdConnectHermes(args []string) error {
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	messaging := fs.Bool("messaging", false, "also wire a punk hook inbox entry (pre_llm_call per-turn context catch-up) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4118,7 +4187,12 @@ func cmdConnectHermes(args []string) error {
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
 
-	changed, err := hookcli.ConnectHermes(path, punkPath, serverURL)
+	var changed bool
+	if *messaging {
+		changed, err = hookcli.ConnectHermesMessaging(path, punkPath, serverURL)
+	} else {
+		changed, err = hookcli.ConnectHermes(path, punkPath, serverURL)
+	}
 	if err != nil {
 		return fmt.Errorf("connect hermes: %w", err)
 	}
@@ -4152,7 +4226,7 @@ func cmdConnectHermes(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("hermes", false, serverURL, "")
+		installSkillFor("hermes", false, serverURL, "", *messaging)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
@@ -4269,8 +4343,12 @@ func cmdConnectCodex(args []string) error {
 	agent := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *messaging && *noHooks {
+		return fmt.Errorf("connect codex: --messaging needs hooks; drop --no-hooks")
 	}
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 	punkPath, err := os.Executable()
@@ -4297,7 +4375,11 @@ func cmdConnectCodex(args []string) error {
 	configPath := filepath.Join(dir, "config.toml")
 
 	if !*noHooks {
-		changed, err := hookcli.ConnectCodexHooks(hooksPath, punkPath, serverURL, ns)
+		connectHooks := hookcli.ConnectCodexHooks
+		if *messaging {
+			connectHooks = hookcli.ConnectCodexHooksMessaging
+		}
+		changed, err := connectHooks(hooksPath, punkPath, serverURL, ns)
 		if err != nil {
 			return fmt.Errorf("connect codex hooks: %w", err)
 		}
@@ -4342,7 +4424,7 @@ func cmdConnectCodex(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("codex", *project, serverURL, ns)
+		installSkillFor("codex", *project, serverURL, ns, *messaging)
 	}
 	fmt.Println("punk: restart codex to pick up the changes")
 	return nil
@@ -4364,6 +4446,7 @@ func cmdSkill(args []string) error {
 	urlFlag := fs.String("url", "", "server URL mentioned in the skill (default: resolved like connect)")
 	nsFlag := fs.String("ns", "", "pin the skill to a namespace (default: resolved from the workspace)")
 	nameFlag := fs.String("name", "", "only this skill: punk-memory or punk-plan (default: both)")
+	messaging := fs.Bool("messaging", false, "include opt-in registered-session messaging workflow")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -4387,6 +4470,7 @@ func cmdSkill(args []string) error {
 			continue
 		}
 		tg.Opts.ServerURL, tg.Opts.Namespace = serverURL, *nsFlag
+		tg.Opts.Messaging = messagingGuidanceEnabled(*messaging)
 		content := hookcli.Render(tg)
 		switch action {
 		case "print":

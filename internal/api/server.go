@@ -89,18 +89,38 @@ func New(log *slog.Logger, d Deps) *Server {
 	s.mux.Route("/v1", func(v1 chi.Router) {
 		v1.Use(s.authMiddleware)
 		if s.mem != nil {
+			v1.Get("/namespaces", s.handleNamespaceIndex)
+		}
+		if s.mem != nil || s.region != nil {
 			v1.Route("/namespaces/{ns}", func(r chi.Router) {
-				r.Post("/memories", s.handleRemember)
-				r.Get("/memories", s.handleRecall)
-				r.Delete("/memories", s.handleForget)
-				r.Get("/memories/search", s.handleSearch)
-				r.Get("/keys", s.handleListKeys)
-				r.Get("/events", s.handleMemoryEvents)
-				r.Get("/tasks", s.handleTaskBoard)
-				r.Post("/tasks/{id}/status", s.handleTaskStatus)
-				r.Get("/profile", s.handleProfile)
-				r.Get("/diagnose", s.handleDiagnose)
+				if s.mem != nil {
+					r.Post("/memories", s.handleRemember)
+					r.Get("/memories", s.handleRecall)
+					r.Delete("/memories", s.handleForget)
+					r.Get("/memories/search", s.handleSearch)
+					r.Get("/keys", s.handleListKeys)
+					r.Get("/events", s.handleMemoryEvents)
+					r.Get("/tasks", s.handleTaskBoard)
+					r.Post("/tasks/{id}/status", s.handleTaskStatus)
+					r.Get("/profile", s.handleProfile)
+					r.Get("/diagnose", s.handleDiagnose)
+				}
+				if s.region != nil {
+					// Agent messaging transport (M3): region store is
+					// the durable inbox; the bus carries wake hints
+					// only (lossy by design).
+					r.Post("/members", s.handleRegisterMember)
+					r.Get("/members", s.handleListMembers)
+					r.Post("/messages", s.handleSendMessage)
+					r.Get("/messages", s.handleReadMessages)
+					r.Get("/messages/count", s.handleCountMessages)
+					r.Post("/messages/ack", s.handleAckMessages)
+					r.Post("/messages/release", s.handleReleaseMessages)
+					r.Get("/messages/events", s.handleMessageEvents)
+				}
 			})
+		}
+		if s.mem != nil {
 			v1.Group(func(ag chi.Router) {
 				ag.Use(s.rateLimit(50, 100)) // hooks fire on every tool call
 				ag.Post("/agent/hooks", s.handleAgentHook)

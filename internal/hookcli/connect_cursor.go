@@ -47,6 +47,24 @@ func ConnectCursor(hooksPath, punkPath, serverURL string) (changed bool, err err
 // ConnectCursorNS is ConnectCursor with a namespace override baked into
 // the generated hook commands (from punk connect --project).
 func ConnectCursorNS(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectCursor(hooksPath, punkPath, serverURL, ns, false)
+}
+
+// ConnectCursorMessaging is ConnectCursorNS plus punk hook inbox entries
+// (from punk connect cursor --messaging): an inbox command on
+// sessionStart (--mode context, answered with additional_context) and on
+// stop (--mode continue, answered with followup_message) - the only two
+// Cursor events whose reply contract can carry content
+// (cursor.com/docs/agent/hooks, fetched 2026-09-25: beforeSubmitPrompt's
+// output is exactly continue+user_message, no context field). Inbox
+// entries are deduped by isPunkManagedInbox (inbox_wire.go),
+// independently of the capture entries' isPunkManagedCursor, so either
+// side can be replaced without touching the other.
+func ConnectCursorMessaging(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectCursor(hooksPath, punkPath, serverURL, ns, true)
+}
+
+func connectCursor(hooksPath, punkPath, serverURL, ns string, messaging bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -70,6 +88,14 @@ func ConnectCursorNS(hooksPath, punkPath, serverURL, ns string) (changed bool, e
 			}
 		}
 		hooksAny[ev] = mergeCursorEntries(hooksAny[ev], punkPath, command)
+	}
+	if messaging {
+		// Both events are in cursorHookEvents, so their shape was
+		// validated above.
+		hooksAny["sessionStart"] = mergeInboxFlatEntries(hooksAny["sessionStart"], punkPath, "cursor",
+			map[string]any{"command": punkInboxHookCommand(punkPath, "cursor", "context", "", serverURL, ns)})
+		hooksAny["stop"] = mergeInboxFlatEntries(hooksAny["stop"], punkPath, "cursor",
+			map[string]any{"command": punkInboxHookCommand(punkPath, "cursor", "continue", "", serverURL, ns)})
 	}
 	settings["hooks"] = hooksAny
 

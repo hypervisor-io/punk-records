@@ -19,6 +19,9 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `budgets.wall_ms` | `PUNK_BUDGET_WALL_MS` | `600000` | |
 | `budgets.subagents` | `PUNK_BUDGET_SUBAGENTS` | `3` | children never spawn grandchildren |
 | `memory.retention_days` | `PUNK_MEMORY_RETENTION_DAYS` | `0` | 0 disables the hourly sweep |
+| `messaging.enabled` | `PUNK_MESSAGING` | `false` | MCP message tools and lean member discovery only; HTTP routes retain namespace-grant auth |
+| `messaging.max_unread_per_recipient` | `PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT` | `200` | positive cap per namespace/address; atomic admission, idempotent retries bypass |
+| `messaging.retention_days` | `PUNK_MESSAGING_RETENTION_DAYS` | `30` | delete only older ACKed messages in hourly maintenance; 0 disables; unread never deleted |
 | `memory.consolidate_days` | - | `0` | horizon for region compaction during consolidation; 0 disables (also gates `memory.contradictions` and the observation/reconcile passes) |
 | `memory.contradictions` | - | `false` | during consolidation, embedding-similar fact pairs are judged by the model; contradicting pairs get `contradicts` + `invalidated_by` links (ranking halves the older one's score); needs embeddings + `ai.enabled`; runs only when `memory.consolidate_days` > 0 |
 | `otel.endpoint` | `PUNK_OTEL_ENDPOINT` | empty | OTLP/HTTP; empty = noop tracer |
@@ -62,6 +65,57 @@ punk topo import --file catalog.yaml   # import a Backstage catalog
 punk skill install --agent <name>      # punk-memory and punk-plan skills for an agent (install|print|paths; --name picks one)
 kill -HUP <pid>                       # force spec reload (watcher also does this)
 ```
+
+## Agent messaging
+
+Server `PUNK_MESSAGING` uses boolean `1/0/true/false` values; explicit env
+false overrides YAML true. Invalid boolean values refuse boot. Both
+`punk serve` MCP toolsets and `punk mcp` stdio honor it; the latter uses the
+same region store and bus. Disabled default preserves lean tool schemas
+and guidance budget; full `list_region_members` predates messaging and
+stays available. HTTP routes are **not** disabled by this tool switch.
+
+Client delivery is a separate opt-in. `punk connect <subprocess-client>
+--messaging` installs the inbox command. Pi/OpenCode/OpenClaw instead use
+ordinary connect and exact `PUNK_MESSAGING=1` in the running client process.
+No `--messaging` connect flag is claimed for those extensions. Server env
+does not automatically propagate to a remote client's hooks.
+
+| Client environment / flag | Default | Meaning |
+|---|---|---|
+| `PUNK_MESSAGING` / subprocess hook `--messaging` | off | hook delivery opt-in; env 0 overrides flag; extensions require exact 1 |
+| `PUNK_NAMESPACE` / hook `--ns` | derive from payload cwd | explicit routing namespace, independent of MCP default |
+| `PUNK_MESSAGING_FROM` | empty | comma-separated allowed sender prefixes; held messages stay unread |
+| `PUNK_MESSAGING_SCAN_LIMIT` | 200, clamp 50-1000 | subprocess unread scan bound; leases denied pages during the scan, then releases them to avoid first-page starvation |
+| `PUNK_MESSAGING_RENDER_BYTES` | 32768 | hard whole-envelope byte cap including header/footer/neutralisation/notes; adapter ceilings may lower it; below minimum safe envelope: no delivery/ACK, release leases |
+| `PUNK_MESSAGING_MAX_CONTINUE` | 5 | continuation/wake cap; 0 disables continuing, not context catch-up |
+| `PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS` | 600 | sliding cap window |
+| hook `--wait-seconds` | 60, max 300 | bounded worker Stop wait, requires larger host timeout; never idle wake |
+| `XDG_STATE_HOME` | `~/.local/state` | subprocess inbox state under `punk/inbox`; server+namespace+address scoped |
+| `PUNK_MESSAGING_BACKOFF_MS` | 500 | extension retry base, doubles to max 30s |
+| `PUNK_MESSAGING_CONNECT_TIMEOUT_MS` | 10000 | Pi/OpenCode SSE connect watchdog |
+| `PUNK_MESSAGING_IDLE_TIMEOUT_MS` | 45000 | Pi/OpenCode SSE heartbeat watchdog |
+| `PUNK_MESSAGING_LEASE_SECONDS` | 15, clamp 1-300 | generated extension lease length; subprocess hooks use fixed 15 s |
+
+Subprocess allowlist scans use leased pages of 50, bounded by
+`PUNK_MESSAGING_SCAN_LIMIT`; a reached limit with nothing deliverable is
+reported on stderr. Extensions use a separate fixed bound of five pages
+(250 rows) per pass. Neither promises to find eligible rows beyond its
+bound. ACK/release requests use batches of at most 100 IDs. During worker
+wait, even GET after a hint uses the wait deadline.
+
+Automatic ACK means host handoff, not model completion. Idempotent send
+retries deduplicate only while the original message remains stored;
+retention deletion ends both full-ID recovery and that dedup history.
+No live-client, Windows PowerShell or Postgres runtime verification is
+implied by generated-script/SQLite test coverage.
+
+`punk skill install|print --messaging` includes a compact opt-in workflow
+without changing default skills. `connect --messaging` includes it for
+clients with skill installation; extension users may set the environment
+while connecting or use the skill command separately. Detailed contracts,
+native-hook paths, Cline MCP path overrides, version evidence, limits and
+owner-only migration/rollout procedure: [agent messaging](agent-messaging.md).
 
 ## Document ingest
 

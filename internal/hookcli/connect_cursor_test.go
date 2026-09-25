@@ -632,3 +632,117 @@ func TestWriteCursorRulesSymlinkPreserved(t *testing.T) {
 		t.Fatalf("symlink target missing updated content: %s", raw)
 	}
 }
+
+// --- --messaging inbox wiring (M7) -------------------------------------
+
+// With messaging on, sessionStart gets a --mode context inbox entry and
+// stop a --mode continue one, alongside - never replacing - the capture
+// entries; without it the file is byte-identical to ConnectCursor's
+// output. Contract: cursor.com/docs/agent/hooks, fetched 2026-09-25
+// (sessionStart additional_context, stop followup_message).
+func TestConnectCursorMessagingAddsInboxEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	changed, err := ConnectCursorMessaging(path, "/usr/local/bin/punk", "http://localhost:9090", "")
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	m := readCursorHooks(t, path)
+	hooks := m["hooks"].(map[string]any)
+
+	assertInboxEntry := func(event, mode string) {
+		t.Helper()
+		entries, ok := hooks[event].([]any)
+		if !ok || len(entries) != 2 {
+			t.Fatalf("%s: expected capture + inbox entries, got %v", event, hooks[event])
+		}
+		var capture, inbox string
+		for _, e := range entries {
+			cmd := e.(map[string]any)["command"].(string)
+			if strings.Contains(cmd, " hook inbox ") {
+				inbox = cmd
+			} else {
+				capture = cmd
+			}
+		}
+		if capture != "/usr/local/bin/punk hook --from cursor --url http://localhost:9090" {
+			t.Fatalf("%s: capture entry changed: %q", event, capture)
+		}
+		want := "/usr/local/bin/punk hook inbox --client cursor --mode " + mode + " --url http://localhost:9090 --messaging"
+		if inbox != want {
+			t.Fatalf("%s: inbox entry:\ngot:  %q\nwant: %q", event, inbox, want)
+		}
+	}
+	assertInboxEntry("sessionStart", "context")
+	assertInboxEntry("stop", "continue")
+
+	// beforeSubmitPrompt has no context-carrying reply field in Cursor's
+	// documented contract, so it must never get an inbox entry.
+	for _, e := range hooks["beforeSubmitPrompt"].([]any) {
+		if strings.Contains(e.(map[string]any)["command"].(string), " hook inbox ") {
+			t.Fatalf("beforeSubmitPrompt must stay capture-only: %v", e)
+		}
+	}
+
+	// Idempotent rerun.
+	changed, err = ConnectCursorMessaging(path, "/usr/local/bin/punk", "http://localhost:9090", "")
+	if err != nil || changed {
+		t.Fatalf("rerun: changed=%v err=%v", changed, err)
+	}
+
+	// A reconnect WITHOUT --messaging leaves the inbox entries in place
+	// (they are foreign to the capture dedup): the command SET per event
+	// is unchanged (entry order between capture and inbox may swap -
+	// both merges append their own entry last - and is not semantically
+	// meaningful: Cursor runs every entry of the array).
+	before := readCursorHooks(t, path)
+	if _, err := ConnectCursor(path, "/usr/local/bin/punk", "http://localhost:9090"); err != nil {
+		t.Fatal(err)
+	}
+	after := readCursorHooks(t, path)
+	for _, ev := range cursorHookEventNames {
+		want := map[string]int{}
+		for _, e := range before["hooks"].(map[string]any)[ev].([]any) {
+			want[e.(map[string]any)["command"].(string)]++
+		}
+		got := map[string]int{}
+		for _, e := range after["hooks"].(map[string]any)[ev].([]any) {
+			got[e.(map[string]any)["command"].(string)]++
+		}
+		for cmd, n := range want {
+			if got[cmd] != n {
+				t.Fatalf("%s: reconnect without --messaging changed the entry set (missing %q)", ev, cmd)
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: reconnect without --messaging added entries: %v", ev, got)
+		}
+	}
+}
+
+// User entries on the inbox-wired events survive the messaging merge in
+// order, and a namespace override is baked into the inbox command.
+func TestConnectCursorMessagingPreservesUserEntriesAndNS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	seed := `{"version":1,"hooks":{"sessionStart":[{"command":"./hooks/init.sh"}],"stop":[{"command":"./hooks/audit.sh"}],"workspaceOpen":[{"command":"./hooks/plugins.sh"}]}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectCursorMessaging(path, "/usr/local/bin/punk", "http://localhost:9090", "projns"); err != nil {
+		t.Fatal(err)
+	}
+	m := readCursorHooks(t, path)
+	hooks := m["hooks"].(map[string]any)
+	ss := hooks["sessionStart"].([]any)
+	if ss[0].(map[string]any)["command"] != "./hooks/init.sh" {
+		t.Fatalf("user sessionStart entry moved or dropped: %v", ss)
+	}
+	inboxCmd := ss[len(ss)-1].(map[string]any)["command"].(string)
+	if !strings.HasSuffix(inboxCmd, " --ns projns --messaging") {
+		t.Fatalf("inbox entry must carry the namespace pin and opt-in: %q", inboxCmd)
+	}
+	if hooks["workspaceOpen"].([]any)[0].(map[string]any)["command"] != "./hooks/plugins.sh" {
+		t.Fatal("unmanaged event touched")
+	}
+}

@@ -99,6 +99,7 @@ var translators = map[string]translator{
 	"copilot": translateCopilot,
 	"hermes":  translateHermes,
 	"codex":   translateCodex,
+	"cline":   translateCline,
 }
 
 // Normalize translates a native hook payload from agent "from" into the

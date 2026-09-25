@@ -206,7 +206,11 @@ main().catch((err) => {
 })
 `
 
-	rewritten := strings.Replace(string(extSrc), "export default function (pi) {", "function extensionFactory(pi) {", 1)
+	// The extension's default export is a named function declaration
+	// (punkPiExtension) since M8, so the messaging harness can invoke it
+	// by name; this rewrite still strips the export keyword so the driver
+	// below can call the factory directly.
+	rewritten := strings.Replace(string(extSrc), "export default function punkPiExtension(pi) {", "function extensionFactory(pi) {", 1)
 	if rewritten == string(extSrc) {
 		t.Fatal("expected to find and rewrite the extension's default export declaration")
 	}

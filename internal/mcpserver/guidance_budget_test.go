@@ -205,6 +205,12 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // inspectable-routing surface itself; the routed hits deliberately ride
 // the existing compact-hit schema instead of a new RouteResult subtree,
 // which is what keeps the growth to the meta block.
+//
+// M2 messaging re-measurement (2026-09-25): 23 agent tools, 30255 bytes,
+// ~7564 tokens, up 4548 bytes / ~1137 tokens from 25707 / ~6427. Added
+// wire entries: send_message 1173, read_messages 974, ack_messages 619,
+// await_messages 1073, list_region_members 704 bytes, plus five newlines.
+// Existing lean entries and initialize instructions are unchanged.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
@@ -221,6 +227,8 @@ const (
 	// search/unified_search, the routed-meta output schema and
 	// UnifiedHit's skill variant (see the re-measurement note above)
 	// + 16 slack.
+	// M11 restores the pre-messaging default; opt-in costs have a separate
+	// measured bound below and cannot buy slack for any existing tool.
 	agentToolsetBudgetTokens = 6443
 	// sessionOpenBudgetTokens is the two parts summed: what a host pays
 	// per session for punk's server-owned guidance with the lean toolset.
@@ -246,6 +254,34 @@ func TestInstructionsPayloadWithinBudget(t *testing.T) {
 	}
 	if got := estTokens(full.instructions) + estTokens(agent.wire); got > sessionOpenBudgetTokens {
 		t.Errorf("session open payload = ~%d tokens, budget %d", got, sessionOpenBudgetTokens)
+	}
+}
+
+// The messaging admission must not buy extra budget for existing tools.
+func TestMessagingAdmissionPreservesExistingToolBudget(t *testing.T) {
+	agent := probeSession(t, func(d *Deps) { d.Toolset = "agent"; d.MessagingEnabled = true })
+	var existing, messaging strings.Builder
+	for _, tool := range agent.tools {
+		switch tool.Name {
+		case "send_message", "read_messages", "ack_messages", "await_messages", "list_region_members":
+			messaging.WriteString(toolWireJSON(t, tool) + "\n")
+		default:
+			existing.WriteString(toolWireJSON(t, tool) + "\n")
+		}
+	}
+	t.Logf("existing lean tools: %d bytes, ~%d tokens; messaging admission: %d bytes, ~%d tokens",
+		existing.Len(), estTokens(existing.String()), messaging.Len(), estTokens(messaging.String()))
+	if got := estTokens(existing.String()); got > 6443 {
+		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443", got)
+	}
+	// M10/M11: lease/owner, sent view, count and full-ID recovery, plus
+	// message lease metadata add 883 bytes to M2's 4548-byte admission.
+	// Current measured admission 5431 bytes = 1358 tokens; 16 tokens slack.
+	if got := estTokens(messaging.String()); got > 1374 {
+		t.Errorf("messaging admission = ~%d tokens, budget 1374 (1358 measured + 16 slack)", got)
+	}
+	if got := estTokens(agent.wire); got > agentToolsetBudgetTokens+1374 {
+		t.Errorf("enabled tools budget = %d", got)
 	}
 }
 
@@ -309,6 +345,15 @@ func TestInstructionsAndToolsetRoutingDiscoverable(t *testing.T) {
 	for _, c := range cases {
 		if !strings.Contains(union, c.fragment) {
 			t.Errorf("union of instructions+tools/list lost %q (%s)", c.fragment, c.why)
+		}
+	}
+}
+
+func TestEnabledMessagingRoutingDiscoverable(t *testing.T) {
+	p := probeSession(t, func(d *Deps) { d.Toolset = "agent"; d.MessagingEnabled = true })
+	for _, term := range []string{"list_region_members", "send_message", "read_messages", "await_messages", "ack_messages", "not task completed", "untrusted agent text", "lease_seconds", "count_only", "sent"} {
+		if !strings.Contains(p.wire, term) {
+			t.Errorf("enabled surface lost %q", term)
 		}
 	}
 }

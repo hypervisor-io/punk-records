@@ -389,3 +389,66 @@ func TestConnectHermesMCP(t *testing.T) {
 		t.Fatal("idempotent")
 	}
 }
+
+// --- --messaging inbox wiring (M7 addendum) ----------------------------
+
+// With messaging on, pre_llm_call gets a capture AND an inbox entry
+// (Hermes' only content-carrying hook contract, per hermes-agent.
+// nousresearch.com/docs/user-guide/features/hooks); every other wired
+// event stays capture-only. The two entries on pre_llm_call dedup
+// independently (capture via isPunkManagedHermes, inbox via
+// isPunkManagedInbox), so a rerun replaces each without duplicating the
+// other.
+func TestConnectHermesMessagingAddsInboxEntry(t *testing.T) {
+	path := writeHermesFile(t, "hooks:\n  pre_llm_call:\n    - command: \"./mine.sh\"\n      timeout: 5\n")
+	changed, err := ConnectHermesMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	cfg, raw := readHermesConfig(t, path)
+	entries := cfg.Hooks["pre_llm_call"]
+	if len(entries) != 3 {
+		t.Fatalf("expected user + capture + inbox entries, got %d: %s", len(entries), raw)
+	}
+	if entries[0].Command != "./mine.sh" || entries[0].Timeout != 5 {
+		t.Fatalf("user entry moved or changed: %s", raw)
+	}
+	if entries[1].Command != "/usr/local/bin/punk hook --from hermes --url http://localhost:9090" {
+		t.Fatalf("capture entry changed: %q", entries[1].Command)
+	}
+	want := "/usr/local/bin/punk hook inbox --client hermes --mode context --url http://localhost:9090 --messaging"
+	if entries[2].Command != want {
+		t.Fatalf("inbox entry:\ngot:  %q\nwant: %q", entries[2].Command, want)
+	}
+	if entries[2].Timeout != hermesHookTimeoutSec {
+		t.Fatalf("inbox entry timeout: %d", entries[2].Timeout)
+	}
+	for _, ev := range []string{"on_session_start", "post_tool_call", "post_llm_call"} {
+		for _, e := range cfg.Hooks[ev] {
+			if strings.Contains(e.Command, " hook inbox ") {
+				t.Fatalf("%s must stay capture-only: %q", ev, e.Command)
+			}
+		}
+	}
+
+	changed, err = ConnectHermesMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || changed {
+		t.Fatalf("rerun: changed=%v err=%v", changed, err)
+	}
+	cfg2, _ := readHermesConfig(t, path)
+	if len(cfg2.Hooks["pre_llm_call"]) != 3 {
+		t.Fatalf("rerun duplicated an entry: %d entries", len(cfg2.Hooks["pre_llm_call"]))
+	}
+}
+
+// Without messaging the written file contains no inbox command at all.
+func TestConnectHermesWithoutMessagingHasNoInboxEntries(t *testing.T) {
+	path := writeHermesFile(t, "hooks: {}\n")
+	if _, err := ConnectHermes(path, "/usr/local/bin/punk", "http://localhost:9090"); err != nil {
+		t.Fatal(err)
+	}
+	_, raw := readHermesConfig(t, path)
+	if strings.Contains(raw, " hook inbox") {
+		t.Fatalf("non-messaging connect wrote an inbox entry: %s", raw)
+	}
+}

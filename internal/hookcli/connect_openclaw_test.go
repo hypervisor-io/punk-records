@@ -48,10 +48,14 @@ func openClawEntryFlags(cfg map[string]any) (pluginsEnabled, entryEnabled, conve
 	return pluginsEnabled, entryEnabled, conversation, injection, true
 }
 
-// TestWriteOpenClawPluginCreatesBothFiles pins the two artifacts and the
-// link between them: package.json's openclaw.pluginEntry must name the file
-// actually written, or OpenClaw loads nothing.
-func TestWriteOpenClawPluginCreatesBothFiles(t *testing.T) {
+// TestWriteOpenClawPluginCreatesAllFiles pins the three artifacts and the
+// links between them, per the CURRENT documented loader
+// (docs.openclaw.ai/plugins/manifest and /plugins/manifest/package-json,
+// fetched 2026-09-25): package.json's openclaw.extensions must name the
+// file actually written, and openclaw.plugin.json (required for every
+// native plugin) must declare the same id as the package name and the
+// config.json plugins.entries key.
+func TestWriteOpenClawPluginCreatesAllFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "plugins", OpenClawPluginID)
 	changed, err := WriteOpenClawPlugin(dir, "http://memory.internal:9090")
 	if err != nil {
@@ -88,11 +92,8 @@ func TestWriteOpenClawPluginCreatesBothFiles(t *testing.T) {
 		Type     string `json:"type"`
 		Main     string `json:"main"`
 		OpenClaw struct {
-			PluginEntry string `json:"pluginEntry"`
-			Permissions struct {
-				Conversation bool `json:"conversation"`
-				Sessions     bool `json:"sessions"`
-			} `json:"permissions"`
+			Extensions  []string `json:"extensions"`
+			PluginEntry string   `json:"pluginEntry"`
 		} `json:"openclaw"`
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "package.json"))
@@ -108,11 +109,116 @@ func TestWriteOpenClawPluginCreatesBothFiles(t *testing.T) {
 	if pkg.Type != "module" {
 		t.Fatalf("type = %q, want module (the entry file uses export default)", pkg.Type)
 	}
-	if pkg.OpenClaw.PluginEntry != "./index.js" || pkg.Main != "./index.js" {
-		t.Fatalf("pluginEntry/main point at %q/%q, not the file that was written", pkg.OpenClaw.PluginEntry, pkg.Main)
+	if pkg.OpenClaw.PluginEntry != "" || len(pkg.OpenClaw.Extensions) != 1 || pkg.OpenClaw.Extensions[0] != "./index.js" || pkg.Main != "./index.js" {
+		t.Fatalf("extensions/main point at %v/%q, not the file that was written (pluginEntry must be gone)", pkg.OpenClaw.Extensions, pkg.Main)
 	}
-	if !pkg.OpenClaw.Permissions.Conversation || !pkg.OpenClaw.Permissions.Sessions {
-		t.Fatal("the plugin must declare the conversation and sessions permissions its hooks use")
+
+	manifestRaw, err := os.ReadFile(filepath.Join(dir, "openclaw.plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasOpenClawMarker(string(manifestRaw)) {
+		t.Fatalf("manifest is missing the managed marker comment:\n%s", manifestRaw[:120])
+	}
+	// The manifest is JSON5 by loader contract; punk's own output must
+	// also be plain JSON after the marker comment line.
+	manifestBody := strings.SplitN(string(manifestRaw), "\n", 2)[1]
+	var manifest struct {
+		ID           string `json:"id"`
+		ConfigSchema struct {
+			Type                 string `json:"type"`
+			AdditionalProperties bool   `json:"additionalProperties"`
+		} `json:"configSchema"`
+	}
+	if err := json.Unmarshal([]byte(manifestBody), &manifest); err != nil {
+		t.Fatalf("manifest body is not valid JSON after the marker comment: %v\n%s", err, manifestBody)
+	}
+	if manifest.ID != OpenClawPluginID {
+		t.Fatalf("manifest id = %q, want %q (must equal the package name and the config.json entry key)", manifest.ID, OpenClawPluginID)
+	}
+	if manifest.ConfigSchema.Type != "object" || manifest.ConfigSchema.AdditionalProperties {
+		t.Fatalf("manifest configSchema must be an object with additionalProperties false, got %+v", manifest.ConfigSchema)
+	}
+}
+
+// TestWriteOpenClawPluginMigratesRetiredPackageShape pins that a
+// package.json punk itself wrote in the retired "openclaw".pluginEntry
+// shape (pre-M8 output) still declares the punk name and is migrated in
+// place to the current "openclaw".extensions shape rather than refused,
+// and that the now-required manifest is created alongside it.
+func TestWriteOpenClawPluginMigratesRetiredPackageShape(t *testing.T) {
+	dir := t.TempDir()
+	oldPunkPkg := `{
+  "name": "` + OpenClawPluginID + `",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "openclaw": {
+    "pluginEntry": "./index.js",
+    "permissions": { "conversation": true, "sessions": true }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(oldPunkPkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WriteOpenClawPlugin(dir, "http://localhost:9090")
+	if err != nil {
+		t.Fatalf("punk's own retired package shape must be migrated, not refused: %v", err)
+	}
+	if !changed {
+		t.Fatal("the migration must report changed")
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkg struct {
+		OpenClaw struct {
+			Extensions  []string `json:"extensions"`
+			PluginEntry string   `json:"pluginEntry"`
+		} `json:"openclaw"`
+	}
+	if err := json.Unmarshal(after, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	if pkg.OpenClaw.PluginEntry != "" || len(pkg.OpenClaw.Extensions) != 1 || pkg.OpenClaw.Extensions[0] != "./index.js" {
+		t.Fatalf("retired pluginEntry shape was not migrated to extensions: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "openclaw.plugin.json")); err != nil {
+		t.Fatal("the migration must also create the now-required manifest")
+	}
+}
+
+// TestWriteOpenClawPluginRefusesForeignManifest pins the never-destroy
+// rule for the manifest: a hand-authored openclaw.plugin.json without the
+// managed marker is refused byte-exact, and the refusal leaves the other
+// files unwritten too.
+func TestWriteOpenClawPluginRefusesForeignManifest(t *testing.T) {
+	dir := t.TempDir()
+	const body = `{"id":"someone-elses-plugin","configSchema":{"type":"object"}}`
+	if err := os.WriteFile(filepath.Join(dir, "openclaw.plugin.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := WriteOpenClawPlugin(dir, "http://localhost:9090")
+	if err == nil {
+		t.Fatal("want a refusal for an unmarked manifest")
+	}
+	if !strings.Contains(err.Error(), "openclaw.plugin.json") {
+		t.Fatalf("error %q does not name the manifest", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "openclaw.plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Fatalf("a refused write modified the manifest:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.js")); err == nil {
+		t.Fatal("a refused write still created index.js")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		t.Fatal("a refused write still created package.json")
 	}
 }
 

@@ -18,6 +18,7 @@ nav button{background:none;border:1px solid var(--line);color:var(--dim);padding
 border-radius:6px;cursor:pointer;font:inherit}
 nav button.on{color:var(--cyan);border-color:var(--cyan)}
 main{max-width:1100px;margin:24px auto}
+main:has(#board.on){max-width:1500px}
 section{display:none}section.on{display:block}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -43,6 +44,28 @@ button.act:hover{border-color:var(--cyan)}
 padding:6px 10px;border-radius:6px;font:12px var(--mono);width:220px}
 .kv{color:var(--dim);font-size:12px;margin:10px 0}
 .kv b{color:var(--ink)}
+.b-done{color:var(--green)}.b-in_progress{color:var(--cyan)}.b-review{color:var(--amber)}
+.b-blocked{color:var(--magenta)}.b-pending{color:var(--dim)}
+#board .split{display:grid;grid-template-columns:260px minmax(0,1fr);gap:18px;align-items:start}
+#board table{table-layout:fixed}
+#board td{word-break:break-word}
+#board col.c-task{width:26%}#board col.c-state{width:11%}#board col.c-holder{width:11%}
+#board col.c-dep{width:10%}#board col.c-status{width:28%}#board col.c-upd{width:14%}
+#boardhead{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+#boardstate{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+padding:5px 8px;border-radius:6px;font:12px var(--mono)}
+.members{color:var(--dim);font-size:11.5px;max-height:3.2em;overflow:hidden}
+#nspanel{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px}
+#nsfilter{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);
+padding:6px 8px;border-radius:6px;font:12px var(--mono);margin-bottom:8px}
+#nspanel label{display:flex;gap:6px;align-items:center;color:var(--dim);font-size:11.5px;margin-bottom:8px}
+#nslist{max-height:70vh;overflow:auto}
+.ns{display:flex;gap:8px;align-items:baseline;padding:6px 8px;border-radius:6px;cursor:pointer}
+.ns:hover{background:#151a35}
+.ns.on{background:#151a35;box-shadow:inset 2px 0 0 var(--cyan)}
+.ns .name{flex:1;word-break:break-all;font-size:12.5px}
+.ns .n{font-family:var(--mono);font-size:11px;color:var(--dim)}
+.ns.on .name{color:var(--cyan)}
 </style>
 </head>
 <body>
@@ -50,14 +73,37 @@ padding:6px 10px;border-radius:6px;font:12px var(--mono);width:220px}
   <h1><b>PUNK RECORDS</b> OPERATOR</h1>
   <input id="token" type="password" placeholder="API token (Bearer)" >
   <nav>
-    <button data-tab="inbox" class="on">Inbox</button>
+    <button data-tab="board" class="on">Board</button>
+    <button data-tab="inbox">Inbox</button>
     <button data-tab="tasks">Tasks</button>
     <button data-tab="agents">Agents</button>
     <button data-tab="costs">Costs</button>
   </nav>
 </header>
 <main>
-  <section id="inbox" class="on">
+  <section id="board" class="on">
+    <div class="split">
+      <aside id="nspanel">
+        <input id="nsfilter" placeholder="filter namespaces">
+        <label><input id="nstasks" type="checkbox" checked> only with tasks</label>
+        <div id="nslist"></div>
+      </aside>
+      <div>
+        <div id="boardhead">
+          <select id="boardstate">
+            <option value="">all states</option>
+            <option value="pending">pending</option>
+            <option value="in_progress">in progress</option>
+            <option value="review">review</option>
+            <option value="blocked">blocked</option>
+            <option value="done">done</option>
+          </select>
+        </div>
+        <div id="boardview"></div>
+      </div>
+    </div>
+  </section>
+  <section id="inbox">
     <h3 style="margin-bottom:10px">Proposals awaiting approval</h3>
     <div id="proposals"></div>
     <h3 style="margin:24px 0 10px">Parked tasks (input required)</h3>
@@ -74,7 +120,7 @@ padding:6px 10px;border-radius:6px;font:12px var(--mono);width:220px}
 const $=q=>document.querySelector(q);
 const token=()=>localStorage.getItem('amk')||'';
 $('#token').value=token();
-$('#token').addEventListener('change',e=>localStorage.setItem('amk',e.target.value));
+$('#token').addEventListener('change',e=>{localStorage.setItem('amk',e.target.value);namespaces=null;refresh();});
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
   document.querySelectorAll('main section').forEach(x=>x.classList.remove('on'));
@@ -159,8 +205,64 @@ async function loadCosts(){
       <td class="mono">${usd(a.avg_per_task_microusd)}</td></tr>`).join('')+'</table>';
   }catch(e){$('#costview').innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
 }
+let ns=localStorage.getItem('ns')||'';
+$('#nsfilter').addEventListener('input',renderNamespaces);
+$('#nstasks').addEventListener('change',()=>{namespaces=null;loadBoard();});
+let namespaces=null;
+function pickNS(name){ns=name;localStorage.setItem('ns',name);renderNamespaces();loadNSBoard();}
+function renderNamespaces(){
+  const q=$('#nsfilter').value.trim().toLowerCase();
+  const list=(namespaces||[]).filter(n=>!q||n.name.toLowerCase().includes(q));
+  $('#nslist').innerHTML=list.length?list.map(n=>`<div class="ns${n.name===ns?' on':''}" data-ns="${esc(n.name)}">
+    <span class="name">${esc(n.name)}</span>
+    <span class="n">${n.tasks?n.tasks+'t':''} ${n.facts}f</span></div>`).join('')
+    :'<div class="empty">no namespaces</div>';
+}
+$('#nslist').addEventListener('click',e=>{
+  const row=e.target.closest('.ns');
+  if(row)pickNS(row.dataset.ns);
+});
+async function loadBoard(){
+  try{
+    if(!namespaces){
+      const d=await api('/v1/namespaces'+($('#nstasks').checked?'?tasks=1':''));
+      namespaces=d.namespaces||[];
+      if(!namespaces.some(n=>n.name===ns))ns=namespaces.length?namespaces[0].name:'';
+      if(ns)localStorage.setItem('ns',ns);
+    }
+    renderNamespaces();
+    await loadNSBoard();
+  }catch(e){$('#nslist').innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
+}
+async function loadNSBoard(){
+  if(!ns){$('#boardview').innerHTML='<div class="empty">no namespace selected</div>';return;}
+  try{
+    const st=$('#boardstate').value;
+    const b=await api('/v1/namespaces/'+encodeURIComponent(ns)+'/tasks'+(st?'?state='+st:''));
+    const c=b.counts||{};
+    const names=(b.members||[]).map(m=>m.agent||m.name||'').filter(Boolean);
+    const shown=names.slice(0,10).map(esc).join(', ')+(names.length>10?' +'+(names.length-10)+' more':'');
+    $('#boardview').innerHTML=`<div class="kv"><b>${esc(b.namespace)}</b> · ${c.total||0} tasks ·
+      done <b>${c.done||0}</b> · in progress <b>${c.in_progress||0}</b> · review <b>${c.review||0}</b> ·
+      blocked <b>${c.blocked||0}</b> · pending <b>${c.pending||0}</b>
+      ${b.next?'· next <b>'+esc(b.next)+'</b>':''}
+      ${names.length?'<div class="members">members: '+shown+'</div>':''}</div>`+
+      ((b.tasks||[]).length?'<table><colgroup><col class="c-task"><col class="c-state">'+
+      '<col class="c-holder"><col class="c-dep"><col class="c-status"><col class="c-upd"></colgroup>'+
+      '<tr><th>task</th><th>state</th><th>holder</th><th>depends on</th><th>status</th><th>updated</th></tr>'+
+      b.tasks.map(t=>`<tr><td><b>${esc(t.id)}</b><div class="mono">${esc(t.title||'')}</div></td>
+      <td>${badge(t.state)}${t.ready?' <span class="badge b-in_progress">ready</span>':''}</td>
+      <td class="mono">${esc(t.holder||'-')}</td>
+      <td class="mono">${esc((t.depends_on||[]).join(', ')||'-')}</td>
+      <td class="mono">${esc(t.status||'')}</td>
+      <td class="mono">${esc((t.updated_at||'').slice(0,16))}<div>${esc(t.by||'')}</div></td></tr>`).join('')+'</table>'
+      :'<div class="empty">no tasks match</div>');
+  }catch(e){$('#boardview').innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
+}
+$('#boardstate').addEventListener('change',loadNSBoard);
 function refresh(){
   const tab=document.querySelector('nav button.on').dataset.tab;
+  if(tab==='board')loadBoard();
   if(tab==='inbox')loadInbox();
   if(tab==='tasks')loadTasks();
   if(tab==='agents')loadAgents();

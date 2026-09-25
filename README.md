@@ -271,12 +271,14 @@ hook and plugin systems, wired the same way.
 
 ```sh
 punk serve                # memory server on :9090
-punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, hermes, openclaw - see the matrix below
+punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, hermes, openclaw, codex, cline - see the matrix below
 ```
 
 `punk connect claude-code` (also `cursor`, `opencode`) now wires three things: the capture and injection hooks, the punk MCP server entry (`/mcp?toolset=agent`, the lean session toolset), and, for Claude Code, the `mcp__punk` permission rule so calls never prompt. Add `--verify` to open a real MCP session and call `whoami` before you trust it. Use `--no-mcp` to keep the old hooks-only behaviour and `--force` to replace an `mcpServers.punk` entry punk did not write.
 
 Inside a session the agent can omit `namespace` on every tool: it resolves from the workspace root the client advertises, exactly as the hooks derive it. `whoami` shows the result. `remember_many` writes up to 200 facts in one call; the stdio server (`punk mcp`) also accepts `remember_document {path}`. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
+
+Agent messaging is opt-in: enable server `messaging.enabled` (or `PUNK_MESSAGING=1`), then `punk connect <subprocess-client> --messaging`. Pi/OpenCode/OpenClaw use ordinary connect plus runtime `PUNK_MESSAGING=1`, not a connect flag. Message tools use explicit session addresses and namespace/sender arguments, which can differ from MCP identity defaults. See the [delivery matrix and limits](docs/agent-messaging.md#client-delivery-matrix). Default lean tool schemas and guidance remain unchanged; the server switch hides MCP tools, not authorized HTTP routes.
 
 | Target | Capture hooks | In-session tools | Where the tools come from |
 | --- | --- | --- | --- |
@@ -288,11 +290,12 @@ Inside a session the agent can omit `namespace` on every tool: it resolves from 
 | hermes | config.yaml hooks | MCP | `~/.hermes/config.yaml` `mcp_servers.punk` |
 | openclaw | plugin | MCP | `config.json` `mcp.servers.punk` |
 | codex | hooks.json (`[features] hooks = true`) | MCP | `$CODEX_HOME/config.toml` `[mcp_servers.punk]` inside a punk-managed block |
+| cline | native event files | MCP | `~/.cline/data/settings/cline_mcp_settings.json`, `type:streamableHttp`; `CLINE_MCP_SETTINGS_PATH` overrides |
 | pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
 
-Every target accepts `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--no-skill`. All but `openclaw` and `hermes` also accept `--project`, which writes project-local files and derives the namespace from the git remote.
+Established targets accept `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--no-skill`. All but `openclaw` and `hermes` also accept `--project`, which writes project-local files and derives the namespace from the git remote. Cline supports `--project`, `--messaging`, `--no-mcp`, `--force`, `--api-key-env`, and `--agent`, but does not install skills or expose `--verify`; use `punk connect verify` separately. Its native file hooks refuse to overwrite user executables. Cline 4.1.20+ receives catch-up on TaskStart/UserPromptSubmit only, without stop continuation or idle wake. See [agent messaging](docs/agent-messaging.md#cline-file-hooks-catch-up-only).
 
-Every `punk connect <agent>` also installs two skills where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). `punk-memory` teaches namespaces, read routing, key conventions, claims and the `/tasks` coordination convention (the worker side: `list_tasks`, `claim_work`, `set_task_status`, `await_tasks`), feedback and compact output. `punk-plan` is the planner side: create a coordination namespace, write `/plan/summary`, conventions and one `/tasks/<id>` fact per task with `depends_on`, leave a `/plan/current` pointer in the repository namespace, hand workers a prompt, then gate with the task board, review each finished task, and release. A file you edited yourself is never overwritten. `punk skill print --agent <name> [--name punk-memory|punk-plan]` shows the text; `--no-skill` skips both.
+Every `punk connect <agent>` except Cline also installs two skills where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). `punk-memory` teaches namespaces, read routing, key conventions, claims and the `/tasks` coordination convention (the worker side: `list_tasks`, `claim_work`, `set_task_status`, `await_tasks`), feedback and compact output. `punk-plan` is the planner side: create a coordination namespace, write `/plan/summary`, conventions and one `/tasks/<id>` fact per task with `depends_on`, leave a `/plan/current` pointer in the repository namespace, hand workers a prompt, then gate with the task board, review each finished task, and release. A file you edited yourself is never overwritten. `punk skill print --agent <name> [--name punk-memory|punk-plan]` shows the text; `--no-skill` skips both.
 
 Codex asks once to trust the punk hook; with API keys enabled, export `PUNK_API_KEY` in the shell that starts Codex because Codex reads bearer tokens from the environment, not from a file.
 

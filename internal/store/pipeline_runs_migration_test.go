@@ -9,18 +9,36 @@ import (
 )
 
 // exercisePipelineRuns proves migration 0023 up/down on an already
-// migrated store: the runs table enforces the idempotent work key at the
-// tip, one down from the tip reverts exactly 0023, and re-up restores it.
+// migrated store: the runs table enforces the idempotent work key, one
+// down from 0023 reverts exactly it, and re-up restores it.
 func exercisePipelineRuns(t *testing.T, d *DB) {
 	t.Helper()
 	ctx := context.Background()
 
-	st, err := d.MigrateStatus(ctx)
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if tip := st[len(st)-1]; tip.Version != 23 || tip.Name != "pipeline_runs" {
-		t.Fatalf("migration tip = %04d_%s, want 0023_pipeline_runs", tip.Version, tip.Name)
+	// newer migrations (0024+) may sit above it; step down to 0023 first
+	for {
+		st, err := d.MigrateStatus(ctx)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		tip := MigrationStatus{}
+		for _, m := range st {
+			if m.Applied {
+				tip = m
+			}
+		}
+		if tip.Version == 23 {
+			if tip.Name != "pipeline_runs" {
+				t.Fatalf("0023 is %s, want pipeline_runs", tip.Name)
+			}
+			break
+		}
+		if tip.Version < 23 {
+			t.Fatalf("0023_pipeline_runs not applied (applied tip %04d_%s)", tip.Version, tip.Name)
+		}
+		if _, err := d.MigrateDown(ctx); err != nil {
+			t.Fatalf("step down past %04d_%s: %v", tip.Version, tip.Name, err)
+		}
 	}
 
 	// table is usable: record a run, read it back

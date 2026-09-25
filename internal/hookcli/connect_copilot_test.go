@@ -330,3 +330,79 @@ func TestConnectCopilotRefusesWrongTypedEventValue(t *testing.T) {
 		t.Fatalf("file must be left untouched: got %q, want %q", after, original)
 	}
 }
+
+// --- --messaging inbox wiring (M7) -------------------------------------
+
+// With messaging on, SessionStart gets a --mode context inbox entry and
+// Stop a --mode continue one; UserPromptSubmit gets none - Copilot
+// DROPS config-file hook output for that event (docs.github.com/en/
+// copilot/reference/hooks-reference, fetched 2026-09-25), so an entry
+// there could never deliver. Contract docblock also lives on
+// ConnectCopilotMessaging.
+func TestConnectCopilotMessagingAddsInboxEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "punk.json")
+	changed, err := ConnectCopilotMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	hooks := readCopilotHooks(t, path)["hooks"].(map[string]any)
+
+	assertInboxEntry := func(event, mode string) {
+		t.Helper()
+		entries, ok := hooks[event].([]any)
+		if !ok || len(entries) != 2 {
+			t.Fatalf("%s: expected capture + inbox entries, got %v", event, hooks[event])
+		}
+		var capture, inbox map[string]any
+		for _, e := range entries {
+			m := e.(map[string]any)
+			if strings.Contains(m["command"].(string), " hook inbox ") {
+				inbox = m
+			} else {
+				capture = m
+			}
+		}
+		if capture["command"] != "/usr/local/bin/punk hook --from copilot --url http://localhost:9090" {
+			t.Fatalf("%s: capture entry changed: %v", event, capture)
+		}
+		want := "/usr/local/bin/punk hook inbox --client copilot --mode " + mode + " --url http://localhost:9090 --messaging"
+		if inbox["command"] != want {
+			t.Fatalf("%s: inbox entry:\ngot:  %q\nwant: %q", event, inbox["command"], want)
+		}
+		// Copilot's canonical timeout field is timeoutSec (the docs'
+		// Command hooks field table); the inbox entry must match the
+		// capture entry's shape.
+		if inbox["type"] != "command" || inbox["timeoutSec"] != float64(10) {
+			t.Fatalf("%s: inbox entry shape: %v", event, inbox)
+		}
+	}
+	assertInboxEntry("SessionStart", "context")
+	assertInboxEntry("Stop", "continue")
+
+	for _, ev := range []string{"UserPromptSubmit", "PostToolUse", "SessionEnd"} {
+		for _, e := range hooks[ev].([]any) {
+			if strings.Contains(e.(map[string]any)["command"].(string), " hook inbox ") {
+				t.Fatalf("%s must stay capture-only: %v", ev, e)
+			}
+		}
+	}
+
+	changed, err = ConnectCopilotMessaging(path, "/usr/local/bin/punk", "http://localhost:9090")
+	if err != nil || changed {
+		t.Fatalf("rerun: changed=%v err=%v", changed, err)
+	}
+}
+
+// Without messaging the written file contains no inbox command at all.
+func TestConnectCopilotWithoutMessagingHasNoInboxEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "punk.json")
+	if _, err := ConnectCopilot(path, "/usr/local/bin/punk", "http://localhost:9090"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), " hook inbox") {
+		t.Fatalf("non-messaging connect wrote an inbox entry: %s", raw)
+	}
+}

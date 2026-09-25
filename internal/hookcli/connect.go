@@ -49,6 +49,96 @@ func ConnectClaudeCode(settingsPath, punkPath, serverURL string) (changed bool, 
 // ConnectClaudeCodeNS is ConnectClaudeCode with a namespace override
 // baked into the generated hook commands (from punk connect --project).
 func ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, false)
+}
+
+// ConnectClaudeCodeMessaging is ConnectClaudeCodeNS plus the opt-in
+// agent-message delivery entries (punk connect claude-code --messaging):
+// a separate "punk hook inbox --client claude-code" matcher group on
+// SessionStart and UserPromptSubmit (--mode context: nested
+// hookSpecificOutput.additionalContext) and on Stop (--mode continue:
+// {"decision":"block","reason":...}). The inbox groups are deduped by
+// isPunkManagedInbox, independently of the capture groups, and the
+// capture groups are byte-identical to ConnectClaudeCodeNS's.
+func ConnectClaudeCodeMessaging(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, true)
+}
+
+// claudeInboxEvents maps each Claude Code/Codex event punk delivers
+// messages on to the inbox mode it runs.
+var claudeInboxEvents = []struct{ event, mode string }{
+	{"SessionStart", "context"},
+	{"UserPromptSubmit", "context"},
+	{"Stop", "continue"},
+}
+
+// claudeInboxTimeout is the inbox group's handler timeout in seconds:
+// comfortably above the hook's own bounded work (2s HTTP client per
+// call, 2s state lock) and far below either client's default.
+const claudeInboxTimeout = 15
+
+// mergeInboxGroups returns one event's group list with any stale
+// punk-managed inbox group for client removed and a fresh one appended
+// last. Capture groups and user groups are kept untouched, in order.
+func mergeInboxGroups(raw any, punkPath, client, command string, matcher string) []any {
+	var groups []any
+	if arr, ok := raw.([]any); ok {
+		for _, g := range arr {
+			if isPunkManagedInboxGroup(g, punkPath, client) {
+				continue
+			}
+			groups = append(groups, g)
+		}
+	}
+	group := map[string]any{
+		"hooks": []any{map[string]any{"type": "command", "command": command, "timeout": claudeInboxTimeout}},
+	}
+	if matcher != "" {
+		group["matcher"] = matcher
+	}
+	return append(groups, group)
+}
+
+// isPunkManagedInboxGroup reports whether every handler in group is a
+// punk inbox command for client (see isPunkManagedInbox).
+func isPunkManagedInboxGroup(group any, punkPath, client string) bool {
+	m, ok := group.(map[string]any)
+	if !ok {
+		return false
+	}
+	hooks, ok := m["hooks"].([]any)
+	if !ok || len(hooks) == 0 {
+		return false
+	}
+	for _, h := range hooks {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			return false
+		}
+		cmd, _ := hm["command"].(string)
+		if !isPunkManagedInbox(cmd, punkPath, client) {
+			return false
+		}
+	}
+	return true
+}
+
+// addClaudeShapedInbox merges the inbox groups for client into hooksAny
+// (a Claude-shaped "hooks" object whose event values were already
+// validated as arrays or absent). sessionMatcher, when non-empty, is
+// stamped on the SessionStart inbox group.
+func addClaudeShapedInbox(hooksAny map[string]any, punkPath, client, serverURL, ns, sessionMatcher string) {
+	for _, ie := range claudeInboxEvents {
+		matcher := ""
+		if ie.event == "SessionStart" {
+			matcher = sessionMatcher
+		}
+		cmd := punkInboxHookCommand(punkPath, client, ie.mode, "", serverURL, ns)
+		hooksAny[ie.event] = mergeInboxGroups(hooksAny[ie.event], punkPath, client, cmd, matcher)
+	}
+}
+
+func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(settingsPath)
 	if err != nil {
 		return false, err
@@ -72,6 +162,11 @@ func ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, ns string) (changed 
 			}
 		}
 		hooksAny[ev] = mergeEventGroups(hooksAny[ev], ev, punkPath, command)
+	}
+	if messaging {
+		// Every inbox event is in hookEvents, so its shape was
+		// validated above.
+		addClaudeShapedInbox(hooksAny, punkPath, "claude-code", serverURL, ns, "")
 	}
 	settings["hooks"] = hooksAny
 
@@ -222,7 +317,40 @@ func mergeEventGroups(raw any, event, punkPath, command string) []any {
 	if event == "PostToolUse" {
 		punkGroup["matcher"] = "*"
 	}
+	// The capture group goes just before the first punk inbox group (if
+	// a --messaging install left any), so a plain reconnect over a
+	// messaging install is a byte-identical no-op instead of reordering.
+	// Without inbox groups this is append-last, exactly as before.
+	for i, g := range groups {
+		if isAnyPunkInboxGroup(g) {
+			return append(groups[:i], append([]any{punkGroup}, groups[i:]...)...)
+		}
+	}
 	return append(groups, punkGroup)
+}
+
+// isAnyPunkInboxGroup reports whether group holds only "punk hook
+// inbox" handlers (any path, any client).
+func isAnyPunkInboxGroup(group any) bool {
+	m, ok := group.(map[string]any)
+	if !ok {
+		return false
+	}
+	hooks, ok := m["hooks"].([]any)
+	if !ok || len(hooks) == 0 {
+		return false
+	}
+	for _, h := range hooks {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			return false
+		}
+		cmd, _ := hm["command"].(string)
+		if !strings.Contains(cmd, " hook inbox --client ") {
+			return false
+		}
+	}
+	return true
 }
 
 // isPunkManagedGroup reports whether every hook command in group's
@@ -293,6 +421,12 @@ func isPunkManaged(cmd, punkPath string) bool {
 			if after == "" {
 				return true
 			}
+			// "punk hook inbox ..." is the messaging entry, managed by
+			// isPunkManagedInbox: the capture merge must never replace
+			// or delete it (and vice versa).
+			if isInboxSubcommand(after) {
+				return false
+			}
 			switch after[0] {
 			case ' ', '\t':
 				return true
@@ -314,6 +448,17 @@ func isPunkManaged(cmd, punkPath string) bool {
 	default:
 		return false
 	}
+}
+
+// isInboxSubcommand reports whether after (the text following
+// "<punk> hook") starts the "inbox" subcommand as a whole word.
+func isInboxSubcommand(after string) bool {
+	t := strings.TrimLeft(after, " \t")
+	if len(t) == len(after) || !strings.HasPrefix(t, "inbox") {
+		return false
+	}
+	t = t[len("inbox"):]
+	return t == "" || t[0] == ' ' || t[0] == '\t'
 }
 
 // isPunkManagedFromAgent reports whether cmd is a punk-generated hook
