@@ -797,6 +797,12 @@ func TestOpenCodeMessagingSSEReconnectAndDeletion(t *testing.T) {
 // the server recovers.
 func TestOpenCodeMessagingNonOKSSEBackoff(t *testing.T) {
 	driver := `
+  const timerDelays = []
+  const realSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    timerDelays.push(ms)
+    return realSetTimeout(fn, ms, ...rest)
+  }
   punkTestServer.sseNonOK = 3
   putMessage("opencode:s1", "m1", "delivered once SSE recovers")
   const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
@@ -809,23 +815,19 @@ func TestOpenCodeMessagingNonOKSSEBackoff(t *testing.T) {
     punkTestServer.sseBodiesCancelled.filter((a) => a === "opencode:s1").length === 3,
     "every non-OK SSE body was cancelled, cancelled=" + JSON.stringify(punkTestServer.sseBodiesCancelled)
   )
-  const t = punkTestServer.sseTimes
-  must(t.length >= 4, "four SSE attempts recorded, got " + t.length)
-  const gap1 = t[1] - t[0]
-  const gap2 = t[2] - t[1]
-  const gap3 = t[3] - t[2]
-  // Backoff base 40ms: attempts must space 40 / 80 / 160 (setTimeout never
-  // fires early, so the gaps can only be at least these). A backoff reset
-  // bug would collapse them all to ~40.
-  // Node timers can fire up to 1ms before Date.now() says they should:
-  // libuv caches the loop time at millisecond granularity, so a timer of
-  // 80ms measured with Date.now() has been observed at 79. Allow 2ms of
-  // slack; a backoff reset would still collapse every gap to ~40.
-  const slack = 2
-  must(gap1 >= 40 - slack, "first retry waited the base backoff, gap=" + gap1)
-  must(gap2 >= 80 - slack, "second retry doubled the backoff, gap=" + gap2)
-  must(gap3 >= 160 - slack, "third retry doubled again, gap=" + gap3)
-  must(gap3 > gap1, "backoff escalated across non-OK attempts (no reset), gaps=" + gap1 + "/" + gap2 + "/" + gap3)
+  // Wall-clock gaps between attempts are unreliable on a loaded host (a
+  // stalled event loop shifts when the mock records an attempt), so the
+  // backoff is asserted on the delays the bridge actually requested from
+  // setTimeout: the recorded sub-second delays must escalate 40, 80, 160
+  // in order. A backoff reset would request 40 again instead.
+  const requested = timerDelays.filter((ms) => typeof ms === "number" && ms < 1000)
+  const escalation = [40, 80, 160]
+  let at = 0
+  for (let i = 0; i < requested.length && at < escalation.length; i++) {
+    if (requested[i] === escalation[at]) at++
+  }
+  must(at === escalation.length, "backoff requested 40/80/160 in order, requested=" + JSON.stringify(requested))
+  must(requested.filter((ms) => ms === 40).length === 1, "the base backoff was requested exactly once (no reset), requested=" + JSON.stringify(requested))
 
   console.log("PASS non-ok-sse-backoff")
   process.exit(0)
@@ -1449,5 +1451,65 @@ func TestOpenCodeMessagingWakeWindowRoll(t *testing.T) {
 	}, driver)
 	if !strings.Contains(out, "PASS wake-window-roll") {
 		t.Fatalf("driver did not report PASS wake-window-roll:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRestoredBindsNewestAndLazy: session.list returns
+// every stored session of the project, so a restart must not register
+// and stream for hundreds of finished conversations. Only busy/retry
+// sessions from the status snapshot and the single most recently updated
+// session bind at startup; older ones bind lazily on their first event,
+// and a human chat.message binds a resumed session that never emitted
+// session.created.
+func TestOpenCodeMessagingRestoredBindsNewestAndLazy(t *testing.T) {
+	driver := `
+  const D = "/tmp/punk-messaging-proj"
+  punkTestServer.sessionList = [
+    { id: "old-1", directory: D, time: { created: 1, updated: 1000 } },
+    { id: "newest-1", directory: D, time: { created: 1, updated: 5000 } },
+    { id: "old-2", directory: D, time: { created: 1, updated: 2000 } },
+    { id: "busy-1", directory: D, time: { created: 1, updated: 3000 } },
+    { id: "elsewhere-1", directory: "/tmp/other-proj", time: { created: 1, updated: 9000 } },
+  ]
+  punkTestServer.statusMap = { "busy-1": { type: "busy" } }
+  putMessage("opencode:newest-1", "mn", "for the newest session")
+  putMessage("opencode:old-2", "mo", "for an older session")
+  putMessage("opencode:old-1", "mr", "for a resumed session")
+
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await until(() => promptCalls.length === 1, "the newest idle stored session is delivered at startup")
+  must(promptCalls[0].sessionID === "newest-1", "startup delivery went to newest-1, got " + promptCalls[0].sessionID)
+  await sleep(300)
+  const bound = () => punkTestServer.registeredAgents.map((r) => r.agent)
+  must(bound().indexOf("opencode:busy-1") >= 0, "the busy snapshot session is bound, registered=" + JSON.stringify(bound()))
+  must(
+    bound().indexOf("opencode:old-1") < 0 && bound().indexOf("opencode:old-2") < 0 && bound().indexOf("opencode:elsewhere-1") < 0,
+    "older and foreign stored sessions are not bound at startup, registered=" + JSON.stringify(bound())
+  )
+  must(punkTestServer.sseFetches === 2, "one stream per bound session (busy-1, newest-1), got " + punkTestServer.sseFetches)
+
+  // First sign of life binds lazily and delivers.
+  await hooks.event({ event: { type: "session.status", properties: { sessionID: "old-2", status: { type: "idle" } } } })
+  await until(() => promptCalls.length === 2, "old-2 bound on its first status event and delivered")
+  must(promptCalls[1].sessionID === "old-2", "lazy delivery went to old-2, got " + promptCalls[1].sessionID)
+  await until(() => punkTestServer.ackedIds.indexOf("mo") >= 0, "old-2's message acked")
+
+  // A human turn in a resumed session binds it busy: registered and
+  // streaming, but nothing delivered until the turn ends.
+  await hooks["chat.message"]({ sessionID: "old-1" }, { message: { role: "user" }, parts: [{ type: "text", text: "resume work" }] })
+  await until(() => bound().indexOf("opencode:old-1") >= 0, "chat.message bound the resumed session")
+  await sleep(250)
+  must(promptCalls.length === 2, "busy resumed session defers delivery, prompts=" + promptCalls.length)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "old-1" } } })
+  await until(() => promptCalls.length === 3, "resumed session delivered once idle")
+  must(promptCalls[2].sessionID === "old-1", "delivery went to old-1, got " + promptCalls[2].sessionID)
+  must(bound().indexOf("opencode:elsewhere-1") < 0, "a foreign-directory session is never bound")
+
+  console.log("PASS restored-newest-lazy")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS restored-newest-lazy") {
+		t.Fatalf("driver did not report PASS restored-newest-lazy:\n%s", out)
 	}
 }

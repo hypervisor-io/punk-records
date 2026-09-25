@@ -116,6 +116,7 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 					return nil, messagesOut{}, err
 				}
 			}
+			_ = d.Region.Touch(ctx, ns, in.Agent)
 			messages, err := d.Region.ReadMessagesWithOptions(ctx, ns, in.Agent, opts)
 			if err != nil {
 				return nil, messagesOut{}, err
@@ -152,6 +153,7 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
+			_ = d.Region.Touch(ctx, ns, in.Agent)
 			messages, waitErr := d.Region.WaitMessages(ctx, d.Bus, ns, in.Agent, in.Limit, awaitTimeout(in.TimeoutSeconds))
 			// Both credential and grant can be revoked while blocked. Denial
 			// wins over wait results, so no message is exposed after revocation.

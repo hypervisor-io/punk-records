@@ -703,6 +703,12 @@ func TestPiMessagingSSEReconnectAndDelivery(t *testing.T) {
 // attempts - and the stream works once the server recovers.
 func TestPiMessagingNonOKSSEBackoff(t *testing.T) {
 	driver := `
+  const timerDelays = []
+  const realSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    timerDelays.push(ms)
+    return realSetTimeout(fn, ms, ...rest)
+  }
   punkTestServer.sseNonOK = 3
   putMessage("pi:s1", "m1", "delivered once SSE recovers")
   punkPiExtension(fakePi)
@@ -715,20 +721,19 @@ func TestPiMessagingNonOKSSEBackoff(t *testing.T) {
     punkTestServer.sseBodiesCancelled.filter((a) => a === "pi:s1").length === 3,
     "every non-OK SSE body was cancelled, cancelled=" + JSON.stringify(punkTestServer.sseBodiesCancelled)
   )
-  const t = punkTestServer.sseTimes
-  must(t.length >= 4, "four SSE attempts recorded, got " + t.length)
-  const gap1 = t[1] - t[0]
-  const gap2 = t[2] - t[1]
-  const gap3 = t[3] - t[2]
-  // Node timers can fire up to 1ms before Date.now() says they should:
-  // libuv caches the loop time at millisecond granularity, so a timer of
-  // 80ms measured with Date.now() has been observed at 79. Allow 2ms of
-  // slack; a backoff reset would still collapse every gap to ~40.
-  const slack = 2
-  must(gap1 >= 40 - slack, "first retry waited the base backoff, gap=" + gap1)
-  must(gap2 >= 80 - slack, "second retry doubled the backoff, gap=" + gap2)
-  must(gap3 >= 160 - slack, "third retry doubled again, gap=" + gap3)
-  must(gap3 > gap1, "backoff escalated across non-OK attempts (no reset), gaps=" + gap1 + "/" + gap2 + "/" + gap3)
+  // Wall-clock gaps between attempts are unreliable on a loaded host (a
+  // stalled event loop shifts when the mock records an attempt), so the
+  // backoff is asserted on the delays the bridge actually requested from
+  // setTimeout: the recorded sub-second delays must escalate 40, 80, 160
+  // in order. A backoff reset would request 40 again instead.
+  const requested = timerDelays.filter((ms) => typeof ms === "number" && ms < 1000)
+  const escalation = [40, 80, 160]
+  let at = 0
+  for (let i = 0; i < requested.length && at < escalation.length; i++) {
+    if (requested[i] === escalation[at]) at++
+  }
+  must(at === escalation.length, "backoff requested 40/80/160 in order, requested=" + JSON.stringify(requested))
+  must(requested.filter((ms) => ms === 40).length === 1, "the base backoff was requested exactly once (no reset), requested=" + JSON.stringify(requested))
 
   console.log("PASS non-ok-sse-backoff")
   process.exit(0)

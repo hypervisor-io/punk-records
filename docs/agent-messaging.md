@@ -92,6 +92,19 @@ capability by choosing `--mode wait`.
   (`opencode:<sessionID>`, or a named registration like `messaging-glm`)
   are routing addresses inside it, not separate security principals.
   Sender and recipient must both be members of the namespace.
+- **Which members are inboxes.** `GET /v1/namespaces/<ns>/members` and
+  `list_region_members` return each member with `role`, `last_seen_at`
+  and `listening`. `listening` is true while that address holds an open
+  `/messages/events` stream on this server (the extension bridges); it is
+  process-local and never stored. `last_seen_at` moves on registration,
+  on every inbox read (hook clients read on each prompt) and on stream
+  connect. The MCP tool lists listening members first, then most recently
+  seen, and `active_only: true` drops members that are neither listening
+  nor seen in the last 10 minutes. A `<client>:<session>` address is an
+  inbox some hook or bridge reads; a plain name registered by hand is a
+  coordination identity with no reader unless that session polls it.
+  Members are never deleted, so a long-lived namespace lists many
+  finished sessions: choose by liveness, not by name.
 - Messages are durable storage, never the lossy in-process bus. Sends are
   idempotent per namespace/sender via a caller-supplied idempotency key;
   identical retries return the stored message **while it is retained**.
@@ -460,11 +473,20 @@ Environment (read by the plugin at runtime, inside the OpenCode process):
 
 Behavior:
 
-- **Binding**: every session the plugin observes (`session.created`) or
-  restores at startup (`client.session.list` + `client.session.status`,
-  filtered to the plugin's own project directory) binds to the address
-  `opencode:<sessionID>` and registers as a namespace member (role
-  `satellite`). Registration is *confirmed, not assumed*: the bridge
+- **Binding**: every session the plugin observes (`session.created`)
+  binds to the address `opencode:<sessionID>` and registers as a
+  namespace member (role `satellite`). At startup the plugin restores
+  from `client.session.list` (filtered to its own project directory) plus
+  the `client.session.status` snapshot, but binds eagerly only the
+  sessions that snapshot reports busy or retrying and the single most
+  recently updated session; OpenCode omits idle sessions from the
+  snapshot, so a successful snapshot that lacks the session means idle.
+  Every other stored session (a project accumulates hundreds) binds
+  lazily on its first sign of life: a `session.status`, `session.idle` or
+  `session.error` event, or a human `chat.message`, which is also how a
+  session resumed with `-s` (no `session.created`) gets its inbox. Before
+  that first event such a session is not registered and holds no stream.
+  Registration is *confirmed, not assumed*: the bridge
   autonomously retries namespace resolution and member registration on
   bounded exponential backoff until the server answers
   `{status:"registered"}`; no SSE stream and no delivery start before

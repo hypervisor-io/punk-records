@@ -113,3 +113,80 @@ func TestTouchUpdatesLastSeen(t *testing.T) {
 		t.Fatalf("touch on an unregistered agent is a no-op, got %v", err)
 	}
 }
+
+func TestMembersListeningAndActive(t *testing.T) {
+	s := newTest(t)
+	ctx := context.Background()
+	for _, a := range []string{"claude-code:s1", "opencode:s2", "hand-typed-name"} {
+		if err := s.Register(ctx, "ns", a, "satellite"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := s.Attach("ns", "opencode:s2")
+	release2 := s.Attach("ns", "opencode:s2")
+
+	members, err := s.MemberStatuses(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listening := map[string]bool{}
+	for _, m := range members {
+		listening[m.Agent] = m.Listening
+	}
+	if !listening["opencode:s2"] || listening["claude-code:s1"] || listening["hand-typed-name"] {
+		t.Fatalf("listening flags = %v", listening)
+	}
+
+	// Two streams for one address: still listening after one closes.
+	release()
+	if !s.Listening("ns", "opencode:s2") {
+		t.Fatal("one of two streams closed, want still listening")
+	}
+	release2()
+	release2() // idempotent
+	if s.Listening("ns", "opencode:s2") {
+		t.Fatal("all streams closed, want not listening")
+	}
+	if s.Listening("other", "opencode:s2") {
+		t.Fatal("presence leaked across namespaces")
+	}
+
+	// Active: listening now, or seen within the window. The test clock
+	// advances one second per call, so every member registered above was
+	// seen a few seconds ago.
+	members, _ = s.MemberStatuses(ctx, "ns")
+	for _, m := range members {
+		if !s.Active(m, time.Minute) {
+			t.Fatalf("%s registered seconds ago, want active within a minute", m.Agent)
+		}
+		if s.Active(m, 0) {
+			t.Fatalf("%s not listening, want inactive with a zero window", m.Agent)
+		}
+	}
+	unparseable := MemberStatus{Member: Member{Agent: "x", LastSeenAt: "not a time"}}
+	if s.Active(unparseable, time.Hour) {
+		t.Fatal("unparseable last_seen_at counted as active")
+	}
+	if !s.Active(MemberStatus{Member: Member{Agent: "y"}, Listening: true}, 0) {
+		t.Fatal("listening member must be active regardless of last_seen_at")
+	}
+
+	// Touch moves last_seen_at forward; unregistered agents are ignored.
+	before := members[0].LastSeenAt
+	if err := s.Touch(ctx, "ns", members[0].Agent); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Touch(ctx, "ns", "never-registered"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.MemberStatuses(ctx, "ns")
+	var seen string
+	for _, m := range after {
+		if m.Agent == members[0].Agent {
+			seen = m.LastSeenAt
+		}
+	}
+	if seen <= before || len(after) != 3 {
+		t.Fatalf("touch: last_seen %q -> %q, members=%d", before, seen, len(after))
+	}
+}

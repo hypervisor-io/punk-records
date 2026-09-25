@@ -481,3 +481,60 @@ func TestMessageEventsCancellation(t *testing.T) {
 		t.Fatal("handler still running after client cancel")
 	}
 }
+
+// TestMessageEventsMarksListening: an open inbox stream is what member
+// discovery reports as listening, and it is released with the stream. A
+// plain read counts as a sighting (last_seen_at moves) without listening.
+func TestMessageEventsMarksListening(t *testing.T) {
+	g := messagingServer(t)
+	g.register(t, "ns-x", "opencode:s1")
+	g.register(t, "ns-x", "claude-code:s2")
+
+	members := func() map[string]region.MemberStatus {
+		rec := g.do(t, http.MethodGet, "/v1/namespaces/ns-x/members", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("members = %d: %s", rec.Code, rec.Body)
+		}
+		var list struct {
+			Members []region.MemberStatus `json:"members"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]region.MemberStatus{}
+		for _, m := range list.Members {
+			out[m.Agent] = m
+		}
+		return out
+	}
+	if m := members(); m["opencode:s1"].Listening || m["claude-code:s2"].Listening {
+		t.Fatalf("nothing streaming, want no listener: %+v", m)
+	}
+
+	h := openMessagingStream(t, g.s, "/v1/namespaces/ns-x/messages/events?agent=opencode:s1", "")
+	if _, ok := h.nextFrame(3 * time.Second); !ok {
+		t.Fatal("no initial hint")
+	}
+	m := members()
+	if !m["opencode:s1"].Listening || m["claude-code:s2"].Listening {
+		t.Fatalf("stream open, want only opencode:s1 listening: %+v", m)
+	}
+
+	seenBefore := m["claude-code:s2"].LastSeenAt
+	rec := g.do(t, http.MethodGet, "/v1/namespaces/ns-x/messages?agent=claude-code:s2", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read = %d: %s", rec.Code, rec.Body)
+	}
+	m = members()
+	if m["claude-code:s2"].Listening || m["claude-code:s2"].LastSeenAt <= seenBefore {
+		t.Fatalf("read should touch last_seen without listening: before=%q now=%+v", seenBefore, m["claude-code:s2"])
+	}
+
+	h.cancel()
+	if _, closed := h.closedWithin(3 * time.Second); !closed {
+		t.Fatal("stream did not close after cancel")
+	}
+	if m := members(); m["opencode:s1"].Listening {
+		t.Fatalf("stream closed, want released: %+v", m["opencode:s1"])
+	}
+}

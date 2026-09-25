@@ -7,6 +7,7 @@ package region
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hypervisor-io/punk-records/internal/store"
@@ -15,6 +16,12 @@ import (
 type Store struct {
 	db  *store.DB
 	now func() time.Time
+
+	// presence counts open inbox event streams per namespace and agent.
+	// It is process-local runtime state, never stored: a stream that is
+	// open right now is the strongest liveness signal a member can have.
+	pmu      sync.Mutex
+	presence map[string]map[string]int
 	// Configure before serving requests. Nonpositive cap uses the default;
 	// nonpositive retention disables deletion, never unread delivery.
 	MaxUnreadPerRecipient int
@@ -25,7 +32,7 @@ func New(db *store.DB, now func() time.Time) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{db: db, now: now, MaxUnreadPerRecipient: 200, MessageRetention: 30 * 24 * time.Hour}
+	return &Store{db: db, now: now, MaxUnreadPerRecipient: 200, MessageRetention: 30 * 24 * time.Hour, presence: map[string]map[string]int{}}
 }
 
 // Member is one satellite registered to a region.
@@ -36,6 +43,19 @@ type Member struct {
 	JoinedAt   string `json:"joined_at"`
 	LastSeenAt string `json:"last_seen_at,omitempty"`
 }
+
+// MemberStatus is a Member plus process-local liveness for discovery
+// surfaces. It is a separate type so the runtime flag never widens the
+// Member schema that other tools embed.
+type MemberStatus struct {
+	Member
+	// Listening: an inbox event stream is open right now.
+	Listening bool `json:"listening"`
+}
+
+// DB exposes the underlying handle for callers that must adjust rows
+// outside the store's own API, such as tests that age a sighting.
+func (s *Store) DB() *store.DB { return s.db }
 
 // Ensure creates a region if absent.
 func (s *Store) Ensure(ctx context.Context, ns, title string) error {
@@ -72,6 +92,80 @@ func (s *Store) Touch(ctx context.Context, ns, agent string) error {
 		`UPDATE region_members SET last_seen_at = $1 WHERE namespace = $2 AND agent = $3`),
 		store.TimeToDB(s.now()), ns, agent)
 	return err
+}
+
+// Attach records an open inbox event stream for an agent and returns the
+// release to call when the stream ends. Streams are counted, so two
+// concurrent streams for one address stay "listening" until both close.
+func (s *Store) Attach(ns, agent string) func() {
+	if ns == "" || agent == "" {
+		return func() {}
+	}
+	s.pmu.Lock()
+	byAgent := s.presence[ns]
+	if byAgent == nil {
+		byAgent = map[string]int{}
+		s.presence[ns] = byAgent
+	}
+	byAgent[agent]++
+	s.pmu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.pmu.Lock()
+			defer s.pmu.Unlock()
+			byAgent := s.presence[ns]
+			if byAgent == nil {
+				return
+			}
+			if byAgent[agent] <= 1 {
+				delete(byAgent, agent)
+			} else {
+				byAgent[agent]--
+			}
+			if len(byAgent) == 0 {
+				delete(s.presence, ns)
+			}
+		})
+	}
+}
+
+// Listening reports whether the agent holds an open inbox event stream.
+func (s *Store) Listening(ns, agent string) bool {
+	s.pmu.Lock()
+	defer s.pmu.Unlock()
+	return s.presence[ns][agent] > 0
+}
+
+// MemberStatuses lists a region's members with their liveness flag.
+func (s *Store) MemberStatuses(ctx context.Context, ns string) ([]MemberStatus, error) {
+	members, err := s.Members(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MemberStatus, 0, len(members))
+	for _, m := range members {
+		out = append(out, MemberStatus{Member: m, Listening: s.Listening(m.Namespace, m.Agent)})
+	}
+	return out, nil
+}
+
+// Active reports whether a member is a live delivery target: it is
+// listening now, or it was seen (registered, read, or heartbeat) within
+// the window. Members whose last_seen_at cannot be parsed count as
+// inactive rather than as alive.
+func (s *Store) Active(m MemberStatus, within time.Duration) bool {
+	if m.Listening {
+		return true
+	}
+	if m.LastSeenAt == "" {
+		return false
+	}
+	seen, err := store.TimeFromDB(m.LastSeenAt)
+	if err != nil {
+		return false
+	}
+	return !seen.Before(s.now().Add(-within))
 }
 
 // Deregister removes an agent from a region.

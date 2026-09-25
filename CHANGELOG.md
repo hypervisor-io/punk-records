@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.10.1 (2026-09-26)
+
+### Fixed
+- Member discovery now tells agents which addresses are live inboxes:
+  `list_region_members` and `GET /members` return `listening` (an open
+  inbox stream on this server) and order listening members first, then
+  most recently seen; `active_only: true` drops members neither listening
+  nor seen in the last 10 minutes. Inbox reads and stream connects now
+  refresh `last_seen_at`, so hook-only sessions stay visibly alive. The
+  generated skill guidance says which addresses to message. Previously a
+  namespace with many finished sessions and hand-registered names gave
+  agents no way to pick a recipient that anything would read.
+- The OpenCode bridge no longer registers and streams for every stored
+  session of the project at startup (one process held about a hundred
+  event streams). It binds the sessions the status snapshot reports busy
+  and the most recently updated one, and binds any other session lazily
+  on its first event or human message, which also gives a session resumed
+  with `-s` an inbox; a successful status snapshot that omits a session
+  now means idle instead of unknown, removing a delay of up to one turn.
+- The OpenCode and Pi SSE backoff tests assert the delays requested from
+  `setTimeout` instead of wall-clock gaps, which were unreliable on a
+  loaded host.
+
 ## v1.10.0 (2026-09-25)
 
 Agents registered to a namespace can now message each other. Eleven

@@ -94,13 +94,13 @@ func (s *Server) handleRegisterMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
-	members, err := s.region.Members(r.Context(), chi.URLParam(r, "ns"))
+	members, err := s.region.MemberStatuses(r.Context(), chi.URLParam(r, "ns"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if members == nil {
-		members = []region.Member{}
+		members = []region.MemberStatus{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
 }
@@ -171,6 +171,9 @@ func (s *Server) handleReadMessages(w http.ResponseWriter, r *http.Request) {
 	if opts.LeaseSeconds > 0 && !s.authorizeResolved(w, r, ns, authz.OpWrite) {
 		return
 	}
+	// A read is a sighting: hook clients have no stream, so last_seen_at
+	// is what tells other agents the address is still being read.
+	_ = s.region.Touch(r.Context(), ns, agent)
 	msgs, err := s.region.ReadMessagesWithOptions(r.Context(), ns, agent, opts)
 	if err != nil {
 		writeMessageErr(w, err)
@@ -268,6 +271,12 @@ func (s *Server) handleMessageEvents(w http.ResponseWriter, r *http.Request) {
 	ns := chi.URLParam(r, "ns")
 	events, cancel := s.bus.Subscribe()
 	defer cancel()
+	// An open stream is the liveness signal member discovery reports as
+	// "listening"; it is released with the stream, and the connect also
+	// counts as a sighting for hook-only readers of the member list.
+	detach := s.region.Attach(ns, agent)
+	defer detach()
+	_ = s.region.Touch(r.Context(), ns, agent)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

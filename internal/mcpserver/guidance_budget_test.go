@@ -211,6 +211,10 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // wire entries: send_message 1173, read_messages 974, ack_messages 619,
 // await_messages 1073, list_region_members 704 bytes, plus five newlines.
 // Existing lean entries and initialize instructions are unchanged.
+// Liveness discovery re-measurement (2026-09-26): list_region_members
+// grows to carry listening/last_seen_at ordering and active_only; the
+// messaging admission is 5868 bytes / ~1467 tokens, the lean set stays
+// 25707 bytes / ~6427 tokens.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
@@ -275,12 +279,17 @@ func TestMessagingAdmissionPreservesExistingToolBudget(t *testing.T) {
 		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443", got)
 	}
 	// M10/M11: lease/owner, sent view, count and full-ID recovery, plus
-	// message lease metadata add 883 bytes to M2's 4548-byte admission.
-	// Current measured admission 5431 bytes = 1358 tokens; 16 tokens slack.
-	if got := estTokens(messaging.String()); got > 1374 {
-		t.Errorf("messaging admission = ~%d tokens, budget 1374 (1358 measured + 16 slack)", got)
+	// message lease metadata add 883 bytes to M2's 4548-byte admission
+	// (5431 bytes = 1358 tokens). Liveness discovery (2026-09-26) adds
+	// 437 bytes to list_region_members: the listening flag and
+	// last_seen_at ordering in its output, the active_only input, and a
+	// description that tells a model which addresses are inboxes. Measured
+	// admission 5868 bytes = 1467 tokens; 16 tokens slack. The
+	// existing lean tools are unchanged, which the check above enforces.
+	if got := estTokens(messaging.String()); got > 1483 {
+		t.Errorf("messaging admission = ~%d tokens, budget 1483 (1467 measured + 16 slack)", got)
 	}
-	if got := estTokens(agent.wire); got > agentToolsetBudgetTokens+1374 {
+	if got := estTokens(agent.wire); got > agentToolsetBudgetTokens+1483 {
 		t.Errorf("enabled tools budget = %d", got)
 	}
 }

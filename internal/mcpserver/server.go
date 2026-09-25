@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1284,6 +1285,27 @@ type membersIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
 }
 
+// memberDiscoveryIn is list_region_members' own input: membersIn is
+// shared with other namespace-only tools, so the discovery filter lives
+// here to keep their schemas unchanged.
+type memberDiscoveryIn struct {
+	Namespace  string `json:"namespace,omitempty" jsonschema:"optional, resolved from the client's workspace root (see whoami) when empty"`
+	ActiveOnly bool   `json:"active_only,omitempty" jsonschema:"only members listening now or seen in the last 10 minutes"`
+}
+
+// memberStatusesOut is the discovery view: members plus the runtime
+// listening flag. list_agent_regions keeps the plain membersOut so the
+// flag never widens that lean tool's schema.
+type memberStatusesOut struct {
+	Members []region.MemberStatus `json:"members"`
+}
+
+// memberActiveWindow is how recently a member must have been seen to
+// count as a live delivery target when it holds no open stream: hook
+// clients touch on every read, so a session at its prompt stays inside
+// the window across ordinary turns.
+const memberActiveWindow = 10 * time.Minute
+
 type regionsForIn struct {
 	Agent string `json:"agent"`
 }
@@ -1379,17 +1401,37 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			return nil, map[string]string{"status": "registered", "namespace": ns, "agent": in.Agent}, nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "list_region_members",
-		Description: "List the satellites registered to a brain region."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in membersIn) (*mcp.CallToolResult, membersOut, error) {
+		Description: "List the agents registered to a brain region, live delivery targets first. listening=true means an open inbox stream right now; last_seen_at is the latest registration, read or heartbeat. Message <client>:<session> addresses that are listening or recently seen; a plain name is a coordination identity, not an inbox."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in memberDiscoveryIn) (*mcp.CallToolResult, memberStatusesOut, error) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)
 			if err != nil {
-				return nil, membersOut{}, err
+				return nil, memberStatusesOut{}, err
 			}
-			m, err := d.Region.Members(ctx, ns)
+			m, err := d.Region.MemberStatuses(ctx, ns)
 			if err != nil {
-				return nil, membersOut{}, err
+				return nil, memberStatusesOut{}, err
 			}
-			return nil, membersOut{Members: m}, nil
+			if in.ActiveOnly {
+				kept := m[:0]
+				for _, mem := range m {
+					if d.Region.Active(mem, memberActiveWindow) {
+						kept = append(kept, mem)
+					}
+				}
+				m = kept
+			}
+			// Listening first, then most recently seen, then name: the
+			// order a model reads is the order it should try.
+			sort.SliceStable(m, func(i, j int) bool {
+				if m[i].Listening != m[j].Listening {
+					return m[i].Listening
+				}
+				if m[i].LastSeenAt != m[j].LastSeenAt {
+					return m[i].LastSeenAt > m[j].LastSeenAt
+				}
+				return m[i].Agent < m[j].Agent
+			})
+			return nil, memberStatusesOut{Members: m}, nil
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "list_agent_regions",
 		Description: "List the brain regions an agent is registered to."},

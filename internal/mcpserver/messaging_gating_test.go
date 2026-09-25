@@ -53,7 +53,7 @@ func TestMessagingToolGate(t *testing.T) {
 			if tools["register"] == nil || tools["claim_work"] == nil {
 				t.Fatal("existing coordination disabled")
 			}
-			if !enabled && set == "full" && tools["list_region_members"].Description != "List the satellites registered to a brain region." {
+			if !enabled && set == "full" && !strings.HasPrefix(tools["list_region_members"].Description, "List the agents registered to a brain region, live delivery targets first.") {
 				t.Fatal("legacy full member description changed")
 			}
 		}

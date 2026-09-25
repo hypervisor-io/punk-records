@@ -48,7 +48,8 @@ func TestMessagingRoundTripAndIsolation(t *testing.T) {
 	registerMessageMembers(t, cs, "other", "one", "two")
 	var members struct{ Members []struct{ Agent string } }
 	callJSON(t, cs, "list_region_members", map[string]any{"namespace": "ns"}, &members)
-	if len(members.Members) != 2 || members.Members[0].Agent != "one" || members.Members[1].Agent != "two" {
+	// Most recently seen first: "two" registered after "one".
+	if len(members.Members) != 2 || members.Members[0].Agent != "two" || members.Members[1].Agent != "one" {
 		t.Fatalf("lean member discovery = %+v", members)
 	}
 	args := map[string]any{"namespace": "ns", "sender": "one", "recipient": "two", "body": "review task", "task_id": "M2", "idempotency_key": "first"}
@@ -499,5 +500,51 @@ func TestAwaitMessagesReconcilesWithoutBus(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("bus-less wait did not reconcile storage")
+	}
+}
+
+// TestListRegionMembersLiveTargetsFirst: discovery orders listening
+// members first, then most recently seen, and active_only drops names
+// that are neither streaming nor recently seen so a model cannot pick a
+// dead address off the top of the list.
+func TestListRegionMembersLiveTargetsFirst(t *testing.T) {
+	var deps *Deps
+	cs := messagingSession(t, func(d *Deps) { d.Toolset = "agent"; deps = d })
+	ctx := context.Background()
+	// A hand-typed name registered long ago, a hook session seen recently,
+	// and an extension session streaming right now.
+	if err := deps.Region.Register(ctx, "ns", "S19-48-worker", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.Region.DB().ExecContext(ctx, deps.Region.DB().Rebind(
+		`UPDATE region_members SET last_seen_at = $1 WHERE agent = $2`), "2020-01-01T00:00:00Z", "S19-48-worker"); err != nil {
+		t.Fatal(err)
+	}
+	registerMessageMembers(t, cs, "ns", "claude-code:s1", "opencode:s2")
+	release := deps.Region.Attach("ns", "opencode:s2")
+	defer release()
+
+	type member struct {
+		Agent      string `json:"agent"`
+		Listening  bool   `json:"listening"`
+		LastSeenAt string `json:"last_seen_at"`
+	}
+	var all struct{ Members []member }
+	callJSON(t, cs, "list_region_members", map[string]any{"namespace": "ns"}, &all)
+	if len(all.Members) != 3 || all.Members[0].Agent != "opencode:s2" || !all.Members[0].Listening ||
+		all.Members[1].Agent != "claude-code:s1" || all.Members[1].Listening || all.Members[2].Agent != "S19-48-worker" {
+		t.Fatalf("ordering = %+v", all.Members)
+	}
+	var active struct{ Members []member }
+	callJSON(t, cs, "list_region_members", map[string]any{"namespace": "ns", "active_only": true}, &active)
+	if len(active.Members) != 2 || active.Members[0].Agent != "opencode:s2" || active.Members[1].Agent != "claude-code:s1" {
+		t.Fatalf("active_only = %+v", active.Members)
+	}
+	release()
+	callJSON(t, cs, "list_region_members", map[string]any{"namespace": "ns", "active_only": true}, &active)
+	for _, m := range active.Members {
+		if m.Listening {
+			t.Fatalf("stream released, still listening: %+v", m)
+		}
 	}
 }

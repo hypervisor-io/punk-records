@@ -653,7 +653,12 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // drain of anything that deferred while busy/unknown.
   function punkMarkIdle(sessionID) {
     const st = punkSessions.get(sessionID)
-    if (!st) return
+    if (!st) {
+      // First sign of life from a stored session that was not bound at
+      // startup: bind it idle now (registration starts the first drain).
+      punkBindSession(sessionID, false)
+      return
+    }
     st.busy = false
     punkRequestDrain(sessionID)
   }
@@ -665,7 +670,15 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   function punkSessionStatus(properties) {
     if (!properties || !properties.status) return
     const st = punkSessions.get(properties.sessionID)
-    if (!st) return
+    if (!st) {
+      // Lazy bind on the first status event of an unbound session.
+      if (properties.status.type === "busy" || properties.status.type === "retry") {
+        punkBindSession(properties.sessionID, true)
+      } else if (properties.status.type === "idle") {
+        punkBindSession(properties.sessionID, false)
+      }
+      return
+    }
     if (properties.status.type === "busy" || properties.status.type === "retry") {
       st.busy = true
     } else if (properties.status.type === "idle") {
@@ -964,15 +977,21 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     }
   }
 
-  // punkBindRestoredSessions binds sessions that already existed when the
-  // OpenCode process started (a restart mid-conversation must not orphan
-  // their inboxes). session.list supplies the sessions (filtered to this
-  // plugin's own directory, since one OpenCode process serves one
-  // project), session.status supplies their busy/idle state. If the
-  // status snapshot FAILS, restored sessions bind with UNKNOWN busy
-  // state and defer delivery until an authoritative idle event - never a
-  // blind guess of idle for a session that may be mid-run. Any deletion
-  // or dispose that happens while the awaited list/status calls are in
+  // punkBindRestoredSessions binds the sessions that already existed when
+  // the OpenCode process started (a restart mid-conversation must not
+  // orphan their inboxes). session.list supplies every stored session of
+  // this project, which on a long-lived project is hundreds of finished
+  // conversations, so only two kinds bind eagerly: sessions the
+  // session.status snapshot reports busy/retry (a run is in progress),
+  // and the single most recently updated session (the one a restart most
+  // plausibly interrupted). OpenCode drops idle sessions from the status
+  // map, so absence there with a successful snapshot means idle; a FAILED
+  // snapshot binds the newest session with UNKNOWN busy state and defers
+  // until an authoritative idle event. Every other stored session binds
+  // lazily on its first sign of life (session.status, session.idle,
+  // session.error, or a human chat.message), which also covers a session
+  // resumed with -s that never emits session.created. Any deletion or
+  // dispose that happens while the awaited list/status calls are in
   // flight is honored before each bind. Never rejects.
   async function punkBindRestoredSessions() {
     if (!messagingEnabled || !client || !client.session) return
@@ -993,23 +1012,26 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
         }
       }
       if (punkDisposed) return
+      let newest = null
       for (let i = 0; i < arr.length; i++) {
         if (punkDisposed) return
         const s = arr[i]
         if (!s || typeof s.id !== "string" || !s.id) continue
         if (s.directory && directory && s.directory !== directory) continue
-        // statuses === null means the snapshot failed: bind UNKNOWN
-        // (defer until authoritative idle). "retry" counts as busy, same
-        // as the live session.status event.
-        let initiallyBusy = null
-        if (statuses) {
-          const status = statuses[s.id]
-          if (status && typeof status === "object") {
-            if (status.type === "busy" || status.type === "retry") initiallyBusy = true
-            else if (status.type === "idle") initiallyBusy = false
-          }
+        // "retry" counts as busy, same as the live session.status event.
+        const status = statuses ? statuses[s.id] : undefined
+        if (status && typeof status === "object" && (status.type === "busy" || status.type === "retry")) {
+          punkBindSession(s.id, true)
+          continue
         }
-        punkBindSession(s.id, initiallyBusy)
+        const updated = s.time && typeof s.time.updated === "number" ? s.time.updated : 0
+        if (!newest || updated > newest.updated) newest = { id: s.id, updated: updated }
+      }
+      if (newest && !punkDisposed) {
+        // statuses === null means the snapshot failed: bind UNKNOWN
+        // (defer until authoritative idle). A successful snapshot that
+        // omits the session means idle.
+        punkBindSession(newest.id, statuses ? false : null)
       }
     } catch (err) {
       console.error("punk connect opencode: restored-session bind failed:", err && err.message ? err.message : err)
@@ -1159,10 +1181,11 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           source: "opencode",
         })
         if (messagingEnabled && sessionID) {
-          const st = punkSessionState(sessionID)
-          if (st) {
-            st.busy = true
-          }
+          // A human turn marks the session busy and, for a session that
+          // was resumed rather than created in this process, is its
+          // first sign of life: bind (register + listen) so its inbox is
+          // delivered once the turn ends.
+          punkBindSession(sessionID, true)
         }
       } catch (err) {
         console.error("punk connect opencode: chat.message hook failed:", err && err.message ? err.message : err)
