@@ -97,6 +97,13 @@ func TestAuthBootstrapThenEnforced(t *testing.T) {
 }
 
 func TestIntakeRateLimit(t *testing.T) {
+	// Freeze the limiter clock: with a live clock a slow run (a loaded
+	// -race host took 3.3 s here) refills more than the 20 tokens the
+	// test relies on being absent, and no request is ever rejected.
+	frozen := time.Now()
+	limiterNow = func() time.Time { return frozen }
+	t.Cleanup(func() { limiterNow = time.Now })
+
 	s := taskServer(t)
 	over := 0
 	for i := 0; i < 60; i++ {
@@ -106,8 +113,8 @@ func TestIntakeRateLimit(t *testing.T) {
 			over++
 		}
 	}
-	if over == 0 {
-		t.Fatal("60 rapid intakes never rate limited (burst 40)")
+	if over != 20 {
+		t.Fatalf("60 intakes against burst 40 rejected %d, want 20", over)
 	}
 }
 

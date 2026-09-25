@@ -24,6 +24,11 @@ type ipBucket struct {
 	seen time.Time
 }
 
+// limiterNow supplies the clock the token buckets refill against. Tests
+// freeze it so a slow run cannot refill the bucket faster than the test
+// drains it, which is what happens under -race on a loaded CI host.
+var limiterNow = time.Now
+
 func newIPLimiter(rps float64, burst int) *ipLimiter {
 	l := &ipLimiter{buckets: map[string]*ipBucket{}, rps: rate.Limit(rps), burst: burst}
 	go func() {
@@ -54,7 +59,7 @@ func (l *ipLimiter) allow(remoteAddr string) bool {
 	}
 	b.seen = time.Now()
 	l.mu.Unlock()
-	return b.lim.Allow()
+	return b.lim.AllowN(limiterNow(), 1)
 }
 
 // rateLimit guards a route group. 429 with Retry-After on overflow.
