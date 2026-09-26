@@ -34,6 +34,7 @@ type Messaging struct {
 	Enabled               bool `yaml:"enabled"`                  // MCP message tools; HTTP routes keep namespace grants
 	MaxUnreadPerRecipient int  `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
 	RetentionDays         int  `yaml:"retention_days"`           // ACK age; 0 disables deletion
+	MemberExpiryDays      int  `yaml:"member_expiry_days"`       // last_seen_at age; 0 disables; listening members never expire
 }
 
 type HTTP struct {
@@ -204,7 +205,7 @@ func Default() *Config {
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
 		Authz:     Authz{Enforcement: "off"},
-		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30},
+		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7},
 	}
 }
 
@@ -290,6 +291,7 @@ func applyEnv(c *Config) error {
 	integer("PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT", &c.Messaging.MaxUnreadPerRecipient)
 	boolean("PUNK_MESSAGING", &c.Messaging.Enabled)
 	integer("PUNK_MESSAGING_RETENTION_DAYS", &c.Messaging.RetentionDays)
+	integer("PUNK_MESSAGING_MEMBER_EXPIRY_DAYS", &c.Messaging.MemberExpiryDays)
 
 	return errors.Join(errs...)
 }
@@ -330,6 +332,9 @@ func (c *Config) validate() error {
 	}
 	if c.Messaging.RetentionDays < 0 || c.Messaging.RetentionDays > 106751 {
 		errs = append(errs, errors.New("messaging.retention_days: must be 0 to 106751"))
+	}
+	if c.Messaging.MemberExpiryDays < 0 || c.Messaging.MemberExpiryDays > 106751 {
+		errs = append(errs, errors.New("messaging.member_expiry_days: must be 0 to 106751"))
 	}
 	if c.AI.Embeddings.MaxInputTokens < 0 {
 		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))

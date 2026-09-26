@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.12.0 (2026-09-26)
+
+### Added
+- Namespace member expiry: the hourly maintenance tick now also removes
+  members not seen in `messaging.member_expiry_days` days (default 7,
+  `PUNK_MESSAGING_MEMBER_EXPIRY_DAYS`, 0 disables), skipping any member
+  that currently holds an open inbox stream. `DELETE
+  /v1/namespaces/{ns}/members/{agent}` removes one member on demand,
+  with a 409 guard (bypassable with `?force=1`) against deleting a
+  listening member.
+
 ## v1.11.1 (2026-09-26)
 
 ### Fixed

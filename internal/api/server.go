@@ -111,6 +111,7 @@ func New(log *slog.Logger, d Deps) *Server {
 					// only (lossy by design).
 					r.Post("/members", s.handleRegisterMember)
 					r.Get("/members", s.handleListMembers)
+					r.Delete("/members/{agent}", s.handleRemoveMember)
 					r.Post("/messages", s.handleSendMessage)
 					r.Get("/messages", s.handleReadMessages)
 					r.Get("/messages/log", s.handleMessageLog)

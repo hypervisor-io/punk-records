@@ -22,6 +22,7 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `messaging.enabled` | `PUNK_MESSAGING` | `false` | MCP message tools and lean member discovery only; HTTP routes retain namespace-grant auth |
 | `messaging.max_unread_per_recipient` | `PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT` | `200` | positive cap per namespace/address; atomic admission, idempotent retries bypass |
 | `messaging.retention_days` | `PUNK_MESSAGING_RETENTION_DAYS` | `30` | delete only older ACKed messages in hourly maintenance; 0 disables; unread never deleted |
+| `messaging.member_expiry_days` | `PUNK_MESSAGING_MEMBER_EXPIRY_DAYS` | `7` | remove namespace members not seen in this many days, in the same hourly sweep; 0 disables; a currently listening member is never removed |
 | `memory.consolidate_days` | - | `0` | horizon for region compaction during consolidation; 0 disables (also gates `memory.contradictions` and the observation/reconcile passes) |
 | `memory.contradictions` | - | `false` | during consolidation, embedding-similar fact pairs are judged by the model; contradicting pairs get `contradicts` + `invalidated_by` links (ranking halves the older one's score); needs embeddings + `ai.enabled`; runs only when `memory.consolidate_days` > 0 |
 | `otel.endpoint` | `PUNK_OTEL_ENDPOINT` | empty | OTLP/HTTP; empty = noop tracer |
@@ -74,6 +75,15 @@ false overrides YAML true. Invalid boolean values refuse boot. Both
 same region store and bus. Disabled default preserves lean tool schemas
 and guidance budget; full `list_region_members` predates messaging and
 stays available. HTTP routes are **not** disabled by this tool switch.
+
+Namespace membership is not permanent: the same hourly maintenance tick
+also removes members not seen within `messaging.member_expiry_days`
+(default 7, 0 disables), except a member that currently holds an open
+inbox stream, which is never removed by the sweep. `DELETE
+/v1/namespaces/<ns>/members/<agent>` removes one member on demand and
+refuses (409) a listening one unless the caller passes `?force=1`. A
+session that comes back after expiry re-registers through its hook or
+bridge, so removal is always safe.
 
 Client delivery is a separate opt-in. `punk connect <subprocess-client>
 --messaging` installs the inbox command. Pi/OpenCode/OpenClaw instead use

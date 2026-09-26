@@ -73,6 +73,93 @@ func TestRegisterMembersRegions(t *testing.T) {
 	}
 }
 
+func TestRemoveMember(t *testing.T) {
+	s := newTest(t)
+	ctx := context.Background()
+	if err := s.Register(ctx, "ns", "agent1", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.RemoveMember(ctx, "ns", "agent1")
+	if err != nil || !removed {
+		t.Fatalf("remove = %v %v, want true", removed, err)
+	}
+	removed, err = s.RemoveMember(ctx, "ns", "agent1")
+	if err != nil || removed {
+		t.Fatalf("remove again = %v %v, want false", removed, err)
+	}
+}
+
+// TestExpireMembers covers the sweep candidates: aged out, recently seen,
+// aged out but currently listening (protected), and a row whose
+// last_seen_at is NULL so joined_at is the fallback age.
+func TestExpireMembers(t *testing.T) {
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "expire.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.MigrateUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+	s := New(db, func() time.Time { return now })
+	ctx := context.Background()
+
+	for _, a := range []string{"old", "fresh", "never-seen", "listening"} {
+		if err := s.Register(ctx, "ns", a, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSeen := func(agent string, seen *time.Time, joined time.Time) {
+		t.Helper()
+		var seenVal any
+		if seen != nil {
+			seenVal = store.TimeToDB(*seen)
+		}
+		if _, err := db.ExecContext(ctx, db.Rebind(
+			`UPDATE region_members SET last_seen_at=$1, joined_at=$2 WHERE namespace=$3 AND agent=$4`),
+			seenVal, store.TimeToDB(joined), "ns", agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSeen := now.Add(-10 * 24 * time.Hour)
+	freshSeen := now.Add(-time.Hour)
+	setSeen("old", &oldSeen, oldSeen)
+	setSeen("fresh", &freshSeen, freshSeen)
+	setSeen("never-seen", nil, oldSeen)
+	setSeen("listening", &oldSeen, oldSeen)
+
+	release := s.Attach("ns", "listening")
+	defer release()
+
+	n, err := s.ExpireMembers(ctx, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("expired = %d, want 2", n)
+	}
+	members, err := s.Members(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	for _, m := range members {
+		remaining[m.Agent] = true
+	}
+	if !remaining["fresh"] || !remaining["listening"] {
+		t.Fatalf("must keep fresh and listening members: %v", remaining)
+	}
+	if remaining["old"] || remaining["never-seen"] {
+		t.Fatalf("must expire old and never-seen members: %v", remaining)
+	}
+
+	// olderThan <= 0 disables the sweep entirely (config's 0 = disabled).
+	if n, err := s.ExpireMembers(ctx, 0); err != nil || n != 0 {
+		t.Fatalf("disabled sweep = %d %v", n, err)
+	}
+}
+
 func TestSyncFromSpecs(t *testing.T) {
 	s := newTest(t)
 	ctx := context.Background()

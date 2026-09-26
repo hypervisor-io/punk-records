@@ -65,7 +65,7 @@ func TestMessageRetentionMaintenanceEntrypoint(t *testing.T) {
 		t.Fatalf("decoy changed = %d %v", count, err)
 	}
 	// Actual cmdServe maintenance tick body, with memory retention OFF.
-	runRetentionSweeps(ctx, log, mem, reg, 0)
+	runRetentionSweeps(ctx, log, mem, reg, 0, 0)
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM agent_messages`).Scan(&count); err != nil || count != 6 {
 		t.Fatalf("maintenance = %d %v", count, err)
 	}
@@ -76,8 +76,54 @@ func TestMessageRetentionMaintenanceEntrypoint(t *testing.T) {
 	}
 	reg.MessageRetention = 0
 	now = now.Add(100 * 24 * time.Hour)
-	runRetentionSweeps(ctx, log, mem, reg, 0)
+	runRetentionSweeps(ctx, log, mem, reg, 0, 0)
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM agent_messages`).Scan(&count); err != nil || count != 6 {
 		t.Fatalf("disabled = %d %v", count, err)
+	}
+}
+
+// TestMemberExpiryMaintenanceEntrypoint checks that the hourly tick also
+// expires stale namespace members when configured, and leaves them alone
+// when member expiry is disabled (0).
+func TestMemberExpiryMaintenanceEntrypoint(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "member-expiry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.MigrateUp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+	reg := region.New(db, func() time.Time { return now })
+	mem := memory.New(db, func() time.Time { return now })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	for _, a := range []string{"stale", "fresh"} {
+		if err := reg.Register(ctx, "ns", a, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := now.Add(-10 * 24 * time.Hour)
+	if _, err := db.ExecContext(ctx, db.Rebind(
+		`UPDATE region_members SET last_seen_at=$1, joined_at=$1 WHERE namespace='ns' AND agent='stale'`),
+		store.TimeToDB(old)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled (0): the stale member survives the tick.
+	runRetentionSweeps(ctx, log, mem, reg, 0, 0)
+	members, err := reg.Members(ctx, "ns")
+	if err != nil || len(members) != 2 {
+		t.Fatalf("disabled expiry = %+v %v, want both members kept", members, err)
+	}
+
+	// Enabled with a 7-day window: the 10-day-stale member is removed,
+	// the fresh one stays.
+	runRetentionSweeps(ctx, log, mem, reg, 0, 7)
+	members, err = reg.Members(ctx, "ns")
+	if err != nil || len(members) != 1 || members[0].Agent != "fresh" {
+		t.Fatalf("enabled expiry = %+v %v, want only fresh kept", members, err)
 	}
 }

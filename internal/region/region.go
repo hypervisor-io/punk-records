@@ -170,9 +170,77 @@ func (s *Store) Active(m MemberStatus, within time.Duration) bool {
 
 // Deregister removes an agent from a region.
 func (s *Store) Deregister(ctx context.Context, ns, agent string) error {
-	_, err := s.db.ExecContext(ctx, s.db.Rebind(
-		`DELETE FROM region_members WHERE namespace = $1 AND agent = $2`), ns, agent)
+	_, err := s.RemoveMember(ctx, ns, agent)
 	return err
+}
+
+// RemoveMember deletes one namespace member and reports whether a row
+// existed to delete. It is the primitive both Deregister and the DELETE
+// /members/{agent} HTTP route use; messages addressed to a removed
+// member stay in storage, and a session that comes back re-registers
+// through its hook or bridge.
+func (s *Store) RemoveMember(ctx context.Context, ns, agent string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.db.Rebind(
+		`DELETE FROM region_members WHERE namespace = $1 AND agent = $2`), ns, agent)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ExpireMembers removes members whose last_seen_at (falling back to
+// joined_at when last_seen_at is NULL) is older than olderThan, and
+// that are not currently listening. A listening member is never
+// removed regardless of age: candidates are selected first, then only
+// the ones not holding an open inbox stream are deleted. olderThan <= 0
+// disables the sweep. Returns the number of members removed.
+func (s *Store) ExpireMembers(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	cutoff := store.TimeToDB(s.now().Add(-olderThan))
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
+		SELECT namespace, agent FROM region_members
+		WHERE COALESCE(last_seen_at, joined_at) < $1`), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct{ ns, agent string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.ns, &c.agent); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		candidates = append(candidates, c)
+	}
+	closeErr := rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+
+	var n int
+	for _, c := range candidates {
+		if s.Listening(c.ns, c.agent) {
+			continue
+		}
+		removed, err := s.RemoveMember(ctx, c.ns, c.agent)
+		if err != nil {
+			return n, err
+		}
+		if removed {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Members lists a region's satellites.

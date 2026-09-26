@@ -150,6 +150,86 @@ func TestMessagingMembersRegisterAndList(t *testing.T) {
 	}
 }
 
+// TestMessagingDeleteMember covers the happy path and the not-found case.
+// The agent address contains a colon (a real opencode session address),
+// so the {agent} path segment must come through DELETE-decoded, not
+// truncated at the colon.
+func TestMessagingDeleteMember(t *testing.T) {
+	g := messagingServer(t)
+	g.register(t, "ns-x", "opencode:ses_x")
+
+	rec := g.do(t, http.MethodDelete, "/v1/namespaces/ns-x/members/opencode:ses_x", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Namespace string `json:"namespace"`
+		Agent     string `json:"agent"`
+		Removed   bool   `json:"removed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Namespace != "ns-x" || out.Agent != "opencode:ses_x" || !out.Removed {
+		t.Fatalf("delete body = %+v", out)
+	}
+
+	members, err := g.region.Members(context.Background(), "ns-x")
+	if err != nil || len(members) != 0 {
+		t.Fatalf("member not removed: %v %v", members, err)
+	}
+
+	// Deleting again: no such member, 404 in the same {"error":...} shape
+	// as every other messaging error.
+	rec = g.do(t, http.MethodDelete, "/v1/namespaces/ns-x/members/opencode:ses_x", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete again = %d, want 404: %s", rec.Code, rec.Body)
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil || errBody.Error == "" {
+		t.Fatalf("404 body = %s (%v)", rec.Body, err)
+	}
+}
+
+// TestMessagingDeleteListeningMember: a member holding an open inbox
+// stream is protected from deletion unless the caller passes force=1.
+func TestMessagingDeleteListeningMember(t *testing.T) {
+	g := messagingServer(t)
+	g.register(t, "ns-x", "opencode:s1")
+
+	h := openMessagingStream(t, g.s, "/v1/namespaces/ns-x/messages/events?agent=opencode:s1", "")
+	if _, ok := h.nextFrame(3 * time.Second); !ok {
+		t.Fatal("no initial hint")
+	}
+
+	rec := g.do(t, http.MethodDelete, "/v1/namespaces/ns-x/members/opencode:s1", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delete listening member = %d, want 409: %s", rec.Code, rec.Body)
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatal(err)
+	}
+	if errBody.Error != "member is listening; stop its stream or pass force=1" {
+		t.Fatalf("409 error = %q", errBody.Error)
+	}
+
+	// force=1 bypasses the listening guard.
+	rec = g.do(t, http.MethodDelete, "/v1/namespaces/ns-x/members/opencode:s1?force=1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forced delete = %d: %s", rec.Code, rec.Body)
+	}
+
+	h.cancel()
+	if _, closed := h.closedWithin(3 * time.Second); !closed {
+		t.Fatal("stream did not close after cancel")
+	}
+}
+
 func TestMessagingSendReadAckRoundtrip(t *testing.T) {
 	g := messagingServer(t)
 	g.register(t, "ns-x", "alice")

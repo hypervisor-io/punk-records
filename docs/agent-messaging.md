@@ -105,6 +105,16 @@ capability by choosing `--mode wait`.
   coordination identity with no reader unless that session polls it.
   Members are never deleted, so a long-lived namespace lists many
   finished sessions: choose by liveness, not by name.
+- **Member expiry.** The hourly server maintenance tick also removes
+  members whose `last_seen_at` (or `joined_at` if never touched) is
+  older than `messaging.member_expiry_days` (default 7; 0 disables). A
+  member that currently holds an open `/messages/events` stream is
+  never removed by the sweep, regardless of age. `DELETE
+  /v1/namespaces/<ns>/members/<agent>` removes one member on demand,
+  returning 404 if it does not exist and 409 if it is listening unless
+  the request adds `?force=1`. Removal never deletes the member's
+  messages. A session that comes back after expiry re-registers through
+  its hook or bridge, so this is safe.
 - Messages are durable storage, never the lossy in-process bus. Sends are
   idempotent per namespace/sender via a caller-supplied idempotency key;
   identical retries return the stored message **while it is retained**.
@@ -811,6 +821,10 @@ orchestrator's final gate.
    discards lease metadata but preserves messages, while **0024 down drops
    the message table**. Only the owner may authorize that destructive step
    after backup/export. No rollback was run on a live database here.
+6. `messaging.member_expiry_days` (`PUNK_MESSAGING_MEMBER_EXPIRY_DAYS`,
+   default 7) controls the hourly member-expiry sweep alongside message
+   retention; set it to 0 before rollout if members must stay listed
+   indefinitely during verification.
 
 ## Limitations
 

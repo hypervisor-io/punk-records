@@ -129,6 +129,7 @@ func TestAuthzBoundaryRESTDenials(t *testing.T) {
 		{"profile", http.MethodGet, "/v1/namespaces/ns-b/profile", ""},
 		{"diagnose", http.MethodGet, "/v1/namespaces/ns-b/diagnose", ""},
 		{"messages_log", http.MethodGet, "/v1/namespaces/ns-b/messages/log", ""},
+		{"delete_member", http.MethodDelete, "/v1/namespaces/ns-b/members/carol", ""},
 		// enforceNamespace (A01) runs in authMiddleware ahead of every
 		// /v1/namespaces/{ns}/* handler, including handleMessageStream, so
 		// a denial here never reaches the point where that handler writes

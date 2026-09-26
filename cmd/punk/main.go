@@ -1070,7 +1070,7 @@ func cmdServe(args []string) error {
 		}()
 	}
 
-	if cfg.Memory.RetentionDays > 0 || cfg.Messaging.RetentionDays > 0 {
+	if cfg.Memory.RetentionDays > 0 || cfg.Messaging.RetentionDays > 0 || cfg.Messaging.MemberExpiryDays > 0 {
 		go func() {
 			tick := time.NewTicker(time.Hour)
 			defer tick.Stop()
@@ -1079,7 +1079,7 @@ func cmdServe(args []string) error {
 				case <-ctx.Done():
 					return
 				case <-tick.C:
-					runRetentionSweeps(ctx, log, mem, regionStore, cfg.Memory.RetentionDays)
+					runRetentionSweeps(ctx, log, mem, regionStore, cfg.Memory.RetentionDays, cfg.Messaging.MemberExpiryDays)
 				}
 			}
 		}()

@@ -93,6 +93,39 @@ func (s *Server) handleRegisterMember(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRemoveMember deletes one namespace member. chi decodes the
+// {agent} path segment, so an address containing a colon
+// (opencode:ses_x) round-trips unchanged. A member holding an open
+// inbox stream right now is protected from deletion unless the caller
+// passes force=1: deleting it out from under a live stream would drop a
+// consumer silently. Messages already addressed to the removed member
+// stay in storage; a session that comes back re-registers through its
+// hook or bridge.
+func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
+	ns := chi.URLParam(r, "ns")
+	agent := chi.URLParam(r, "agent")
+	if agent == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("api: agent is required"))
+		return
+	}
+	if r.URL.Query().Get("force") != "1" && s.region.Listening(ns, agent) {
+		writeErr(w, http.StatusConflict, errors.New("member is listening; stop its stream or pass force=1"))
+		return
+	}
+	removed, err := s.region.RemoveMember(r.Context(), ns, agent)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !removed {
+		writeErr(w, http.StatusNotFound, errNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"namespace": ns, "agent": agent, "removed": true,
+	})
+}
+
 func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	members, err := s.region.MemberStatuses(r.Context(), chi.URLParam(r, "ns"))
 	if err != nil {
