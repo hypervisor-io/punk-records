@@ -1400,7 +1400,7 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}
 			return nil, map[string]string{"status": "registered", "namespace": ns, "agent": in.Agent}, nil
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "list_region_members",
+	mcp.AddTool(s, &mcp.Tool{Name: "list_region_members", OutputSchema: openOutputSchema[memberStatusesOut](),
 		Description: "List the agents registered to a brain region, live delivery targets first. listening=true means an open inbox stream right now; last_seen_at is the latest registration, read or heartbeat. Message <client>:<session> addresses that are listening or recently seen; a plain name is a coordination identity, not an inbox."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in memberDiscoveryIn) (*mcp.CallToolResult, memberStatusesOut, error) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpRead)

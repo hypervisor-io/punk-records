@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.12.1 (2026-09-26)
+
+### Fixed
+- The five message tools (`send_message`, `read_messages`,
+  `ack_messages`, `await_messages`, `list_region_members`) no longer
+  declare closed objects in their output schemas. MCP clients cache a
+  tool's output schema when they connect and validate every result
+  against it, so the `seq` field added in v1.11.0 made every session
+  that connected before the upgrade fail with "Structured content does
+  not match the tool's output schema". Sessions started before this
+  release still need one restart to drop the cached closed schema;
+  after that, new fields never break a running session again.
+
 ## v1.12.0 (2026-09-26)
 
 ### Added

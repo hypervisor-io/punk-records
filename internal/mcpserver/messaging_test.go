@@ -577,3 +577,30 @@ func TestListRegionMembersLiveTargetsFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestMessagingOutputSchemasStayOpen: clients validate results against
+// the output schema they cached at connect time, so the message tools
+// must not declare closed objects; otherwise every field added later
+// breaks every session that connected before the upgrade.
+func TestMessagingOutputSchemasStayOpen(t *testing.T) {
+	p := probeSession(t, func(d *Deps) { d.Toolset = "agent"; d.MessagingEnabled = true })
+	for _, tool := range p.tools {
+		switch tool.Name {
+		case "send_message", "read_messages", "ack_messages", "await_messages", "list_region_members":
+			var wire struct {
+				OutputSchema json.RawMessage `json:"outputSchema"`
+			}
+			if err := json.Unmarshal([]byte(toolWireJSON(t, tool)), &wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire.OutputSchema) == 0 {
+				t.Errorf("%s lost its output schema", tool.Name)
+			}
+			// Input schemas stay closed on purpose (unknown arguments are
+			// server-side errors); only the result schema must stay open.
+			if strings.Contains(string(wire.OutputSchema), `"additionalProperties":false`) {
+				t.Errorf("%s output schema declares a closed object; a client that cached it rejects any new field", tool.Name)
+			}
+		}
+	}
+}
