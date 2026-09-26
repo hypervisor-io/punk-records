@@ -645,7 +645,7 @@ function renderConversations(filterText) {
     ? rows.map(g => `
       <button type="button" class="msg-convo-row w-full text-left${g.key === msgSelected ? ' on' : ''}" data-msg-convo="${esc(g.key)}">
         <div class="flex items-center justify-between gap-2">
-          <span class="min-w-0 flex-1 truncate text-sm">${addressCell(g.a)} <span class="text-dim">&harr;</span> ${addressCell(g.b)}</span>
+          <span class="min-w-0 flex-1 break-all text-sm">${addressCell(g.a)} <span class="text-dim">&harr;</span> ${addressCell(g.b)}</span>
           ${g.unread ? `<span class="pill text-wait shrink-0">${g.unread}</span>` : ''}
         </div>
         <div class="mt-1 flex items-center justify-between gap-2 text-xs text-dim">
@@ -714,7 +714,7 @@ function renderThread() {
   header.innerHTML = `
     <div class="flex items-center gap-2 p-2">
       <button id="msgBack" type="button" class="btn shrink-0 md:hidden">&larr; back</button>
-      <div class="min-w-0 flex-1 truncate text-sm">${addressCell(a)} <span class="text-dim">&harr;</span> ${addressCell(b)}</div>
+      <div class="min-w-0 flex-1 break-all text-sm">${addressCell(a)} <span class="text-dim">&harr;</span> ${addressCell(b)}</div>
     </div>
     <div class="flex flex-wrap gap-x-4 gap-y-1 px-2 pb-2 text-xs lg:hidden">
       <span class="inline-flex items-center gap-1.5">${msgLivenessBadge(a)}</span>

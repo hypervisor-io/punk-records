@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.11.1 (2026-09-26)
+
+### Fixed
+- Console conversation rows and the thread header wrap long session
+  addresses instead of cutting them off, so both participants are
+  always visible.
+
 ## v1.11.0 (2026-09-26)
 
 ### Added
