@@ -286,10 +286,14 @@ func TestMessagingAdmissionPreservesExistingToolBudget(t *testing.T) {
 	// description that tells a model which addresses are inboxes. Measured
 	// admission 5868 bytes = 1467 tokens; 16 tokens slack. The
 	// existing lean tools are unchanged, which the check above enforces.
-	if got := estTokens(messaging.String()); got > 1483 {
-		t.Errorf("messaging admission = ~%d tokens, budget 1483 (1467 measured + 16 slack)", got)
+	// Console message log (2026-09-26): Message carries seq so the log
+	// pages by sequence; the field appears in read_messages and
+	// await_messages output. Measured admission 5961 bytes = 1491 tokens;
+	// 16 tokens slack.
+	if got := estTokens(messaging.String()); got > 1507 {
+		t.Errorf("messaging admission = ~%d tokens, budget 1507 (1491 measured + 16 slack)", got)
 	}
-	if got := estTokens(agent.wire); got > agentToolsetBudgetTokens+1483 {
+	if got := estTokens(agent.wire); got > agentToolsetBudgetTokens+1507 {
 		t.Errorf("enabled tools budget = %d", got)
 	}
 }

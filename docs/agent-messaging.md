@@ -118,6 +118,23 @@ capability by choosing `--mode wait`.
   set from storage; the hint carries no message bodies; `: ping`
   keepalives arrive every 15s). MCP exposes the same operations as
   `send_message` / `read_messages` / `ack_messages` / `await_messages`.
+- `GET /v1/namespaces/<ns>/messages/log?agent=&limit=&before=` is a
+  read-only operator view: every message in the namespace, including
+  acknowledged ones, newest first. `agent` matches either the sender or
+  the recipient; `limit` defaults to 100 and clamps to 500; `before`
+  pages backward by `seq` (pass the response's `next_before` to fetch
+  older rows). It never leases and never acknowledges.
+- `GET /v1/namespaces/<ns>/messages/stream` is the operator view of a
+  whole namespace's traffic over SSE: an initial `event: ready` frame
+  with `{"namespace"}`, a `message` event on every send with
+  `{"id","recipient"}`, and an `ack` event on every `POST .../messages/ack`
+  call with `{"agent","ids"}` - the acknowledging agent and the ids its
+  request named, not necessarily the ids it newly acknowledged: a retry
+  of an already-acked id, or an id foreign to that agent, is echoed the
+  same way. Ids and addresses only, never bodies. `: ping` keepalives
+  arrive every 15s. Same namespace read authorization as
+  `/messages/events`, rechecked before every delivery and on every
+  keepalive, so a mid-stream grant or key revocation ends the stream.
 
 ## Delivery leases, backlog and receipt history
 
@@ -692,6 +709,18 @@ manifest blocks config validation) and declares the entrypoint through
 package.json's `openclaw.extensions` - the retired `openclaw.pluginEntry`
 shape punk wrote before this change is migrated in place; hand-authored
 manifests, entry files or package.jsons are refused, never overwritten.
+
+## Operator console
+
+`punk serve` serves the console at `/ui`. Its Messages view reads
+`/messages/log` and `/members`, groups messages by participant pair,
+shows each message's delivery state (acknowledged, leased by an owner
+until a time, or unread) and follows `/messages/stream` for live
+updates; the bearer token entered in the top bar rides on every call.
+Its Agents view lists members with `listening`, `last_seen_at`, role,
+unread count and whether the address is a session inbox or a plain
+name, live members first. Nothing in the console leases or
+acknowledges; it is an observer.
 
 ## Verification
 

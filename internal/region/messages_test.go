@@ -515,3 +515,116 @@ func TestWaitMessagesTimeoutAndCancellation(t *testing.T) {
 		t.Fatalf("deadline err=%v, want context.DeadlineExceeded", r.err)
 	}
 }
+
+func TestListMessagesOrderingAndAckedIncluded(t *testing.T) {
+	s, _ := newMessageTest(t)
+	ctx := context.Background()
+	m1 := send(t, s, MessageInput{Namespace: "team", Sender: "alice", Recipient: "bob", Body: "one"})
+	m2 := send(t, s, MessageInput{Namespace: "team", Sender: "bob", Recipient: "alice", Body: "two"})
+	m3 := send(t, s, MessageInput{Namespace: "team", Sender: "alice", Recipient: "carol", Body: "three"})
+	send(t, s, MessageInput{Namespace: "other", Sender: "dave", Recipient: "bob", Body: "other ns"})
+
+	if _, err := s.AckMessages(ctx, "team", "alice", []string{m2.ID}); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	got, err := s.ListMessages(ctx, "team", MessageLogOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if fmt.Sprint(ids(got)) != fmt.Sprint([]string{m3.ID, m2.ID, m1.ID}) {
+		t.Fatalf("order = %v, want newest first [%s %s %s]", ids(got), m3.ID, m2.ID, m1.ID)
+	}
+	if got[0].Seq <= got[1].Seq || got[1].Seq <= got[2].Seq {
+		t.Fatalf("seq not descending: %+v", got)
+	}
+	// the acked row (m2) is still present, with acked_at set
+	if got[1].ID != m2.ID || got[1].AckedAt == "" {
+		t.Fatalf("acked message missing from log or acked_at empty: %+v", got[1])
+	}
+	// unacked rows carry no acked_at
+	if got[0].AckedAt != "" || got[2].AckedAt != "" {
+		t.Fatalf("unacked rows should have empty acked_at: %+v %+v", got[0], got[2])
+	}
+}
+
+func TestListMessagesAgentFilterMatchesEitherSide(t *testing.T) {
+	s, _ := newMessageTest(t)
+	ctx := context.Background()
+	m1 := send(t, s, MessageInput{Namespace: "team", Sender: "alice", Recipient: "bob", Body: "one"})
+	m2 := send(t, s, MessageInput{Namespace: "team", Sender: "carol", Recipient: "alice", Body: "two"})
+	send(t, s, MessageInput{Namespace: "team", Sender: "bob", Recipient: "carol", Body: "three"})
+
+	got, err := s.ListMessages(ctx, "team", MessageLogOptions{Agent: "alice"})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if fmt.Sprint(ids(got)) != fmt.Sprint([]string{m2.ID, m1.ID}) {
+		t.Fatalf("agent filter (recipient+sender) = %v, want [%s %s]", ids(got), m2.ID, m1.ID)
+	}
+}
+
+func TestListMessagesLimitClamp(t *testing.T) {
+	cases := []struct {
+		in, want int
+	}{
+		{0, DefaultMessageLogBatch},
+		{-5, DefaultMessageLogBatch},
+		{50, 50},
+		{MaxMessageLogBatch, MaxMessageLogBatch},
+		{MaxMessageLogBatch + 1, MaxMessageLogBatch},
+		{100000, MaxMessageLogBatch},
+	}
+	for _, c := range cases {
+		if got := clampMessageLogLimit(c.in); got != c.want {
+			t.Errorf("clampMessageLogLimit(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+
+	// exercised end-to-end too: an explicit limit is honoured against real rows
+	s, _ := newMessageTest(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		send(t, s, MessageInput{Namespace: "team", Sender: "alice", Recipient: "bob", Body: fmt.Sprint(i)})
+	}
+	got, err := s.ListMessages(ctx, "team", MessageLogOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("limited len = %d, want 2", len(got))
+	}
+}
+
+func TestListMessagesPagingWithBefore(t *testing.T) {
+	s, _ := newMessageTest(t)
+	ctx := context.Background()
+	var sent []*Message
+	for i := 0; i < 5; i++ {
+		sent = append(sent, send(t, s, MessageInput{Namespace: "team", Sender: "alice", Recipient: "bob", Body: fmt.Sprint(i)}))
+	}
+
+	page1, err := s.ListMessages(ctx, "team", MessageLogOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if fmt.Sprint(ids(page1)) != fmt.Sprint([]string{sent[4].ID, sent[3].ID}) {
+		t.Fatalf("page1 = %v, want [%s %s]", ids(page1), sent[4].ID, sent[3].ID)
+	}
+
+	page2, err := s.ListMessages(ctx, "team", MessageLogOptions{Limit: 2, BeforeSeq: page1[len(page1)-1].Seq})
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if fmt.Sprint(ids(page2)) != fmt.Sprint([]string{sent[2].ID, sent[1].ID}) {
+		t.Fatalf("page2 = %v, want [%s %s]", ids(page2), sent[2].ID, sent[1].ID)
+	}
+
+	page3, err := s.ListMessages(ctx, "team", MessageLogOptions{Limit: 2, BeforeSeq: page2[len(page2)-1].Seq})
+	if err != nil {
+		t.Fatalf("page3: %v", err)
+	}
+	if fmt.Sprint(ids(page3)) != fmt.Sprint([]string{sent[0].ID}) {
+		t.Fatalf("page3 = %v, want [%s]", ids(page3), sent[0].ID)
+	}
+}

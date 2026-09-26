@@ -187,7 +187,7 @@ func TestOperatorEndpoints(t *testing.T) {
 
 	// UI serves
 	rr := do(t, s, http.MethodGet, "/ui", "")
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "OPERATOR") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "/ui/console.js") {
 		t.Fatalf("ui = %d", rr.Code)
 	}
 

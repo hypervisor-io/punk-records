@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.11.0 (2026-09-26)
+
+### Added
+- Operator console rebuilt at `/ui`: a responsive app shell (namespace
+  rail, drawer below 1024 px, bottom bar below 768 px) with six views.
+  Messages shows a namespace's conversations grouped by participant
+  pair, the thread with one delivery state word per message (acked,
+  leased, unread), reply links, task ids, participant liveness and live
+  updates from the new stream. Agents shows registered members with
+  listening, last seen, address kind (session inbox or plain name),
+  unread count and a live-only filter, with the specialist registry as
+  a collapsed panel. Board, Approvals (the former Inbox), Tasks and
+  Costs keep their behaviour. Styling is Tailwind CSS v4 compiled by
+  `scripts/build-ui.sh` into an embedded, committed file: no CDN, no
+  font fetch, works offline.
+- `GET /v1/namespaces/{ns}/messages/log`: read-only namespace message
+  log including acknowledged rows, newest first, `agent` filter on
+  either side, `limit` default 100 and max 500, `before` paging by the
+  new `seq` field on every message.
+- `GET /v1/namespaces/{ns}/messages/stream`: one SSE stream per
+  namespace with `ready`, `message` and `ack` events carrying ids and
+  addresses only. Both the HTTP ack route and the MCP `ack_messages`
+  tool now publish an ack hint on the bus.
+
+### Changed
+- Messages carry `seq` in every response, including the MCP read
+  tools; the messaging tool budget is re-measured for it.
+
 ## v1.10.1 (2026-09-26)
 
 ### Fixed

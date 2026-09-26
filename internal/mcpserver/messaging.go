@@ -139,6 +139,11 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err != nil {
 				return nil, ackMessagesOut{}, err
 			}
+			// Mirrors the HTTP ack handler: notify the namespace message
+			// stream (T2) with ids and recipient only, never bodies.
+			if d.Bus != nil && len(in.IDs) > 0 {
+				d.Bus.Publish(region.MessageAckEvent(ns, in.Agent, in.IDs))
+			}
 			touch(ctx, d, nsr, req, ns, in.Agent)
 			return nil, ackMessagesOut{Acked: acked}, nil
 		})

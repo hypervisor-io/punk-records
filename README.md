@@ -478,6 +478,10 @@ Open the server in a browser and you get the brain: an anatomical brain rendered
 
 Mesh attribution: the brain mesh is derived from BodyParts3D (CC BY-SA 2.1 JP). The attribution text lives at `internal/api/ui/mesh/NOTICE` and is served at `/brain/mesh/NOTICE`; the mesh is rebuilt by `scripts/brain-mesh/build.py`.
 
+## Operator console
+
+`/ui` is a responsive single-page app (dark, one crimson accent, hairline rows rather than cards) with six views: Board (per-namespace task board), Messages, Agents, Approvals (proposal and parked-task queue), Tasks (the global task ledger) and Costs. It has its own namespace rail; the `amk` localStorage token is shared with the brain view, while `ns` (the selected namespace) is kept under its own key for continuity with the console it replaces. It polls every 5 seconds. Styling is Tailwind CSS compiled at build time with `scripts/build-ui.sh` into `internal/api/ui/console.css`, a generated file that is committed and embedded, so the console needs no network and no CDN. Tailwind emits only the utilities it finds referenced, so the CSS must be regenerated after editing any of `internal/api/ui/index.html`, `internal/api/ui/console.js` or `internal/api/ui/console.src.css`, and before committing.
+
 ```sh
 punk brain            # print the brain URL of a running server
 punk brain --open     # ...and open it in the default browser

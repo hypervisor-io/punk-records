@@ -196,6 +196,35 @@ func TestMessagingPublishesOnlyDurableHints(t *testing.T) {
 	}
 }
 
+// TestAckMessagesPublishesAckEvent: T2 wires the same MessageAckEvent
+// hint into the MCP ack_messages tool as the HTTP ack handler, so the
+// namespace message stream (T2, internal/api) sees ACKs from either
+// surface. Observed the same way as the send hint above: a direct
+// subscriber on d.Bus.
+func TestAckMessagesPublishesAckEvent(t *testing.T) {
+	b := bus.New()
+	cs := messagingSession(t, func(d *Deps) { d.Bus = b })
+	registerMessageMembers(t, cs, "ns", "one", "two")
+	var sent messageWire
+	callJSON(t, cs, "send_message", map[string]any{"namespace": "ns", "sender": "one", "recipient": "two", "body": "hi"}, &sent)
+
+	events, cancel := b.Subscribe()
+	defer cancel()
+	var ack struct{ Acked int64 }
+	callJSON(t, cs, "ack_messages", map[string]any{"namespace": "ns", "agent": "two", "ids": []string{sent.ID}}, &ack)
+	if ack.Acked != 1 {
+		t.Fatalf("ack = %+v, want 1 acked", ack)
+	}
+	select {
+	case e := <-events:
+		if e.Kind != region.MessageAckEventKind || e.Key != region.MessageEventKey("ns", "two") || e.Data["ids"] != sent.ID {
+			t.Fatalf("ack hint must match region.MessageAckEvent: %+v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no ack hint")
+	}
+}
+
 func TestMessagingValidation(t *testing.T) {
 	cs := messagingSession(t)
 	registerMessageMembers(t, cs, "ns", "one", "two")

@@ -75,16 +75,30 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-//go:embed ui/index.html
-var uiHTML []byte
+//go:embed ui/index.html ui/console.css ui/console.js
+var uiFS embed.FS
 
-// MountUI serves the operator console. Auth rides the same bearer the
-// JS sends per request; the page itself is public chrome.
+// MountUI serves the operator console: the page and its two build
+// outputs (Tailwind CSS and the app script), all embedded so the
+// console works with no network. Auth rides the same bearer the JS
+// sends per request; the page itself is public chrome. Responses are
+// marked no-cache since the embedded assets change with each binary.
 func (s *Server) MountUI() {
-	s.mux.Get("/ui", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(uiHTML)
-	})
+	serve := func(name, ctype string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			b, err := uiFS.ReadFile(name)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", ctype)
+			w.Header().Set("Cache-Control", "no-cache")
+			_, _ = w.Write(b)
+		}
+	}
+	s.mux.Get("/ui", serve("ui/index.html", "text/html; charset=utf-8"))
+	s.mux.Get("/ui/console.css", serve("ui/console.css", "text/css; charset=utf-8"))
+	s.mux.Get("/ui/console.js", serve("ui/console.js", "text/javascript; charset=utf-8"))
 }
 
 //go:embed ui/brain.html ui/brain.js ui/brain-core.js ui/vendor/* ui/mesh/*

@@ -1,6 +1,7 @@
 bin/
 /punk
 *.db
+node_modules
 
 # Internal working material: planning, research, gap analysis, evaluation
 # notes, and the agent tooling used to build this. Not part of the product

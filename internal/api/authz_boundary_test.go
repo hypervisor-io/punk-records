@@ -128,6 +128,13 @@ func TestAuthzBoundaryRESTDenials(t *testing.T) {
 		{"task_status", http.MethodPost, "/v1/namespaces/ns-b/tasks/T1/status", `{"state":"done","summary":"x"}`},
 		{"profile", http.MethodGet, "/v1/namespaces/ns-b/profile", ""},
 		{"diagnose", http.MethodGet, "/v1/namespaces/ns-b/diagnose", ""},
+		{"messages_log", http.MethodGet, "/v1/namespaces/ns-b/messages/log", ""},
+		// enforceNamespace (A01) runs in authMiddleware ahead of every
+		// /v1/namespaces/{ns}/* handler, including handleMessageStream, so
+		// a denial here never reaches the point where that handler writes
+		// its SSE 200 header - the recorder still sees a plain 403 JSON
+		// body, same as every other row in this table.
+		{"messages_stream", http.MethodGet, "/v1/namespaces/ns-b/messages/stream", ""},
 		// request-resolved namespaces (A02): query overrides and cwd
 		// derivation must never grant access
 		{"hook_query_override", http.MethodPost, "/v1/agent/hooks?ns=ns-b", `{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/work/ok","source":"startup"}`},

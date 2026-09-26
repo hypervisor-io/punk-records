@@ -6,6 +6,37 @@ import (
 	"testing"
 )
 
+func TestUIRoutes(t *testing.T) {
+	s := testServer(t)
+	s.MountUI()
+	for _, tc := range []struct{ path, ctype, want string }{
+		{"/ui", "text/html; charset=utf-8", "<script src=\"/ui/console.js\">"},
+		{"/ui/console.css", "text/css; charset=utf-8", "tailwindcss"},
+		{"/ui/console.js", "text/javascript; charset=utf-8", "const VIEWS"},
+	} {
+		rec := do(t, s, http.MethodGet, tc.path, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.path, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); got != tc.ctype {
+			t.Fatalf("%s: content-type %q want %q", tc.path, got, tc.ctype)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("%s: cache-control %q want no-cache", tc.path, got)
+		}
+		if !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s: body lacks %q", tc.path, tc.want)
+		}
+	}
+	html := do(t, s, http.MethodGet, "/ui", "").Body.String()
+	if !strings.Contains(html, "href=\"/ui/console.css\"") {
+		t.Fatal("/ui page does not reference console.css")
+	}
+	if !strings.Contains(html, "src=\"/ui/console.js\"") {
+		t.Fatal("/ui page does not reference console.js")
+	}
+}
+
 func TestBrainRoutes(t *testing.T) {
 	s := testServer(t)
 	s.MountBrain()

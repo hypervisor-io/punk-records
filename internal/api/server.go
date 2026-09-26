@@ -113,10 +113,12 @@ func New(log *slog.Logger, d Deps) *Server {
 					r.Get("/members", s.handleListMembers)
 					r.Post("/messages", s.handleSendMessage)
 					r.Get("/messages", s.handleReadMessages)
+					r.Get("/messages/log", s.handleMessageLog)
 					r.Get("/messages/count", s.handleCountMessages)
 					r.Post("/messages/ack", s.handleAckMessages)
 					r.Post("/messages/release", s.handleReleaseMessages)
 					r.Get("/messages/events", s.handleMessageEvents)
+					r.Get("/messages/stream", s.handleMessageStream)
 				}
 			})
 		}

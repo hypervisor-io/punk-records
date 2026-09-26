@@ -1,0 +1,216 @@
+@import "tailwindcss" source(none);
+@source "./index.html";
+@source "./console.js";
+
+@theme {
+  /* punk records operator console tokens (see docs/superpowers/plans/2026-09-26-operator-console.md) */
+  --color-bg: #12141C;
+  --color-surface: #1A1D27;
+  --color-line: #2A2F3D;
+  --color-ink: #E9EAF0;
+  --color-dim: #8E94A8;
+  --color-brand: #E43F6B;
+  --color-live: #3DD68C;
+  --color-wait: #F2B84B;
+
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+
+  /* type scale: 12 / 13 / 14 / 16 / 20 / 28 px, weights 400 and 600 only */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 28px;
+}
+
+html {
+  color-scheme: dark;
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  /* Wide data tables scroll inside their own contained wrapper (see
+     .table-wrap below); the page itself never gains a horizontal
+     scrollbar. */
+  overflow-x: hidden;
+}
+
+/* Every control gets a visible focus ring in brand colour; this covers
+   elements styled with plain markup as well as Tailwind utilities. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* Liveness is the one non-user-triggered motion on the page: a subtle
+   pulse on the "listening" dot. Everything else is inert until clicked. */
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-live) 55%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-live) 0%, transparent); }
+}
+
+.live-dot {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+  }
+}
+
+/* Thin, unobtrusive scrollbars that stay legible against the dark chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+/* Small set of reusable components. Panels are the only surfaces with a
+   background and an 8px radius; everything else stays flat with rows
+   separated by hairlines, per the design plan's principles. */
+.tab-btn {
+  @apply cursor-pointer border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-ink;
+}
+.tab-btn.on {
+  @apply border-brand text-ink;
+}
+
+.bottom-btn {
+  @apply flex flex-1 cursor-pointer flex-col items-center justify-center gap-0.5 py-1.5 text-dim;
+  font-size: 12px;
+}
+.bottom-btn.on {
+  @apply text-brand;
+}
+.bottom-icon {
+  @apply text-base leading-none;
+}
+
+.panel {
+  @apply rounded-lg border border-line bg-surface p-3;
+}
+.field {
+  @apply rounded border border-line bg-bg px-2 py-1.5 text-sm text-ink placeholder-dim;
+}
+.btn {
+  @apply cursor-pointer rounded border border-line bg-transparent px-2.5 py-1 font-mono text-xs text-ink hover:border-brand hover:text-brand;
+}
+
+.table-wrap {
+  @apply w-full overflow-x-auto;
+}
+table.data-table {
+  @apply w-full border-collapse text-sm;
+}
+table.data-table th {
+  @apply border-b border-line px-2.5 py-2 text-left text-xs font-normal text-dim;
+}
+table.data-table td {
+  @apply border-b border-line px-2.5 py-2 align-top;
+}
+table.data-table tbody tr:hover td {
+  @apply bg-surface;
+}
+.num {
+  @apply text-right tabular-nums;
+}
+.mono {
+  @apply font-mono text-dim;
+}
+.empty-state {
+  @apply flex flex-col items-center gap-1 px-4 py-10 text-center text-sm text-dim;
+}
+.pill {
+  @apply inline-flex items-center gap-1.5 rounded border border-line px-2 py-0.5 font-mono text-xs;
+}
+.dot {
+  @apply inline-block h-1.5 w-1.5 rounded-full;
+}
+
+/* Below md (768px, the same breakpoint the tab strip switches to a
+   bottom bar at) a six-column table cannot fit without either the page
+   or the table scrolling sideways. Instead each row becomes a stacked
+   block of "label: value" lines, still separated by hairlines, no
+   card chrome, no horizontal scroll anywhere. */
+@media (max-width: 767.9px) {
+  table.data-table thead {
+    @apply hidden;
+  }
+  table.data-table,
+  table.data-table tbody,
+  table.data-table tr,
+  table.data-table td {
+    @apply block w-full;
+  }
+  table.data-table tr {
+    @apply border-b border-line py-2;
+  }
+  table.data-table td {
+    @apply border-b-0 px-0 py-0.5;
+  }
+  table.data-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--color-dim);
+  }
+  table.data-table td.num {
+    @apply text-left;
+  }
+  .table-wrap {
+    overflow-x: visible;
+  }
+}
+
+/* Messages view: one panel holding three horizontally divided panes
+   (see the wireframe in the design plan's Layout section). >=1024px
+   (Tailwind's lg) shows all three; below that the participants pane
+   hides and console.js folds its liveness into the thread header
+   instead (the `lg:hidden` block it renders there); below 768px (md)
+   only one of the list/thread panes shows at a time, toggled by
+   msgMobileView (tapping a conversation, or the thread's back
+   control). */
+.msg-shell {
+  @apply flex min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-surface;
+}
+.msg-list-pane {
+  @apply flex w-full min-w-0 flex-col md:w-72 md:shrink-0 md:border-r md:border-line lg:w-80;
+}
+.msg-thread-pane {
+  @apply flex min-h-0 min-w-0 flex-1 flex-col;
+}
+.msg-participants-pane {
+  @apply hidden min-h-0 w-60 shrink-0 flex-col overflow-y-auto border-l border-line p-3 lg:flex;
+}
+@media (max-width: 767.9px) {
+  .msg-shell[data-mobile="list"] .msg-thread-pane {
+    display: none;
+  }
+  .msg-shell[data-mobile="thread"] .msg-list-pane {
+    display: none;
+  }
+}
+.msg-convo-row {
+  @apply cursor-pointer border-b border-line px-3 py-2 hover:bg-bg;
+}
+.msg-convo-row.on {
+  @apply border-l-2 border-l-brand bg-bg;
+}
+.msg-row {
+  @apply border-b border-line py-3;
+}
+.msg-row:first-child {
+  @apply pt-0;
+}
+.msg-row:last-child {
+  @apply border-b-0;
+}
+.msg-highlight {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}

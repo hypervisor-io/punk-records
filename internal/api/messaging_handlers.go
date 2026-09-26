@@ -185,6 +185,49 @@ func (s *Server) handleReadMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
 
+// messageLogOptions parses the /messages/log query: agent (matches
+// sender or recipient), limit (region.ListMessages clamps it) and
+// before (seq cursor for paging backward).
+func messageLogOptions(r *http.Request) (region.MessageLogOptions, error) {
+	q := r.URL.Query()
+	opts := region.MessageLogOptions{Agent: q.Get("agent"), Limit: queryLimit(r)}
+	if q.Has("before") {
+		n, err := strconv.ParseInt(q.Get("before"), 10, 64)
+		if err != nil {
+			return opts, fmt.Errorf("%w: before must be a number", region.ErrMessageInvalid)
+		}
+		opts.BeforeSeq = n
+	}
+	return opts, nil
+}
+
+// handleMessageLog is the read-only operator view of a namespace's
+// messages: every row including acknowledged ones, newest first. It
+// never leases and never acknowledges. Authorization mirrors
+// handleListMembers: the {ns} path segment behind the A01 middleware
+// hook (GET needs read).
+func (s *Server) handleMessageLog(w http.ResponseWriter, r *http.Request) {
+	opts, err := messageLogOptions(r)
+	if err != nil {
+		writeMessageErr(w, err)
+		return
+	}
+	ns := chi.URLParam(r, "ns")
+	msgs, err := s.region.ListMessages(r.Context(), ns, opts)
+	if err != nil {
+		writeMessageErr(w, err)
+		return
+	}
+	if msgs == nil {
+		msgs = []region.Message{}
+	}
+	var nextBefore int64
+	if len(msgs) > 0 {
+		nextBefore = msgs[len(msgs)-1].Seq
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "next_before": nextBefore})
+}
+
 func (s *Server) handleCountMessages(w http.ResponseWriter, r *http.Request) {
 	n, err := s.region.CountUnreadMessages(r.Context(), chi.URLParam(r, "ns"), r.URL.Query().Get("agent"))
 	if err != nil {
@@ -202,7 +245,9 @@ type ackMessagesIn struct {
 
 // handleAckMessages acknowledges explicitly supplied ids for one
 // recipient. ACK is idempotent and scoped to namespace+recipient; it
-// means received, not task completed.
+// means received, not task completed. After a successful ack it
+// publishes a MessageAckEvent (ids and recipient only, never bodies) so
+// the namespace message stream (T2) can notify operators.
 func (s *Server) handleAckMessages(w http.ResponseWriter, r *http.Request) {
 	var in ackMessagesIn
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -217,10 +262,14 @@ func (s *Server) handleAckMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("api: ids exceeds batch bound"))
 		return
 	}
-	n, err := s.region.AckMessagesWithLease(r.Context(), chi.URLParam(r, "ns"), in.Agent, in.IDs, in.LeasedBy)
+	ns := chi.URLParam(r, "ns")
+	n, err := s.region.AckMessagesWithLease(r.Context(), ns, in.Agent, in.IDs, in.LeasedBy)
 	if err != nil {
 		writeMessageErr(w, err)
 		return
+	}
+	if s.bus != nil && len(in.IDs) > 0 {
+		s.bus.Publish(region.MessageAckEvent(ns, in.Agent, in.IDs))
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"acked": n})
 }

@@ -45,6 +45,9 @@ const (
 	MaxMessageBatch = 100
 	// MessageEventKind is the bus.Event kind for inbox-change hints.
 	MessageEventKind = "agent_message"
+	// MessageAckEventKind is the bus.Event kind for an acknowledgement
+	// hint (T2 namespace message stream).
+	MessageAckEventKind = "message_ack"
 )
 
 // messagePollInterval is WaitMessages' storage reconciliation period:
@@ -54,6 +57,7 @@ var messagePollInterval = 2 * time.Second
 
 // Message is one durable addressed message.
 type Message struct {
+	Seq         int64  `json:"seq"`
 	ID          string `json:"id"`
 	Namespace   string `json:"namespace"`
 	Sender      string `json:"sender"`
@@ -90,6 +94,16 @@ func MessageEventKey(ns, agent string) string { return ns + ":" + agent }
 func MessageEvent(m *Message) bus.Event {
 	return bus.Event{Kind: MessageEventKind, Key: MessageEventKey(m.Namespace, m.Recipient),
 		Data: map[string]string{"id": m.ID}}
+}
+
+// MessageAckEvent is the hint surfaces publish after a successful ACK.
+// Like MessageEvent it carries no body: Data holds only the acknowledged
+// ids, comma-joined, never the message content. Key reuses the same
+// ns+":"+agent shape as MessageEventKey so the namespace stream can
+// filter both kinds with the same prefix split.
+func MessageAckEvent(ns, agent string, ids []string) bus.Event {
+	return bus.Event{Kind: MessageAckEventKind, Key: MessageEventKey(ns, agent),
+		Data: map[string]string{"ids": strings.Join(ids, ",")}}
 }
 
 func newMessageID() string {
@@ -171,13 +185,13 @@ func (in MessageInput) validate() error {
 	return nil
 }
 
-const messageCols = `id, namespace, sender, recipient, body, task_id, reply_to, created_at, COALESCE(acked_at, ''), COALESCE(leased_until, ''), COALESCE(leased_by, '')`
+const messageCols = `seq, id, namespace, sender, recipient, body, task_id, reply_to, created_at, COALESCE(acked_at, ''), COALESCE(leased_until, ''), COALESCE(leased_by, '')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanMessage(r rowScanner) (Message, error) {
 	var m Message
-	err := r.Scan(&m.ID, &m.Namespace, &m.Sender, &m.Recipient, &m.Body, &m.TaskID, &m.ReplyTo, &m.CreatedAt, &m.AckedAt, &m.LeasedUntil, &m.LeasedBy)
+	err := r.Scan(&m.Seq, &m.ID, &m.Namespace, &m.Sender, &m.Recipient, &m.Body, &m.TaskID, &m.ReplyTo, &m.CreatedAt, &m.AckedAt, &m.LeasedUntil, &m.LeasedBy)
 	return m, err
 }
 
@@ -266,11 +280,10 @@ func (s *Store) SendMessage(ctx context.Context, in MessageInput) (*Message, err
 		if in.IdempotencyKey != "" {
 			key = in.IdempotencyKey
 		}
-		_, err := tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO agent_messages
+		return tx.QueryRowContext(ctx, s.db.Rebind(`INSERT INTO agent_messages
 			(id, namespace, sender, recipient, body, task_id, reply_to, idempotency_key, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`),
-			m.ID, m.Namespace, m.Sender, m.Recipient, m.Body, m.TaskID, m.ReplyTo, key, m.CreatedAt)
-		return err
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING seq`),
+			m.ID, m.Namespace, m.Sender, m.Recipient, m.Body, m.TaskID, m.ReplyTo, key, m.CreatedAt).Scan(&m.Seq)
 	})
 	if err != nil && in.IdempotencyKey != "" && !errors.Is(err, ErrMessageInvalid) &&
 		!errors.Is(err, ErrMessageNotFound) && !errors.Is(err, ErrMessageConflict) && ctx.Err() == nil {
@@ -416,6 +429,71 @@ func collectMessages(rows *sql.Rows) ([]Message, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+const (
+	// DefaultMessageLogBatch is ListMessages' limit when none is given.
+	DefaultMessageLogBatch = 100
+	// MaxMessageLogBatch bounds ListMessages' limit (an operator log, so
+	// its bound is wider than MaxMessageBatch's per-agent read batch).
+	MaxMessageLogBatch = 500
+)
+
+// clampMessageLogLimit normalizes a requested ListMessages limit: <= 0
+// means DefaultMessageLogBatch, above MaxMessageLogBatch clamps down to it.
+func clampMessageLogLimit(n int) int {
+	switch {
+	case n <= 0:
+		return DefaultMessageLogBatch
+	case n > MaxMessageLogBatch:
+		return MaxMessageLogBatch
+	default:
+		return n
+	}
+}
+
+// MessageLogOptions filters ListMessages, the read-only operator log over
+// every message in a namespace (unlike ReadMessagesWithOptions, it
+// includes acknowledged rows and never leases).
+type MessageLogOptions struct {
+	// Agent, when set, matches messages where it is the sender OR the
+	// recipient; empty returns every message in the namespace.
+	Agent string
+	// Limit bounds the returned rows. <= 0 means DefaultMessageLogBatch;
+	// above MaxMessageLogBatch clamps down to it.
+	Limit int
+	// BeforeSeq, when > 0, pages backward: only rows with seq < BeforeSeq
+	// are returned.
+	BeforeSeq int64
+}
+
+// ListMessages returns every message addressed within ns, newest first
+// (seq DESC), including acknowledged rows: an operator/audit log, never
+// a lease and never an ack. Agent, when set, matches sender OR recipient.
+func (s *Store) ListMessages(ctx context.Context, ns string, o MessageLogOptions) ([]Message, error) {
+	if err := checkNamespace(ns); err != nil {
+		return nil, err
+	}
+	if err := checkIdent("agent", o.Agent, false); err != nil {
+		return nil, err
+	}
+	query := `SELECT ` + messageCols + ` FROM agent_messages WHERE namespace = $1`
+	args := []any{ns}
+	if o.Agent != "" {
+		query += fmt.Sprintf(` AND (sender = $%d OR recipient = $%d)`, len(args)+1, len(args)+1)
+		args = append(args, o.Agent)
+	}
+	if o.BeforeSeq > 0 {
+		query += fmt.Sprintf(` AND seq < $%d`, len(args)+1)
+		args = append(args, o.BeforeSeq)
+	}
+	args = append(args, clampMessageLogLimit(o.Limit))
+	query += fmt.Sprintf(` ORDER BY seq DESC LIMIT $%d`, len(args))
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	return collectMessages(rows)
 }
 
 // AckMessages marks the supplied ids received, scoped to messages

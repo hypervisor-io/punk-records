@@ -538,3 +538,98 @@ func TestMessageEventsMarksListening(t *testing.T) {
 		t.Fatalf("stream closed, want released: %+v", m["opencode:s1"])
 	}
 }
+
+func TestMessageLogShapeAndFilter(t *testing.T) {
+	g := messagingServer(t)
+	g.register(t, "ns-log", "alice")
+	g.register(t, "ns-log", "bob")
+	g.register(t, "ns-log", "carol")
+
+	sendMsg := func(sender, recipient, body string) {
+		rec := g.do(t, http.MethodPost, "/v1/namespaces/ns-log/messages",
+			fmt.Sprintf(`{"sender":%q,"recipient":%q,"body":%q}`, sender, recipient, body))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("send %s->%s = %d: %s", sender, recipient, rec.Code, rec.Body)
+		}
+	}
+	sendMsg("alice", "bob", "one")
+	sendMsg("bob", "alice", "two")
+	sendMsg("alice", "carol", "three")
+
+	rec := g.do(t, http.MethodGet, "/v1/namespaces/ns-log/messages/log", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Messages   []region.Message `json:"messages"`
+		NextBefore int64            `json:"next_before"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 3 {
+		t.Fatalf("messages len = %d, want 3: %+v", len(out.Messages), out.Messages)
+	}
+	if out.Messages[0].Body != "three" || out.Messages[2].Body != "one" {
+		t.Fatalf("not newest first: %+v", out.Messages)
+	}
+	if out.NextBefore != out.Messages[len(out.Messages)-1].Seq {
+		t.Fatalf("next_before = %d, want seq of last row %d", out.NextBefore, out.Messages[len(out.Messages)-1].Seq)
+	}
+
+	// agent filter matches either side
+	rec = g.do(t, http.MethodGet, "/v1/namespaces/ns-log/messages/log?agent=carol", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("filtered log = %d: %s", rec.Code, rec.Body)
+	}
+	var filtered struct {
+		Messages []region.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Messages) != 1 || filtered.Messages[0].Body != "three" {
+		t.Fatalf("agent filter = %+v, want only the carol message", filtered.Messages)
+	}
+
+	// limit is honoured
+	rec = g.do(t, http.MethodGet, "/v1/namespaces/ns-log/messages/log?limit=1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("limited log = %d: %s", rec.Code, rec.Body)
+	}
+	var limited struct {
+		Messages []region.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &limited); err != nil {
+		t.Fatal(err)
+	}
+	if len(limited.Messages) != 1 || limited.Messages[0].Body != "three" {
+		t.Fatalf("limit=1 = %+v, want just the newest message", limited.Messages)
+	}
+}
+
+func TestMessageLogEmptyNamespaceReturnsEmptyList(t *testing.T) {
+	g := messagingServer(t)
+	g.register(t, "ns-log-empty", "alice")
+
+	rec := g.do(t, http.MethodGet, "/v1/namespaces/ns-log-empty/messages/log", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log = %d: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), `"messages":null`) {
+		t.Fatalf("messages must be [] not null: %s", rec.Body)
+	}
+	var out struct {
+		Messages   []region.Message `json:"messages"`
+		NextBefore int64            `json:"next_before"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Messages == nil || len(out.Messages) != 0 {
+		t.Fatalf("messages = %#v, want empty non-nil slice", out.Messages)
+	}
+	if out.NextBefore != 0 {
+		t.Fatalf("next_before = %d, want 0 for an empty log", out.NextBefore)
+	}
+}
