@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.14.0 (2026-09-28)
+
+### Added
+- Dynamic inbox binding: `punk_register` accepts an optional `inbox`
+  boolean that binds the agent address's inbox to that namespace (the
+  latest explicit bind wins; a plain register never binds, so worktree
+  hops cannot silently rewire delivery). The inbox hooks and the native
+  wake listener resolve their namespace fresh on every hook event as
+  `--ns` > `PUNK_NAMESPACE` > the server inbox binding > the cwd-derived
+  namespace, so registering with `inbox: true` - or re-registering to a
+  different namespace when switching coding agents - rewires delivery
+  and idle wake on the next hook event with no client restart and no
+  environment variable. Bindings live in additive migration
+  `0027_agent_inbox_bindings` (SQLite and PostgreSQL), one row per
+  address, independent of member expiry; `GET /v1/agent/namespace`
+  gains an optional `agent` parameter (binding wins, otherwise the
+  answer is unchanged). Trust note: any peer with a write grant on a
+  namespace can rebind an address it can register - the same trust
+  domain as messaging itself - and delivered envelopes remain
+  untrusted-data framed with `PUNK_MESSAGING_FROM` still applied.
+
 ## v1.13.0 (2026-09-28)
 
 ### Added
