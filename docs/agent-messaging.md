@@ -5,7 +5,8 @@ Delivery follows each client's actual contract: context catch-up, bounded
 turn-end continuation, or an extension that wakes an idle session. Design:
 `docs/superpowers/specs/2026-09-25-agent-messaging-design.md`; plans:
 `docs/superpowers/plans/2026-09-25-agent-messaging.md` and
-`docs/superpowers/plans/2026-09-25-agent-messaging-multiclient.md`.
+`docs/superpowers/plans/2026-09-25-agent-messaging-multiclient.md`; inbox
+binding: `docs/superpowers/specs/2026-09-28-dynamic-inbox-binding-design.md`.
 
 ## Enablement and compatibility
 
@@ -287,6 +288,81 @@ an old server's 404 is silent. The OpenCode bridge reports its own
 `idle_wake` observations from the extension (see above); Pi and OpenClaw
 bridges do not report yet.
 
+## Dynamic inbox binding
+
+`punk hook inbox` and `punk hook wake --action ensure` both need to know
+which namespace a session's inbox lives in. One invocation resolves it as:
+
+1. `--ns` flag (baked into the generated hook entry by `punk connect`)
+2. `PUNK_NAMESPACE` environment
+3. the server's inbox binding for the session address
+4. the cwd-derived namespace (the default when nothing above is set)
+
+The first two are local pins and win outright: with either set the hook
+answers locally without any extra request, so a pin also skips the
+binding query. Without pins, the hook puts its session address
+(`<client>:<session id>`) on the lookup so the server can apply the
+binding. A server with no binding for that address answers the
+cwd-derived namespace exactly as before, and an empty agent leaves the
+query byte-identical to its pre-binding form.
+
+**Registering with `inbox: true`.** The MCP `register` tool accepts an
+optional `inbox` boolean. With `inbox: true`, after the register
+succeeds the server binds that agent address's inbox to the namespace:
+one binding per address, and the latest explicit bind replaces the
+previous one. Binding happens after a successful register, never instead
+of one, and the address must be a registered member of the namespace at
+bind time. A plain register never binds or rebinds - registration
+auto-binding is deliberately absent, so cwd hops cannot silently rewire
+delivery; only an explicit `inbox: true` creates or replaces a binding.
+
+**Fresh resolution, no restarts.** The binding is looked up fresh on
+every hook invocation and every wake ensure, so switching sessions,
+resuming one, or re-registering to a different namespace rewires both
+delivery and wake on the next hook event - any prompt or turn end -
+without a client restart. Inbox state files are keyed by
+server+namespace+address, so a rebound session gets a fresh registration
+and cap ledger in the new namespace and leaves the old ones untouched.
+
+**Agent-switch flow.** When a session is handed to a different agent, or
+resumed under a new address, the new agent registers itself with
+`inbox: true` in the coordination namespace; from the next hook event
+its inbox hook and wake listener read there. Peers find the live address
+through the usual routing surfaces: the `[PUNK ROUTING]` guidance block
+tells the receiving agent its real address and namespace on every
+prompt, and `list_region_members` (or `GET /v1/namespaces/<ns>/members`)
+shows which addresses are listening or recently seen. Senders still pass
+explicit namespace, sender and recipient; the binding changes where
+readers look, not how senders address.
+
+**Bindings and membership are separate.** The binding table is
+independent of `region_members` (migration
+`0027_agent_inbox_bindings`, additive; its down drops only that table):
+member expiry or removal never deletes a binding, so an address that
+comes back after expiry still resolves to its bound namespace. Delivery
+itself still requires membership - sender and recipient must be members
+of the namespace - so an expired member re-registers through its hook or
+bridge before messages flow again.
+
+**Route detail.** `GET /v1/agent/namespace` accepts an optional `agent`
+query parameter. When present and a binding exists, the response is the
+bound namespace; otherwise it is the cwd-derived namespace, and without
+the parameter the route behaves exactly as before. The response shape
+(`{"namespace": ...}`) and the route's permission class are unchanged:
+this is namespace derivation, not access - the revealed name grants
+nothing and actual reads and writes stay per-request authorized. A
+genuine store failure answering the binding lookup is a 500, not a
+silent cwd fallback, so a reader can tell "no binding" from "binding
+store unreachable".
+
+**Trust note.** Binding sits in the same trust domain as messaging
+itself: any peer with a write grant on a namespace can rebind an address
+it can register. A binding changes which namespace a reader polls; it
+does not weaken envelope handling. Delivered messages remain
+untrusted-data framed, `PUNK_MESSAGING_FROM` still filters senders, and
+`--ns` and `PUNK_NAMESPACE` remain local overrides that win over any
+binding and skip the binding query entirely.
+
 ## Inbox hook
 
 `punk hook inbox --client <name> --mode context|continue|wait
@@ -320,8 +396,14 @@ minimum reply.
    Antigravity, `taskId` for Cline). Without a session id the address is
    `<client>:cwd-<first 12 hex of sha256(cwd)>`, and the registration role
    says so.
-2. Resolve the namespace: `--ns`, then `PUNK_NAMESPACE`, then
-   `GET /v1/agent/namespace?cwd=`.
+2. Resolve the namespace: `--ns`, then `PUNK_NAMESPACE`, then the
+   server's inbox binding for the session address, then the cwd-derived
+   namespace. The last two ride one
+   `GET /v1/agent/namespace?cwd=&agent=` call; the pins answer locally
+   without a request. See
+   [Dynamic inbox binding](#dynamic-inbox-binding): resolution happens
+   fresh on every invocation, so a rebound address is picked up on the
+   next hook event.
 3. Decide the mode before any request. `continue` and `wait` downgrade to
    `context` when the client has no documented continuation contract,
    when the payload says `stop_hook_active: true`, or when the continuation
@@ -562,6 +644,13 @@ like `--messaging`.
   identity or an unavailable transport yields a concise diagnostic on
   stderr and never blocks the host. `PUNK_MESSAGING=0` disables and
   tears the listener down on the next hook.
+- **Binding-aware namespace resolution.** Each ensure resolves the
+  namespace fresh with the session address on the lookup - `--ns` >
+  `PUNK_NAMESPACE` > the server's inbox binding > cwd-derived, see
+  [Dynamic inbox binding](#dynamic-inbox-binding). The namespace is part
+  of the listener's config fingerprint, so a binding move supersedes the
+  old generation and respawns the listener on the bound namespace at the
+  next hook event (any prompt or turn end), without a client restart.
 - The listener watches this session's own addressed Punk inbox (SSE
   hints plus bounded unread-metadata reconciliation) and posts a short
   routing **nudge** through the session's native transport. For Claude

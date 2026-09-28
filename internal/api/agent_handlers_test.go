@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hypervisor-io/punk-records/internal/memory"
+	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/hypervisor-io/punk-records/internal/store"
 )
 
@@ -1667,5 +1669,76 @@ func TestAgentContextFailureNotRecordedAsDelivered(t *testing.T) {
 	}
 	if _, _, state, _ := deliveryMarker(t, srv, "agent-myproj", "s1"); state != "issued" {
 		t.Fatalf("retry marker state = %q", state)
+	}
+}
+
+// bindingTestServer is testServer plus a real region store, for routes
+// that resolve an inbox binding.
+func bindingTestServer(t *testing.T) *Server {
+	t.Helper()
+	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "binding-api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.MigrateUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clk := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { clk = clk.Add(time.Millisecond); return clk }
+	return New(testLogger(), Deps{Memory: memory.New(db, now), Region: region.New(db, now)})
+}
+
+// TestAgentNamespaceAgentParam pins the binding-aware resolution
+// contract: with agent present and a binding on file the route answers
+// the bound namespace; with agent present but unbound, and with agent
+// absent, it answers exactly today's cwd-derived namespace. The
+// response shape is unchanged and cwd remains required.
+func TestAgentNamespaceAgentParam(t *testing.T) {
+	srv := bindingTestServer(t)
+	ctx := context.Background()
+	if err := srv.region.Register(ctx, "punk-pbs", "claude-code:s1", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.region.SetInboxBinding(ctx, "punk-pbs", "claude-code:s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(path string) (int, string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code, strings.TrimSpace(rec.Body.String())
+	}
+
+	// Binding wins over the cwd-derived namespace.
+	code, body := get("/v1/agent/namespace?cwd=/home/u/otherproj&agent=claude-code:s1")
+	if code != http.StatusOK || body != `{"namespace":"punk-pbs"}` {
+		t.Fatalf("bound: %d %s, want 200 {\"namespace\":\"punk-pbs\"}", code, body)
+	}
+	// Agent present but unbound: cwd fallback, byte-identical to today.
+	code, body = get("/v1/agent/namespace?cwd=/home/u/My_Proj_2&agent=codex:s3")
+	if code != http.StatusOK || body != `{"namespace":"agent-my-proj-2"}` {
+		t.Fatalf("unbound agent: %d %s, want cwd-derived agent-my-proj-2", code, body)
+	}
+	// No agent param: unchanged behavior.
+	code, body = get("/v1/agent/namespace?cwd=/home/u/My_Proj_2")
+	if code != http.StatusOK || body != `{"namespace":"agent-my-proj-2"}` {
+		t.Fatalf("no agent param: %d %s, want cwd-derived agent-my-proj-2", code, body)
+	}
+	// Rebinding moves the answer on the next request: latest bind wins.
+	if err := srv.region.Register(ctx, "repo-main", "claude-code:s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.region.SetInboxBinding(ctx, "repo-main", "claude-code:s1"); err != nil {
+		t.Fatal(err)
+	}
+	code, body = get("/v1/agent/namespace?cwd=/home/u/otherproj&agent=claude-code:s1")
+	if code != http.StatusOK || body != `{"namespace":"repo-main"}` {
+		t.Fatalf("rebound: %d %s, want repo-main", code, body)
+	}
+	// cwd stays required exactly as before.
+	if code, _ := get("/v1/agent/namespace?agent=claude-code:s1"); code != http.StatusBadRequest {
+		t.Fatalf("missing cwd with agent = %d, want 400", code)
 	}
 }

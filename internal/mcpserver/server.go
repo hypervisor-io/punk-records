@@ -1279,6 +1279,7 @@ type registerIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"brain region to join; optional, resolved from the client's workspace root (see whoami) when empty"`
 	Agent     string `json:"agent,omitempty" jsonschema:"optional; defaults to this session's identity (see whoami)"`
 	Role      string `json:"role,omitempty" jsonschema:"this satellite's role in the region"`
+	Inbox     bool   `json:"inbox,omitempty" jsonschema:"also bind this agent address's inbox to the region; the latest explicit bind wins"`
 }
 
 type membersIn struct {
@@ -1397,6 +1398,15 @@ func registerRegionTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}
 			if err := d.Region.Register(ctx, ns, in.Agent, in.Role); err != nil {
 				return nil, nil, err
+			}
+			// Inbox binding rides a successful register only: membership
+			// holds by construction, and only an explicit inbox: true ever
+			// creates or replaces a binding (a plain register never
+			// auto-binds, so cwd hops cannot silently rewire delivery).
+			if in.Inbox {
+				if err := d.Region.SetInboxBinding(ctx, ns, in.Agent); err != nil {
+					return nil, nil, err
+				}
 			}
 			return nil, map[string]string{"status": "registered", "namespace": ns, "agent": in.Agent}, nil
 		})

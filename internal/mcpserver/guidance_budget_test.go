@@ -215,6 +215,10 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // grows to carry listening/last_seen_at ordering and active_only; the
 // messaging admission is 5868 bytes / ~1467 tokens, the lean set stays
 // 25707 bytes / ~6427 tokens.
+// Dynamic inbox binding re-measurement (2026-09-28): register gains the
+// optional inbox boolean (one input-schema property + its lean
+// description); the lean set is 25832 bytes = 6458 tokens, +125 bytes /
+// ~31 tokens. The tool description and every other entry are untouched.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
@@ -233,7 +237,10 @@ const (
 	// + 16 slack.
 	// M11 restores the pre-messaging default; opt-in costs have a separate
 	// measured bound below and cannot buy slack for any existing tool.
-	agentToolsetBudgetTokens = 6443
+	// Inbox-binding ratchet step (2026-09-28): 6458 measured for the
+	// register tool's inbox property (see the re-measurement note above)
+	// + 16 slack.
+	agentToolsetBudgetTokens = 6474
 	// sessionOpenBudgetTokens is the two parts summed: what a host pays
 	// per session for punk's server-owned guidance with the lean toolset.
 	sessionOpenBudgetTokens = instructionsBudgetTokens + agentToolsetBudgetTokens
@@ -275,8 +282,8 @@ func TestMessagingAdmissionPreservesExistingToolBudget(t *testing.T) {
 	}
 	t.Logf("existing lean tools: %d bytes, ~%d tokens; messaging admission: %d bytes, ~%d tokens",
 		existing.Len(), estTokens(existing.String()), messaging.Len(), estTokens(messaging.String()))
-	if got := estTokens(existing.String()); got > 6443 {
-		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443", got)
+	if got := estTokens(existing.String()); got > 6474 {
+		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443 + inbox-binding ratchet to 6474 (see the re-measurement note above)", got)
 	}
 	// M10/M11: lease/owner, sent view, count and full-ID recovery, plus
 	// message lease metadata add 883 bytes to M2's 4548-byte admission

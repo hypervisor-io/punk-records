@@ -1035,12 +1035,35 @@ func validNamespace(s string) bool {
 
 // handleAgentNamespace tells a client-side tool which namespace a
 // working directory maps to, using the same derivation hooks use, so no
-// client has to reimplement the slug rule.
+// client has to reimplement the slug rule. With the optional agent
+// query parameter present, an explicit inbox binding for that agent
+// address wins over the cwd derivation (register with inbox: true is
+// what sets one; see internal/region's SetInboxBinding), so a session
+// that re-registered to a different namespace rewires its readers on
+// the next resolution. Without a binding - or without the parameter -
+// the answer is byte-identical to the cwd-derived one. The response
+// shape ({"namespace": ...}) and the route's permission class are
+// unchanged: this is namespace derivation, not access; the revealed
+// name grants nothing and actual reads/writes stay per-request
+// authorized. A genuine store failure answering the binding lookup is a
+// 500 rather than a silent cwd fallback, so a reader can tell "no
+// binding" from "binding store unreachable".
 func (s *Server) handleAgentNamespace(w http.ResponseWriter, r *http.Request) {
 	cwd := r.URL.Query().Get("cwd")
 	if cwd == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cwd required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"namespace": AgentNamespace(cwd)})
+	ns := AgentNamespace(cwd)
+	if agent := r.URL.Query().Get("agent"); agent != "" && s.region != nil {
+		bound, ok, err := s.region.InboxBinding(r.Context(), agent)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if ok {
+			ns = bound
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"namespace": ns})
 }

@@ -86,7 +86,7 @@ type InboxOpts struct {
 	WaitSeconds int    // wait mode bound, default 60, max 300
 	BaseURL     string
 	APIKey      string
-	Namespace   string // --ns; else PUNK_NAMESPACE; else server lookup by cwd
+	Namespace   string // --ns; else PUNK_NAMESPACE; else server binding for the session address; else server lookup by cwd
 	Event       string // --event, for clients whose payload does not name it (antigravity)
 	Enabled     bool   // --messaging was written into the hook entry
 }
@@ -839,7 +839,16 @@ func inboxDo(ctx context.Context, method, target, key string, in, out any) error
 	return nil
 }
 
-func resolveInboxNamespace(opts InboxOpts, cwd string) (string, error) {
+// resolveInboxNamespace picks the namespace for one hook invocation:
+// --ns (or the connect-baked override) > PUNK_NAMESPACE > the server's
+// inbox binding for agent > cwd-derived. Pins return without any
+// request. Otherwise agent - the session's client:session-id address,
+// may be empty - rides the lookup so the server can apply an explicit
+// binding; a server without one answers the cwd-derived namespace
+// exactly as before, and an empty agent leaves the query byte-identical
+// to the pre-binding form. Resolved fresh on every call: a rebound
+// address rewires delivery on the next hook event.
+func resolveInboxNamespace(opts InboxOpts, cwd, agent string) (string, error) {
 	for _, ns := range []string{opts.Namespace, namespaceOverride, os.Getenv("PUNK_NAMESPACE")} {
 		if ns = strings.TrimSpace(ns); ns != "" {
 			return ns, nil
@@ -848,10 +857,14 @@ func resolveInboxNamespace(opts InboxOpts, cwd string) (string, error) {
 	if cwd == "" {
 		return "", errors.New("no namespace: pass --ns, set PUNK_NAMESPACE, or send a payload with cwd")
 	}
+	target := opts.BaseURL + "/v1/agent/namespace?cwd=" + url.QueryEscape(cwd)
+	if agent != "" {
+		target += "&agent=" + url.QueryEscape(agent)
+	}
 	var out struct {
 		Namespace string `json:"namespace"`
 	}
-	if err := inboxDo(context.Background(), http.MethodGet, opts.BaseURL+"/v1/agent/namespace?cwd="+url.QueryEscape(cwd), opts.APIKey, nil, &out); err != nil {
+	if err := inboxDo(context.Background(), http.MethodGet, target, opts.APIKey, nil, &out); err != nil {
 		return "", fmt.Errorf("namespace lookup: %w", err)
 	}
 	if out.Namespace == "" || strings.ContainsAny(out.Namespace, ":/") {
@@ -1059,7 +1072,7 @@ func (r *inboxRun) deliver() error {
 	}
 	capExhausted := false
 
-	ns, err := resolveInboxNamespace(r.opts, r.payload.CWD)
+	ns, err := resolveInboxNamespace(r.opts, r.payload.CWD, addr)
 	if err != nil {
 		return r.failOpen(err)
 	}

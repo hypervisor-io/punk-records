@@ -73,7 +73,7 @@ type WakeOpts struct {
 	Action    string // ensure | stop | run
 	BaseURL   string
 	APIKey    string
-	Namespace string // --ns; else PUNK_NAMESPACE; else server lookup by cwd
+	Namespace string // --ns; else PUNK_NAMESPACE; else server binding for the session address; else server lookup by cwd
 	Enabled   bool   // --messaging was written into the hook entry
 }
 
@@ -265,7 +265,10 @@ func wakeEnsure(client string, opts WakeOpts, stdin io.Reader, errw io.Writer) {
 		wakeNote(errw, "server URL must not carry credentials; no listener ensured")
 		return
 	}
-	ns, err := resolveInboxNamespace(InboxOpts{Namespace: opts.Namespace, BaseURL: opts.BaseURL, APIKey: opts.APIKey}, cwd)
+	// Resolved fresh on every ensure with the session address on the
+	// lookup: a moved inbox binding changes the namespace, the
+	// fingerprint follows, and the old generation is superseded below.
+	ns, err := resolveInboxNamespace(InboxOpts{Namespace: opts.Namespace, BaseURL: opts.BaseURL, APIKey: opts.APIKey}, cwd, client+":"+sessionID)
 	if err != nil {
 		wakeNote(errw, "namespace resolution failed; no listener ensured")
 		return
