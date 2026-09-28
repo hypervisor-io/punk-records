@@ -24,7 +24,7 @@ const codexSessionStartMatcher = "startup|resume"
 // ConnectCodexHooks merges punk hook entries into a Codex hooks.json
 // (~/.codex/hooks.json, or <repo>/.codex/hooks.json for --project).
 func ConnectCodexHooks(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
-	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, false)
+	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, false, false)
 }
 
 // ConnectCodexHooksMessaging is ConnectCodexHooks plus the opt-in inbox
@@ -34,10 +34,21 @@ func ConnectCodexHooks(hooksPath, punkPath, serverURL, ns string) (changed bool,
 // shape and reply contract (developers.openai.com/codex/hooks, fetched
 // 2026-09-25), so the Claude-shaped merge and reply writer are shared.
 func ConnectCodexHooksMessaging(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
-	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, true)
+	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, true, false)
 }
 
-func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging bool) (changed bool, err error) {
+// ConnectCodexHooksWake is ConnectCodexHooksMessaging plus the opt-in
+// native wake groups (punk connect codex --wake, which implies
+// --messaging): "punk hook wake --client codex --action ensure" on
+// SessionStart (startup|resume matcher, same as capture/inbox),
+// UserPromptSubmit and Stop, and --action stop on SessionEnd (see
+// wake_connect.go). Without --wake the output stays byte-identical to
+// ConnectCodexHooksMessaging's.
+func ConnectCodexHooksWake(hooksPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectCodexHooks(hooksPath, punkPath, serverURL, ns, true, true)
+}
+
+func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging, wake bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(hooksPath)
 	if err != nil {
 		return false, err
@@ -66,6 +77,11 @@ func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging bool
 	}
 	if messaging {
 		addClaudeShapedInbox(hooksAny, punkPath, "codex", serverURL, ns, codexSessionStartMatcher)
+	}
+	if wake {
+		if err := addClaudeShapedWake(hooksAny, hooksPath, punkPath, "codex", serverURL, ns, codexSessionStartMatcher); err != nil {
+			return false, err
+		}
 	}
 	settings["hooks"] = hooksAny
 	out, err := encodeSettings(settings)
@@ -351,17 +367,22 @@ func DedupeCodexHookScopes(globalPath, projectPath, punkPath string) (notes []st
 		return nil, false, nil
 	}
 
-	for _, ev := range codexHookEvents {
+	// SessionEnd joins the canonical events here: the capture merge
+	// never registers it, but a --wake install puts a punk-managed stop
+	// group on it, and that group dedupes across scopes like any other.
+	dedupeEvents := append(append([]string{}, codexHookEvents...), wakeStopEvent)
+	for _, ev := range dedupeEvents {
 		groups, _ := projectHooks[ev].([]any)
 		if len(groups) == 0 {
 			continue
 		}
 		globalGroups, _ := globalHooks[ev].([]any)
 		var globalPunkCanon [][]byte
-		// Inbox groups (--messaging) dedupe exactly like capture groups:
-		// the same group in both scopes would run the inbox hook twice.
+		// Inbox groups (--messaging) and wake groups (--wake) dedupe
+		// exactly like capture groups: the same group in both scopes
+		// would run the inbox or wake hook twice.
 		managed := func(g any) bool {
-			return isPunkManagedGroup(g, punkPath) || isPunkManagedInboxGroup(g, punkPath, "codex")
+			return isPunkManagedGroup(g, punkPath) || isPunkManagedInboxGroup(g, punkPath, "codex") || isPunkManagedWakeGroup(g, punkPath, "codex")
 		}
 		for _, g := range globalGroups {
 			if managed(g) {

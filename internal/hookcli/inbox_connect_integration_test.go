@@ -153,7 +153,7 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 				}
 				return out.String()
 			}
-			empty := nativeExpectedReply(client, "", false)
+			empty := nativeExpectedEmptyReply(client, addr)
 			if got := run(command, false); got != empty {
 				t.Fatalf("empty installed=%q want=%q", got, empty)
 			}
@@ -190,8 +190,8 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 				t.Fatalf("decoy=%+v %v", rows, err)
 			}
 			srv.Close()
-			if got := run(command, false); got != empty {
-				t.Fatalf("installed down=%q want=%q", got, empty)
+			if got, want := run(command, false), nativeExpectedReply(client, "", false); got != want {
+				t.Fatalf("installed down=%q want=%q", got, want)
 			}
 		})
 	}

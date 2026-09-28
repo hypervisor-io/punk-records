@@ -35,6 +35,14 @@ to change the advertised tool set.
   the client process has no `PUNK_MESSAGING` environment setting. Setting
   `PUNK_MESSAGING=0` in the client process overrides those flags.
   Merely setting the server environment does not install client hooks.
+- Claude Code and Codex additionally support opt-in native idle wake:
+  `punk connect claude-code --wake` or `punk connect codex --wake`. The
+  flag implies `--messaging` (inbox hooks are installed as well) and adds
+  the wake lifecycle hooks described in
+  [Native wake bridge](#native-wake-bridge-opt-in-claude-code-and-codex).
+  Codex rejects `--wake` combined with `--no-hooks`. Without `--wake` the
+  generated files stay byte-identical to a plain or `--messaging`
+  connect.
 - Pi, OpenCode and OpenClaw use **runtime environment only**, not a connect
   `--messaging` flag: run ordinary `punk connect pi|opencode|openclaw` for
   the selected target, then launch that client with `PUNK_MESSAGING=1`.
@@ -61,8 +69,8 @@ No extension-only client is simulated as a subprocess hook.
 
 | Client | Tier / receiving events | Reply or host handoff | Bounds and known limits | Version evidence |
 |---|---|---|---|---|
-| Claude Code | Catch-up: `SessionStart`, `UserPromptSubmit`; continuation/optional bounded wait: `Stop` | nested `hookSpecificOutput.additionalContext`; Stop `decision:block`, `reason` | Punk 5 continuations/10 min, `stop_hook_active`, client 8-block guard; no async idle wake claimed | [hooks](https://code.claude.com/docs/en/hooks), checked 2.1.282; minimum not established |
-| Codex | Catch-up: `SessionStart` (`startup/resume`), `UserPromptSubmit`; continuation/wait: `Stop` | same nested context; Stop JSON `decision:block`, `reason` | Punk cap and `stop_hook_active`; no documented client loop cap; token-based output spill can still occur | [hooks](https://developers.openai.com/codex/hooks), checked 0.156.1; capture fixtures also 0.153.4 |
+| Claude Code | Catch-up: `SessionStart`, `UserPromptSubmit`; continuation/optional bounded wait: `Stop`; opt-in native idle wake with `--wake` (ensure on `SessionStart`/`UserPromptSubmit`/`Stop`, stop on `SessionEnd`) | nested `hookSpecificOutput.additionalContext`; Stop `decision:block`, `reason`; wake: own-session messaging socket nudge | Punk 5 continuations/10 min, `stop_hook_active`, client 8-block guard; wake shares the same budget, Unix-only | [hooks](https://code.claude.com/docs/en/hooks), checked 2.1.282; [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging) live-proven 2.1.283 in an isolated session |
+| Codex | Catch-up: `SessionStart` (`startup/resume`), `UserPromptSubmit`; continuation/wait: `Stop`; opt-in native idle wake with `--wake` (same events, plus `SessionEnd` stop) | same nested context; Stop JSON `decision:block`, `reason`; wake: `turn/start` nudge through the owning daemon's `app-server proxy`, idle threads only | Punk cap and `stop_hook_active`; no documented client loop cap; token-based output spill can still occur; wake defers while the thread is busy, Unix-only, shared-daemon launches only | [hooks](https://developers.openai.com/codex/hooks), checked 0.156.1; capture fixtures also 0.153.4; wake live-proven 0.157.1 in an isolated session |
 | Cursor | Catch-up: `sessionStart`; continuation/wait: `stop` | `additional_context`; `followup_message` | Punk cap plus client default loop limit 5; **no inbox context on beforeSubmitPrompt** | [hooks](https://cursor.com/docs/agent/hooks); minimum not established |
 | Copilot CLI | Catch-up: `SessionStart`; continuation/wait: `Stop` (PascalCase aliases) | flat `additionalContext`; `decision:block`, `reason` | Punk cap, `stop_hook_active`, client 8-block guard; command-hook UserPromptSubmit output is dropped, so no per-turn catch-up there | [hooks](https://docs.github.com/en/copilot/reference/hooks-reference); minimum not established |
 | Antigravity | Catch-up: every `PreInvocation`; continuation: `Stop` | `injectSteps[].ephemeralMessage`; `decision:continue` **with reason**; idle Stop `decision:allow` | Punk cap; event supplied through `--event`; no client cap or idle-wake API claimed | [hooks](https://antigravity.google/docs/hooks); minimum not established |
@@ -218,6 +226,67 @@ legacy behavior, but old servers do not enforce delivery leases or caps.
 Apply upgrades only through the normal owner-operated migration path, never
 by modifying the live coordination database manually.
 
+## Delivery diagnostics
+
+Bridges and hooks report one bounded, latest-only delivery observation per
+namespace/address so operators can see *why* a message is waiting. A
+diagnostic is the reporting client's own observation; it never proves
+model receipt, turn completion or ACK, and it never overrides member
+liveness (`listening`/`last_seen_at`) or message ACK state.
+
+- `POST /v1/namespaces/<ns>/messages/diagnostics` records a snapshot:
+
+  ```json
+  {"agent":"opencode:session","client":"opencode","delivery_mode":"idle_wake","state":"waiting_for_idle","last_attempt_at":"2026-09-28T00:00:00Z","next_attempt_at":"2026-09-28T00:10:00Z","last_error":"prompt_failed","pending_ack_count":1,"wake_count":2}
+  ```
+
+  `agent`, `client`, `delivery_mode` and `state` are required. Delivery
+  modes: `idle_wake`, `hook_continuation`, `catch_up`. States: `ready`,
+  `waiting_for_idle`, `waiting_for_next_prompt`, `wake_budget_exhausted`,
+  `sender_filtered`, `delivery_failed`, `handoff_unconfirmed`, `disabled`.
+  Timestamps are RFC3339; absent or empty clears the previous value.
+   Counts are integers from 0 to 10,000. `last_error` is a short machine
+  reason, never a raw error carrying URLs or bodies. The server sets
+  `updated_at`, requires the address to be a registered member, and
+  answers `{"status":"recorded"}`. A failed report never fails delivery
+  or ACK.
+- `GET /v1/namespaces/<ns>/messages/diagnostics?agent=<optional-address>`
+  returns `{"diagnostics":[{...,"updated_at":"...","stale":false}]}`, one
+  snapshot per address in stable address order when `agent` is omitted
+  (at most 1,000 snapshots; query `agent` for a specific address).
+  `stale` means the snapshot is older than 120 seconds by the server
+  clock; consumers must label values "last reported" and must not treat
+  a fresh or stale observation as liveness or receipt truth. GET is
+  side-effect free: it never touches membership, leases or messages.
+- Authorization follows the existing API patterns: POST requires a write
+  grant, GET a read grant, on the namespace. No new MCP tools are added.
+- Storage is additive migration `0026` (SQLite and PostgreSQL): one
+  latest snapshot per namespace/address, surviving server restarts and
+  deleted when the member is removed or expires. Old servers answer 404;
+  reporters and the console must degrade gracefully and preserve
+  delivery.
+
+**Subprocess-hook reporting** (`punk hook inbox`, `internal/hookcli/
+inbox_diag.go`): each enabled invocation reports exactly one observation,
+flushed only after its address is a confirmed member and after the ACK
+outcome is settled, so a report never precedes an ACK. The delivery mode
+is `hook_continuation` when the client has a documented continuation
+contract and `catch_up` otherwise (subprocess hooks never report
+`idle_wake`). The resting state after a successful handoff or an empty
+inbox is `waiting_for_next_prompt`; the hook also reports
+`sender_filtered` (allowlist held everything or something back),
+`delivery_failed` (`fetch_failed`, `render_cap` or `handoff_failed`),
+`handoff_unconfirmed` with `ack_failed` and the pending count when the
+ACK request failed after a printed delivery, and `wake_budget_exhausted`
+with `continuation_cap` when an exhausted continuation cap left messages
+undelivered. `wake_count` is the continuation slots inside the current
+window. The POST runs on its own 200 ms bound, never borrows the wait
+deadline, and a failure is at most one generic stderr note. Disabled
+messaging, a failed registration and a `CanCarry` skip send nothing;
+an old server's 404 is silent. The OpenCode bridge reports its own
+`idle_wake` observations from the extension (see above); Pi and OpenClaw
+bridges do not report yet.
+
 ## Inbox hook
 
 `punk hook inbox --client <name> --mode context|continue|wait
@@ -227,6 +296,15 @@ Codex, Cursor, Copilot CLI, Antigravity, Cline, Hermes). Pi, OpenClaw and
 OpenCode are delivered by their long-lived extensions instead; the command
 refuses them. Implementation: `internal/hookcli/inbox.go` and
 `inbox_state.go`.
+
+**Manual invocation.** The command reads the client's native hook JSON
+from stdin; without a `hook_event_name` (Claude Code) it stays inert and
+says so on stderr. Running it by hand against a real inbox **delivers and
+ACKs messages** exactly as a live hook would - it is not a read-only
+preview. For a read-only look at an inbox use the operator read
+`GET /v1/namespaces/<ns>/messages/log?agent=<address>` (or
+`read_messages(namespace, agent, count_only: true)` for the unread count),
+which never leases or acknowledges.
 
 **Opt-in.** Nothing happens unless `PUNK_MESSAGING=1` (or `true`/`yes`/`on`)
 is in the hook environment or the hook entry carries `--messaging`.
@@ -273,6 +351,11 @@ minimum reply.
    expire if the server does not support release). A short stdout write
    is a failure even when the writer reports no error. ACK/release requests
    are split into batches of at most 100 IDs.
+
+After the ACK outcome settles, an enabled and registered invocation then
+reports one best-effort delivery diagnostic (see **Delivery
+diagnostics** above). It is flushed last and changes none of the bytes,
+ACK ordering or fail-open behavior described here.
 
 **Envelope** (identical for every client; `hookcli.RenderInbox`):
 
@@ -410,17 +493,126 @@ unchanged capture group:
   `stop_hook_active`. Claude Code also ends a turn after 8 consecutive
   blocks. Codex documents no such cap, so punk's cap is the only bound
   there.
-- **No idle wake.** Codex background hooks never start a turn. Claude Code
+- **Without `--wake`, no idle wake.** Codex background hooks never start a turn. Claude Code
   documents an `asyncRewake` handler field that wakes an idle session, but
   states no minimum version, so punk does not use it. `--mode wait` on Stop
   is a bounded blocking wait (`--wait-seconds`, max 300), which needs a
   handler timeout above the wait. The generated entries use
   `--mode continue` with a 15 s timeout. A session that is idle picks up
-  messages on its next prompt.
+  messages on its next prompt - unless the opt-in native wake bridge
+  below is installed.
+- **Routing identity guidance.** On every Claude Code `SessionStart` and
+  `UserPromptSubmit` with an empty inbox - after registration is
+  confirmed - the hook prints a compact `[PUNK ROUTING]` block as
+  `additionalContext`: the session's real address and namespace, the
+  explicit `send_message`/`read_messages`/`ack_messages` parameters, a
+  warning never to invent aliases or namespaces, and whether a native
+  wake listener has been requested and its endpoint is available. This
+  capability note is not a listener-liveness guarantee. Without native
+  wake it states that delivery waits for the next prompt. It repeats on
+  every prompt because compaction or a fresh context
+  must not orphan the identity (the observed failure mode was agents
+  addressing a guessed alias in a made-up namespace while the hook
+  delivered on the real session id). It is hook-authored, never peer
+  content: nothing is ACKed or leased beyond the ordinary fetch, no
+  continuation slot is spent, `Stop` never carries it, and a delivered
+  envelope already names the address and namespace so guidance is never
+  stacked onto one. Codex and the other clients keep their silent
+  minimum reply.
 - Verified 2026-09-25 against https://code.claude.com/docs/en/hooks
   (Claude Code 2.1.282 installed) and
   https://developers.openai.com/codex/hooks (codex-cli 0.156.1 installed).
   A real-session delivery check is part of the final gate.
+
+## Native wake bridge (opt-in, Claude Code and Codex)
+
+`punk connect claude-code --wake` and `punk connect codex --wake` add a
+third managed hook group beside the unchanged capture and inbox groups.
+`--wake` **implies `--messaging`**; without it the generated files are
+byte-identical to what `--messaging` (or a plain connect) writes. For
+Codex, `--wake` conflicts with `--no-hooks` and is rejected, exactly
+like `--messaging`.
+
+| Event | Command |
+|---|---|
+| `SessionStart` | `punk hook wake --client <c> --action ensure --url ... [--ns ...] --messaging` |
+| `UserPromptSubmit` | same, `--action ensure` |
+| `Stop` | same, `--action ensure` |
+| `SessionEnd` | same, `--action stop` |
+
+- Codex's SessionStart wake group uses the same `startup|resume` matcher
+  as its capture and inbox groups. `punk connect codex --project` dedupes
+  identical wake groups across the global and project scopes, the same
+  way it dedupes capture and inbox groups.
+- The wake groups are deduped by their own ` hook wake ` marker,
+  independently of the capture and inbox groups: a no-wake reconnect
+  over a wake install is a byte-identical no-op and leaves every wake
+  group in place, and a wake reconnect replaces stale wake entries
+  without touching capture, inbox or user entries.
+- Each ensure hook rechecks the runtime and ensures **one** detached
+  listener per native session; SessionEnd stops it. The singleton is
+  enforced by a random per-spawn generation marker
+  (`gen/<generation>/control` under the session's state dir, with a
+  current-generation pointer): a concurrent or repeated ensure with the
+  same config dedups on the config fingerprint, and a listener exits
+  when its generation marker changes or disappears. Stop removes the
+  marker; it never kills PIDs. Ensure passes the listener its private
+  config (including any API key) as one JSON document on stdin, not in
+  argv. Ensure exits promptly and prints no stdout; a missing native
+  identity or an unavailable transport yields a concise diagnostic on
+  stderr and never blocks the host. `PUNK_MESSAGING=0` disables and
+  tears the listener down on the next hook.
+- The listener watches this session's own addressed Punk inbox (SSE
+  hints plus bounded unread-metadata reconciliation) and posts a short
+  routing **nudge** through the session's native transport. For Claude
+  Code that is the own-session messaging socket; for Codex it is a
+  WebSocket JSON-RPC session relayed by `codex app-server proxy` into
+  the owning daemon (never a second app-server): handshake,
+  `thread/loaded/list`, `thread/resume`, then `thread/queue/add` only while
+  the thread reports idle. The connection explicitly enables the
+  experimental API and assigns each queued nudge a fresh
+  `clientUserMessageId`. A busy thread defers the nudge; if a human turn
+  races the idle check, the queue waits for idle rather than steering
+  that turn. Queue acceptance means host enqueue, not model receipt.
+  The nudge states that it
+  is a notification, that peer messages stay untrusted, and how to read
+  them; the listener never forwards peer bodies, never leases or ACKs,
+  and never follows callback URLs from peer text. A failed nudge leaves
+  unread data intact.
+- **No secrets in hooks.** The generated commands carry only the punk
+  path, client, action, URL and optional namespace - never an API key,
+  socket path or native token. Claude Code's messaging token is read
+  from the session's own environment at runtime and never appears in
+  argv, files or diagnostics.
+- **Capability honesty.** Native wake is Unix-only initially (Linux
+  verified; other platforms fail open and report unavailable). Claude
+  Code needs the cross-session messaging socket (documented 2.1.224+;
+  live-proven on 2.1.283 in an isolated session,
+  https://code.claude.com/docs/en/cross-session-messaging). Codex needs
+  a 0.157+ launch that shares the app-server daemon (live-proven on
+  0.157.1, including that the hook `session_id` is the loaded root
+  thread id); embedded-mode launches cannot be woken this way. A
+  session launched without the expected capability is reported as
+  unavailable on hook stderr (and in diagnostics when a registered
+  listener detects it) and is
+  otherwise left alone - punk never starts a new host session to
+  deliver a wake.
+- Wake volume shares the Stop-continuation budget knobs
+  (`PUNK_MESSAGING_MAX_CONTINUE`, `PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS`,
+  defaults 5 per 600 s), persisted per session identity so a listener
+  restart cannot reset it. `PUNK_MESSAGING_MAX_CONTINUE=0` disables
+  waking entirely (the listener still monitors and reports) instead of
+  resetting to the default. A cooldown (default 60 s) keeps reconnects
+  and unchanged inboxes from re-nudging, and the sender allowlist is
+  the same `PUNK_MESSAGING_FROM` prefixes the inbox hook honors.
+- An inbox hook and a native listener may both report diagnostics for
+  one address; the latest report wins. A `hook_continuation` observation
+  therefore does not mean native wake was disabled. The listener and
+  Stop hooks use the same budget settings but separate persisted ledgers.
+- Sender filtering scans the first 100 eligible unread rows. If all are
+  denied, a read-only message-log scan checks at most 1,000 rows for
+  allowed recipients without claiming leases. `scan_limit` explicitly
+  reports that the bounded scan could not cover a larger backlog.
 
 ## Cline file hooks (catch-up only)
 
@@ -541,10 +733,15 @@ Behavior:
   as a human `UserPromptSubmit` nor marks the session busy for its own
   delivery - while a real human message arriving mid-prompt is still
   fully honored. Hints arriving while a drain is mid-flight queue exactly
-  one subsequent drain (never lost, never stacked); a failed prompt never
-  spins - the next attempt waits for the next trigger. Wake attempts are
-  bounded by `PUNK_MESSAGING_MAX_CONTINUE` per sliding window (default
-  5/600 s); excess rows are released unread, not promised immediate drain.
+   one subsequent drain (never lost, never stacked); a failed prompt never
+   spins - the next attempt waits for the next trigger. Wake attempts are
+   bounded by `PUNK_MESSAGING_MAX_CONTINUE` per sliding window (default
+   5/600 s); excess rows are released unread. A cap-suppressed backlog is
+   not stranded until an unrelated event: the bridge schedules one
+   cancellable wake retry at the next window expiry, so remaining rows
+   drain themselves when the window rolls. No retry is scheduled when the
+   stop was busy-driven (the next `session.idle` drains then) or when
+   waking is disabled outright (cap 0).
 - **Shared renderer and leases**: OpenCode now uses the same emitted
   envelope renderer and lease client as Pi/OpenClaw, replacing the old
   unbounded M4 frame. Reads lease pages of 50 with a per-session owner.
@@ -562,10 +759,31 @@ Behavior:
   model again**. Retry memory stays bounded: the delivered set drains on
   ACK (bounded by the pending backlog) and a capped 256-id recently-acked
   ring absorbs read/ack races (the server's unread list is authoritative).
-  Partial or expired-owner ACK responses are not treated as full success;
-  pending IDs are reacquired and re-ACKed without another prompt. Delivery
-  is at-least-once across process restarts. Prompt resolution is host
-  handoff, not a model-completion or task-review guarantee.
+   Partial or expired-owner ACK responses are not treated as full success;
+   pending IDs are reacquired and re-ACKed without another prompt. Delivery
+   is at-least-once across process restarts. Prompt resolution is host
+   handoff, not a model-completion or task-review guarantee.
+- **Restart recovery**: the bridge persists the IDs it handed off
+   successfully but has not yet ACKed, plus its sliding wake-window
+   timestamps, in a local atomic state file isolated by server URL,
+   namespace and address, under
+   `$XDG_STATE_HOME/punk/inbox/opencode/` (default
+   `~/.local/state/punk/inbox/opencode/`). It never persists API keys or
+   message bodies; server URLs in the file should not contain credentials.
+   Recovery files are limited to 64 KiB, with at most 250 pending IDs and
+   1,000 individual wake timestamps. Larger wake histories use a bounded,
+   conservative count/expiry summary. On startup the file is restored before the first drain, so a
+   restarted bridge re-ACKs handed-off messages without prompting the
+   model again and keeps its wake budget across the restart. A corrupt,
+   unreadable or unwritable file fails open: delivery continues from
+   in-memory state and the server inbox stays authoritative. A crash
+   between host handoff and the state save remains ambiguous - that one
+   message can be re-prompted; repeated crashes can repeat this window.
+   Concurrent same-address processes merge recovery evidence under a file
+   lock, but do not provide a distributed wake quota or exactly-once
+   handoff. Forward-clock conflicts can temporarily leave new handoffs in
+   memory only. No persistence or network happens while
+   messaging is disabled.
 - **SSE robustness**: a non-OK response has its body cancelled and
   retries on the same exponential capped backoff as a dropped connection;
   the backoff resets only after a connection actually delivered bytes
@@ -729,8 +947,19 @@ until a time, or unread) and follows `/messages/stream` for live
 updates; the bearer token entered in the top bar rides on every call.
 Its Agents view lists members with `listening`, `last_seen_at`, role,
 unread count and whether the address is a session inbox or a plain
-name, live members first. Nothing in the console leases or
-acknowledges; it is an observer.
+name, live members first. Both views also fetch `/messages/diagnostics`
+and show each address's capability (client and delivery mode), the last
+reported wait or failure reason with its timestamp, the next reported
+retry time and the pending-ACK count. These are labeled **last
+reported**: they are the client's own observation, dimmed and marked
+"(stale)" once the server flags them older than 120 seconds, and they
+never override the liveness badges or a message's ACK state. Diagnostics
+are scoped to the namespace they were fetched in: switching namespaces
+never shows the previous namespace's report for an address that exists in
+both. Servers older than the diagnostics route answer 404, and the console
+then renders the previous view unchanged (probing once per newly selected
+namespace). Nothing in the console leases or acknowledges; it is an
+observer.
 
 ## Verification
 
@@ -830,9 +1059,11 @@ orchestrator's final gate.
 
 - One punk server per OpenCode process (`PUNK_URL`); no cross-server or
   cross-namespace forwarding.
-- Delivery is at-least-once: the dedup sets live in the OpenCode process,
-  so a restart re-prompts messages that were delivered but never
-  acknowledged.
+- Delivery is at-least-once: handed-off but unACKed ids and wake-window
+  timestamps persist in the bridge's local state file, so a restart
+  re-ACKs without re-prompting and keeps the wake budget. Only a crash
+  between host handoff and the state save remains ambiguous; that message
+  can be re-prompted once.
 - The bridge relies on OpenCode's current SDK surface (`client` in the
   plugin context; `session.prompt/list/status`; the
   `session.created/idle/deleted/status/error` events; the `synthetic` part

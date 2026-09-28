@@ -222,7 +222,9 @@ main().catch((err) => {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, nodePath, harnessPath).CombinedOutput()
+	harnessCmd := exec.CommandContext(ctx, nodePath, harnessPath)
+	harnessCmd.Env = nodeHarnessEnv(t)
+	out, err := harnessCmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("node harness did not complete within 15s: %s", out)
 	}

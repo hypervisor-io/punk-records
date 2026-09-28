@@ -75,6 +75,11 @@ const punkTestServer = {
   promptPlan: [], // per-attempt outcomes ("ok" | "throw" | "error"), shifted
   contextFetches: 0,
   emitHintFor: {},
+  diagCalls: [], // parsed POST bodies to /messages/diagnostics, in order
+  diag404: false, // one-shot mode: every diagnostics POST answers 404 (old server)
+  diagStarted: 0, // diagnostics POSTs that reached the route handler
+  diagOrder: [], // diagnostics POST bodies in COMPLETION order (delay-aware)
+  diagDelayFirst: 0, // one-shot: delay the next diagnostics POST by this many ms
 }
 
 function jsonResponse(obj) {
@@ -162,6 +167,35 @@ globalThis.fetch = async function (url, init) {
       const body = JSON.parse(init.body)
       punkTestServer.registeredAgents.push(body)
       return jsonResponse({ namespace: nsMatch[1], agent: body.agent, status: "registered" })
+    }
+    if (rest === "messages/diagnostics") {
+      // The exact shared diagnostics contract
+      // (docs/superpowers/specs/2026-09-28-messaging-reliability-design.md):
+      // POST body {agent, client, delivery_mode, state, ...optional}; the
+      // real server requires an existing registered member, sets
+      // updated_at, and answers {"status":"recorded"}. Old servers have no
+      // route at all and answer 404 - delivery must survive that.
+      // diagDelayFirst holds the FIRST post open so tests can race a
+      // newer observation against a slow in-flight one; diagOrder records
+      // COMPLETION order, which is what the server would end up storing.
+      const body = JSON.parse(init.body)
+      punkTestServer.diagStarted++
+      let delay = 0
+      if (punkTestServer.diagDelayFirst > 0) {
+        delay = punkTestServer.diagDelayFirst
+        punkTestServer.diagDelayFirst = 0
+      }
+      if (delay > 0) await sleep(delay)
+      punkTestServer.diagCalls.push(body)
+      punkTestServer.diagOrder.push(body)
+      if (punkTestServer.diag404) {
+        return new Response("no diagnostics route on this old server", { status: 404 })
+      }
+      const member = punkTestServer.registeredAgents.some((r) => r.agent === body.agent)
+      if (!member) {
+        return new Response("not a registered member", { status: 404 })
+      }
+      return jsonResponse({ status: "recorded" })
     }
     if (rest === "messages/ack") {
       punkTestServer.ackCalls++
@@ -296,6 +330,7 @@ function debugState() {
     sseAborted: punkTestServer.sseAborted,
     sseBodiesCancelled: punkTestServer.sseBodiesCancelled,
     sseCancelled: punkTestServer.sseCancelled,
+    diag: punkTestServer.diagCalls.map((d) => d.state),
   })
 }
 
@@ -377,12 +412,21 @@ func runOpenCodeMessagingHarness(t *testing.T, env map[string]string, driver str
 	// PUNK_MESSAGING defaults to on for these harnesses but stays
 	// overridable (the disabled-by-default scenario turns it off through
 	// env, exactly as a real process would).
+	//
+	// XDG_STATE_HOME is ALWAYS forced into the harness temp dir: the
+	// bridge persists its restart-recovery files under the real punk
+	// state home when the variable leaks in from the developer
+	// environment, which would both pollute real state and bleed
+	// wake/pending state between test runs. env may still override it
+	// (restart tests point two plugin lives at one shared temp home).
 	defaults := map[string]string{
 		"PUNK_URL":                     "http://punk.test",
 		"PUNK_MESSAGING":               "1",
 		"PUNK_MESSAGING_BACKOFF_MS":    "10",
 		"PUNK_MESSAGING_LEASE_SECONDS": "1",
 	}
+	dir := t.TempDir()
+	defaults["XDG_STATE_HOME"] = filepath.Join(dir, "xdg-state")
 	for k, v := range env {
 		defaults[k] = v
 	}
@@ -391,7 +435,6 @@ func runOpenCodeMessagingHarness(t *testing.T, env map[string]string, driver str
 		cmdEnv = append(cmdEnv, k+"="+v)
 	}
 
-	dir := t.TempDir()
 	pluginPath := filepath.Join(dir, "punk-memory.js")
 	if _, err := ConnectOpenCode(pluginPath, "http://punk.test"); err != nil {
 		t.Fatal(err)
@@ -1511,5 +1554,1299 @@ func TestOpenCodeMessagingRestoredBindsNewestAndLazy(t *testing.T) {
 	out := runOpenCodeMessagingHarness(t, nil, driver)
 	if !strings.Contains(out, "PASS restored-newest-lazy") {
 		t.Fatalf("driver did not report PASS restored-newest-lazy:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsTransitions: the bridge reports the exact
+// shared diagnostics contract (spec 2026-09-28) - ready after a confirmed
+// registration of an idle session, waiting_for_idle when a human turn marks
+// the session busy, ready again once the deferred delivery completes - with
+// the required fields (agent, client, delivery_mode, state) and nonnegative
+// bounded counts; any timestamp present parses as RFC3339.
+func TestOpenCodeMessagingDiagnosticsTransitions(t *testing.T) {
+	driver := `
+  putMessage("opencode:s1", "m1", "hello diagnostics")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(() => punkTestServer.diagCalls.length >= 1, "a diagnostic was posted after registration")
+  const first = punkTestServer.diagCalls[0]
+  must(first.agent === "opencode:s1", "agent is the session address, got " + first.agent)
+  must(first.client === "opencode", "client identifies the bridge, got " + first.client)
+  must(first.delivery_mode === "idle_wake", "delivery_mode is idle_wake, got " + first.delivery_mode)
+  must(first.state === "ready", "freshly registered idle session reports ready, got " + first.state)
+  must(
+    typeof first.pending_ack_count === "number" && first.pending_ack_count >= 0,
+    "pending_ack_count is a nonnegative integer"
+  )
+  must(typeof first.wake_count === "number" && first.wake_count >= 0, "wake_count is a nonnegative integer")
+
+  await hooks["chat.message"](
+    { sessionID: "s1", messageID: "u1" },
+    { message: { role: "user" }, parts: [{ type: "text", text: "busy now" }] }
+  )
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "waiting_for_idle"),
+    "busy transition reported waiting_for_idle"
+  )
+
+  for (const d of punkTestServer.diagCalls) {
+    for (const k of ["last_attempt_at", "next_attempt_at"]) {
+      if (d[k] !== undefined) {
+        must(!isNaN(Date.parse(d[k])), k + " must parse as an RFC3339 timestamp, got " + d[k])
+      }
+    }
+    if (d.last_error !== undefined) {
+      must(typeof d.last_error === "string" && d.last_error.length > 0 && d.last_error.length <= 64, "last_error is a short machine reason")
+    }
+  }
+
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+  await until(() => promptCalls.length === 1, "deferred message delivered after idle")
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "message acked")
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "ready" && d.pending_ack_count === 0),
+    "post-delivery ready with zero pending"
+  )
+
+  console.log("PASS diagnostics-transitions")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-transitions") {
+		t.Fatalf("driver did not report PASS diagnostics-transitions:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsFailureStates: honest observations for
+// failure outcomes - a failed prompt reports delivery_failed with the
+// machine reason prompt_failed and a last_attempt_at; a successful handoff
+// whose ACK fails reports handoff_unconfirmed with ack_failed, the pending
+// ACK count, and a future RFC3339 next_attempt_at (the scheduled re-ack).
+func TestOpenCodeMessagingDiagnosticsFailureStates(t *testing.T) {
+	driver := `
+  punkTestServer.promptPlan = ["throw"]
+  putMessage("opencode:s1", "m1", "will fail to prompt")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "delivery_failed"),
+    "prompt failure reported delivery_failed"
+  )
+  const df = punkTestServer.diagCalls.find((d) => d.state === "delivery_failed")
+  must(df.last_error === "prompt_failed", "last_error is the machine reason prompt_failed, got " + df.last_error)
+  must(
+    df.last_attempt_at !== undefined && !isNaN(Date.parse(df.last_attempt_at)),
+    "delivery_failed carries an RFC3339 last_attempt_at"
+  )
+
+  punkTestServer.promptMode = "ok"
+  punkTestServer.ackFailNext = 1
+  putMessage("opencode:s1", "m2", "handoff ok, ack will fail")
+  emitHint("opencode:s1")
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "handoff_unconfirmed"),
+    "failed ACK reported handoff_unconfirmed"
+  )
+  const hu = punkTestServer.diagCalls.find((d) => d.state === "handoff_unconfirmed")
+  must(hu.last_error === "ack_failed", "last_error is the machine reason ack_failed, got " + hu.last_error)
+  must(hu.pending_ack_count >= 1, "the unACKed handoff is counted, got " + hu.pending_ack_count)
+  must(
+    hu.next_attempt_at !== undefined && !isNaN(Date.parse(hu.next_attempt_at)) && Date.parse(hu.next_attempt_at) > Date.now() - 1000,
+    "next_attempt_at is a future RFC3339 retry time, got " + hu.next_attempt_at
+  )
+
+  await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "the scheduled re-ack confirms the handoff", 6000)
+  await until(() => promptCalls.length >= 2, "m1 and m2 were both prompted")
+
+  console.log("PASS diagnostics-failure-states")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-failure-states") {
+		t.Fatalf("driver did not report PASS diagnostics-failure-states:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsWakeCap: when the sliding-window wake cap
+// suppresses the remaining backlog, the drain outcome reports
+// wake_budget_exhausted with the wakes already spent and an RFC3339
+// next_attempt_at at the window roll.
+func TestOpenCodeMessagingDiagnosticsWakeCap(t *testing.T) {
+	driver := `
+  putMessage("opencode:s1", "w1", "wake one")
+  putMessage("opencode:s1", "w2", "wake two")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(() => punkTestServer.ackedIds.indexOf("w1") >= 0, "w1 delivered within the cap")
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "wake_budget_exhausted"),
+    "cap suppression reported wake_budget_exhausted"
+  )
+  const we = punkTestServer.diagCalls.find((d) => d.state === "wake_budget_exhausted")
+  must(we.wake_count === 1, "wake_count reports the wakes already spent, got " + we.wake_count)
+  must(
+    we.next_attempt_at !== undefined && !isNaN(Date.parse(we.next_attempt_at)),
+    "next_attempt_at is an RFC3339 window-roll time, got " + we.next_attempt_at
+  )
+  must(punkTestServer.ackedIds.indexOf("w2") < 0, "the suppressed row was not acked")
+
+  console.log("PASS diagnostics-wake-cap")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"PUNK_MESSAGING_MAX_CONTINUE": "1"}, driver)
+	if !strings.Contains(out, "PASS diagnostics-wake-cap") {
+		t.Fatalf("driver did not report PASS diagnostics-wake-cap:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsDedup: identical hot-loop snapshots are
+// suppressed - dozens of inbox hints draining an empty backlog must not
+// re-POST the same ready observation.
+func TestOpenCodeMessagingDiagnosticsDedup(t *testing.T) {
+	driver := `
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(
+    () => punkTestServer.registeredAgents.some((r) => r.agent === "opencode:s1"),
+    "session registered"
+  )
+  await until(
+    () => punkTestServer.diagCalls.filter((d) => d.state === "ready").length >= 1,
+    "the initial ready observation was posted"
+  )
+  const before = punkTestServer.diagCalls.filter((d) => d.state === "ready").length
+
+  for (let i = 0; i < 25; i++) {
+    emitHint("opencode:s1")
+  }
+  await sleep(500)
+  const after = punkTestServer.diagCalls.filter((d) => d.state === "ready").length
+  must(
+    after <= before + 1,
+    "identical hot-loop ready reports are suppressed, ready posts=" + after + " (was " + before + ")"
+  )
+
+  console.log("PASS diagnostics-dedup")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-dedup") {
+		t.Fatalf("driver did not report PASS diagnostics-dedup:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsOldServer404: a server without the
+// diagnostics route (every POST answered 404) must not disturb delivery or
+// ACK in any way.
+func TestOpenCodeMessagingDiagnosticsOldServer404(t *testing.T) {
+	driver := `
+  punkTestServer.diag404 = true
+  putMessage("opencode:s1", "m1", "delivered although the server has no diagnostics route")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(() => punkTestServer.diagCalls.length >= 1, "the diagnostics POST was attempted despite the 404s")
+  await until(() => promptCalls.length === 1, "message delivered despite diagnostics 404s")
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "ack confirmed despite diagnostics 404s")
+  must(promptCalls.length === 1, "exactly one delivery, prompts=" + promptCalls.length)
+
+  console.log("PASS diagnostics-old-server-404")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-old-server-404") {
+		t.Fatalf("driver did not report PASS diagnostics-old-server-404:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsSenderFiltered: an allowlist-denied
+// sender produces an honest sender_filtered observation, no prompt and no
+// ACK.
+func TestOpenCodeMessagingDiagnosticsSenderFiltered(t *testing.T) {
+	driver := `
+  putMessage("opencode:s1", "m1", "from a stranger", "stranger-agent")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(
+    () => punkTestServer.diagCalls.some((d) => d.state === "sender_filtered"),
+    "allowlist denial reported sender_filtered"
+  )
+  must(promptCalls.length === 0, "denied sender is never prompted, prompts=" + promptCalls.length)
+  must(punkTestServer.ackedIds.length === 0, "denied sender is never acked")
+
+  console.log("PASS diagnostics-sender-filtered")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	if !strings.Contains(out, "PASS diagnostics-sender-filtered") {
+		t.Fatalf("driver did not report PASS diagnostics-sender-filtered:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRestartRecoveryReacksWithoutPrompt: a successful
+// prompt handoff whose ACK fails is persisted BEFORE the ACK attempt; after
+// a restart (a second plugin life over the same state home) the restored id
+// is re-ACKed without ever re-prompting the model, and the restart reports
+// the honest handoff_unconfirmed observation until the ACK confirms.
+func TestOpenCodeMessagingRestartRecoveryReacksWithoutPrompt(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+  // Server-shaped id (32 lowercase hex): the restarted life validates
+  // restored ids against the real server syntax.
+  const MID = "d4" + "0".repeat(30)
+  punkTestServer.ackFailNext = 1
+  putMessage("opencode:s1", MID, "delivered before the crash")
+  const hooks1 = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks1.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+
+  await until(() => promptCalls.length === 1, "message prompted once in the first life")
+  await until(() => punkTestServer.ackCalls >= 1, "first ack attempted and failed")
+
+  // The handoff must already be persisted: the save runs to completion
+  // after the successful prompt and BEFORE the ACK attempt.
+  const stateDir = process.env.XDG_STATE_HOME + "/punk/inbox/opencode"
+  const files = fs.readdirSync(stateDir)
+  must(files.length === 1, "one recovery file per identity, got " + JSON.stringify(files))
+  const rec = JSON.parse(fs.readFileSync(stateDir + "/" + files[0], "utf8"))
+  must(
+    rec.pending_ids.indexOf(MID) >= 0,
+    "the handed-off-but-unACKed id was persisted, got " + JSON.stringify(rec.pending_ids)
+  )
+  must(rec.address === "opencode:s1" && rec.namespace === "agent-test-ns", "identity fields isolate the record")
+  must(rec.server === "http://punk.test", "the server URL isolates the record")
+
+  // Crash: dispose the first life before its re-ack retry can fire.
+  await sleep(150)
+  await hooks1.dispose()
+  await sleep(1400) // past the 1s test lease: the row is visible to any reader again
+
+  // Restart: the stored session binds through the startup snapshot.
+  punkTestServer.sessionList = [{ id: "s1", directory: D }]
+  const hooks2 = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await until(
+    () => punkTestServer.registeredAgents.filter((r) => r.agent === "opencode:s1").length >= 2,
+    "the restarted life registered the session again"
+  )
+  await until(() => punkTestServer.ackedIds.indexOf(MID) >= 0, "restarted bridge re-acked the restored id", 6000)
+  must(
+    promptCalls.length === 1,
+    "restart must re-ACK without re-prompting the model, prompts=" + promptCalls.length
+  )
+  must(
+    punkTestServer.diagCalls.some((d) => d.state === "handoff_unconfirmed" && d.pending_ack_count >= 1),
+    "the restarted life reported the honest handoff-unconfirmed observation"
+  )
+
+  // The confirmed ACK drains the restored id out of the recovery file.
+  await until(() => {
+    const r = JSON.parse(fs.readFileSync(stateDir + "/" + files[0], "utf8"))
+    return r.pending_ids.indexOf(MID) < 0
+  }, "confirmed ACK removed the id from the recovery file", 5000)
+
+  console.log("PASS restart-recovery-reack")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS restart-recovery-reack") {
+		t.Fatalf("driver did not report PASS restart-recovery-reack:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRestartWakeBudgetSurvives: the sliding-window wake
+// budget survives a restart - a wake spent in the first life suppresses a
+// fresh bridge-triggered prompt in the second life over the same state
+// home, with an honest wake_budget_exhausted observation.
+func TestOpenCodeMessagingRestartWakeBudgetSurvives(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const D = "/tmp/punk-messaging-proj"
+  putMessage("opencode:s1", "w1", "the only wake of the first life")
+  const hooks1 = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks1.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("w1") >= 0, "w1 delivered and acked in the first life")
+  await hooks1.dispose()
+
+  punkTestServer.sessionList = [{ id: "s1", directory: D }]
+  putMessage("opencode:s1", "w2", "must stay suppressed after the restart")
+  const hooks2 = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await until(
+    () => punkTestServer.registeredAgents.filter((r) => r.agent === "opencode:s1").length >= 2,
+    "the restarted life registered the session again"
+  )
+  await sleep(600)
+  must(
+    promptCalls.length === 1,
+    "restored wake budget suppresses the new bridge-triggered prompt, prompts=" + promptCalls.length
+  )
+  must(punkTestServer.ackedIds.indexOf("w2") < 0, "the suppressed row was never acked")
+  must(punkTestServer.releaseCalls.some((r) => r.id === "w2"), "the suppressed row was released")
+  must(
+    punkTestServer.diagCalls.some((d) => d.state === "wake_budget_exhausted" && d.wake_count === 1),
+    "the restarted life reported the restored exhausted wake budget"
+  )
+
+  console.log("PASS restart-wake-budget")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"XDG_STATE_HOME":                         stateHome,
+		"PUNK_MESSAGING_MAX_CONTINUE":            "1",
+		"PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS": "600",
+	}, driver)
+	if !strings.Contains(out, "PASS restart-wake-budget") {
+		t.Fatalf("driver did not report PASS restart-wake-budget:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryCorruptStateFailsOpen: a corrupt recovery
+// file must never break the host - delivery and ACK proceed normally and
+// the next save rewrites the file cleanly.
+func TestOpenCodeMessagingRecoveryCorruptStateFailsOpen(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const crypto = await import("node:crypto")
+  const joined = "http://punk.test\u0000agent-test-ns\u0000opencode:s1"
+  const h = crypto.createHash("sha256").update(joined).digest("hex").slice(0, 16)
+  const dir = process.env.XDG_STATE_HOME + "/punk/inbox/opencode"
+  fs.mkdirSync(dir, { recursive: true })
+  const file = dir + "/opencode_s1-" + h + ".json"
+  fs.writeFileSync(file, "{corrupt not json at all", { mode: 0o600 })
+
+  putMessage("opencode:s1", "m1", "delivered despite corrupt recovery state")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(
+    () => punkTestServer.ackedIds.indexOf("m1") >= 0,
+    "corrupt state fails open: delivery and ACK complete"
+  )
+  must(promptCalls.length === 1, "exactly one prompt despite the corrupt file")
+
+  // The post-handoff save rewrites the corrupt file into a clean record.
+  const healed = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(Array.isArray(healed.pending_ids), "the corrupt file was replaced by a well-formed record")
+
+  console.log("PASS recovery-corrupt-fails-open")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-corrupt-fails-open") {
+		t.Fatalf("driver did not report PASS recovery-corrupt-fails-open:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryUnwritableFailsOpen: a state home that
+// cannot be created (XDG_STATE_HOME points at a regular file) must fail
+// open - the generic write-failure is logged once, delivery and ACK
+// complete purely in memory.
+func TestOpenCodeMessagingRecoveryUnwritableFailsOpen(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state-file-blocker")
+	driver := `
+  const fs = await import("node:fs")
+  // XDG_STATE_HOME names an existing regular FILE: every mkdir under it
+  // fails with ENOTDIR, so every recovery write fails.
+  fs.writeFileSync(process.env.XDG_STATE_HOME, "a regular file, not a directory")
+
+  putMessage("opencode:s1", "m1", "delivered despite unwritable recovery state")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(
+    () => punkTestServer.ackedIds.indexOf("m1") >= 0,
+    "unwritable state fails open: delivery and ACK complete"
+  )
+  must(promptCalls.length === 1, "exactly one prompt despite the failed saves")
+
+  console.log("PASS recovery-unwritable-fails-open")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-unwritable-fails-open") {
+		t.Fatalf("driver did not report PASS recovery-unwritable-fails-open:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryPersistsNoSecretsOrBodies: the recovery
+// file carries ONLY identity fields, message ids and timestamps - never a
+// message body and never the API key.
+func TestOpenCodeMessagingRecoveryPersistsNoSecretsOrBodies(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  putMessage("opencode:s1", "m1", "top secret body text must never be persisted")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "message delivered and acked")
+  await sleep(200)
+
+  const stateDir = process.env.XDG_STATE_HOME + "/punk/inbox/opencode"
+  const files = fs.readdirSync(stateDir)
+  must(files.length === 1, "one recovery file, got " + JSON.stringify(files))
+  const raw = fs.readFileSync(stateDir + "/" + files[0], "utf8")
+  const rec = JSON.parse(raw)
+  const keys = Object.keys(rec).sort()
+  must(
+    JSON.stringify(keys) === JSON.stringify(["address", "namespace", "pending_ids", "saved_at", "server", "wake_times"]),
+    "only identity, ids and timestamps are persisted, got " + JSON.stringify(keys)
+  )
+  must(raw.indexOf("top secret body text") < 0, "message bodies are never persisted")
+  must(raw.indexOf("sekrit-token") < 0, "credentials are never persisted")
+  must(rec.pending_ids.length === 0, "the confirmed ACK drained the pending ids")
+  must(rec.wake_times.length === 1, "the wake stamp persists for the budget")
+
+  console.log("PASS recovery-no-secrets")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"XDG_STATE_HOME": stateHome,
+		"PUNK_API_KEY":   "sekrit-token-xyz",
+	}, driver)
+	if !strings.Contains(out, "PASS recovery-no-secrets") {
+		t.Fatalf("driver did not report PASS recovery-no-secrets:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryConflictGuardSkipsAheadAndResumes: while a
+// foreign snapshot is AHEAD of this process's clock (within the skew
+// tolerance), this process's saves skip - the ahead record survives
+// untouched. A foreign record at or below our clock is merged
+// conservatively (its still-pending ids adopted into the delivered set,
+// re-ack-or-reconcile against the server) and persistence continues with a
+// newer snapshot - recency cannot distinguish a live writer from a dead
+// one, so the merge never guesses and never silently drops the other
+// writer's handed-off ids.
+func TestOpenCodeMessagingRecoveryConflictGuardSkipsAheadAndResumes(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+  putMessage("opencode:s1", "m1", "first delivery")
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked")
+  await sleep(150)
+
+  const stateDir = process.env.XDG_STATE_HOME + "/punk/inbox/opencode"
+  const file = stateDir + "/" + fs.readdirSync(stateDir)[0]
+  // A second live bridge process (honoring the same O_EXCL .lock sibling
+  // convention, so the two writers serialize exactly as two real bridge
+  // processes would) writes a snapshot AHEAD of our clock, carrying its
+  // own still-pending handoff id (server-shaped: 32 lowercase hex, the
+  // only syntax adoption accepts).
+  const EXT = "c3" + "0".repeat(30)
+  const lock = file + ".lock"
+  async function withLock(fn) {
+    const deadline = Date.now() + 5000
+    for (;;) {
+      try {
+        const fh = await fs.promises.open(lock, "wx")
+        await fh.close()
+        break
+      } catch (err) {}
+      if (Date.now() > deadline) throw new Error("could not take the state lock")
+      await sleep(25)
+    }
+    try {
+      await fn()
+    } finally {
+      await fs.promises.unlink(lock)
+    }
+  }
+  const aheadAt = Date.now() + 400
+  await withLock(async () => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        server: "http://punk.test",
+        namespace: "agent-test-ns",
+        address: "opencode:s1",
+        pending_ids: [EXT],
+        wake_times: [],
+        saved_at: aheadAt,
+      }) + "\n"
+    )
+  })
+
+  // Our next handoff must NOT clobber the ahead writer.
+  putMessage("opencode:s1", "m2", "delivered while another writer is ahead")
+  emitHint("opencode:s1")
+  await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "m2 delivered and acked")
+  await sleep(200)
+  const mid = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(
+    JSON.stringify(mid.pending_ids) === JSON.stringify([EXT]),
+    "the ahead writer's record survived our handoff, got " + JSON.stringify(mid.pending_ids)
+  )
+  must(mid.saved_at === aheadAt, "the record on disk is still exactly the ahead writer's")
+
+  // The foreign record is now at or below our clock (a live writer and a
+  // dead one are indistinguishable here). Our next handoff must MERGE it
+  // - adopting its pending id - and persist a newer snapshot.
+  await sleep(700)
+  putMessage("opencode:s1", "m3", "delivered over a foreign record at our clock")
+  emitHint("opencode:s1")
+  await until(() => punkTestServer.ackedIds.indexOf("m3") >= 0, "m3 delivered and acked")
+  await until(() => {
+    const r = JSON.parse(fs.readFileSync(file, "utf8"))
+    return r.saved_at > aheadAt
+  }, "the merged write persisted a newer snapshot", 5000)
+  const fin = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(
+    fin.pending_ids.indexOf(EXT) >= 0,
+    "the foreign pending id was adopted into the merged snapshot, got " + JSON.stringify(fin.pending_ids)
+  )
+  must(
+    promptCalls.filter((p) => p.text.indexOf("c3" + "000") >= 0).length === 0,
+    "the adopted id is reconciled through re-ack, never prompted"
+  )
+  must(promptCalls.length === 3, "exactly the three fresh messages were prompted, prompts=" + promptCalls.length)
+
+  console.log("PASS recovery-conflict-guard-resume")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-conflict-guard-resume") {
+		t.Fatalf("driver did not report PASS recovery-conflict-guard-resume:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDisabledZeroStateEffects: with PUNK_MESSAGING off
+// the bridge has ZERO filesystem and zero messaging-network effects - no
+// diagnostics POSTs and no punk subtree under the state home - while the
+// memory hooks keep working.
+func TestOpenCodeMessagingDisabledZeroStateEffects(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await hooks["chat.message"](
+    { sessionID: "s1", messageID: "u1" },
+    { message: { role: "user" }, parts: [{ type: "text", text: "plain memory capture" }] }
+  )
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+  await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "s1" } } } })
+  const out = { system: [] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "s1" }, out)
+  await sleep(200)
+
+  must(punkTestServer.diagCalls.length === 0, "no diagnostics POSTs when messaging is disabled")
+  must(
+    !fs.existsSync(process.env.XDG_STATE_HOME + "/punk"),
+    "no filesystem effects under the state home when messaging is disabled"
+  )
+  must(promptCalls.length === 0 && punkTestServer.sseFetches === 0, "no delivery when messaging is disabled")
+
+  console.log("PASS disabled-zero-state-effects")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"PUNK_MESSAGING": "0",
+		"XDG_STATE_HOME": stateHome,
+	}, driver)
+	if !strings.Contains(out, "PASS disabled-zero-state-effects") {
+		t.Fatalf("driver did not report PASS disabled-zero-state-effects:\n%s", out)
+	}
+}
+
+// recoveryFileJSHelper mirrors the bridge's recovery filename (slug +
+// first 16 hex of sha256(server NUL ns NUL agent)) so drivers can
+// pre-write and inspect state files exactly where the bridge puts them.
+// Spliced inside the async main() driver body: the crypto import is
+// hoisted to the top because a plain function cannot await.
+const recoveryFileJSHelper = `
+  const cryptoMod = await import("node:crypto")
+  function recoveryFileFor(agent) {
+    const joined = "http://punk.test\u0000agent-test-ns\u0000" + agent
+    const h = cryptoMod.createHash("sha256").update(joined).digest("hex").slice(0, 16)
+    const slug = String(agent).replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 48)
+    return process.env.XDG_STATE_HOME + "/punk/inbox/opencode/" + slug + "-" + h + ".json"
+  }
+`
+
+// TestOpenCodeMessagingRestoreGateBlocksDrainsUntilReady: st.registered
+// flips true before the recovery restore's awaits complete, so an idle
+// transition or inbox hint arriving during the restore window must NOT
+// drain - a drain there would fetch without the restored pending ids and
+// re-prompt a handed-off message. The gate folds those triggers into one
+// queued drain; once the restore completes, the drain re-acks the restored
+// id without ever prompting. PUNK_MESSAGING_RESTORE_DELAY_MS holds the
+// window open deterministically.
+func TestOpenCodeMessagingRestoreGateBlocksDrainsUntilReady(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  // Server-shaped ids (region.newMessageID mints 32 lowercase hex): the
+  // restore validates persisted ids against the real server syntax.
+  const M0 = "a1" + "0".repeat(30)
+  const file = recoveryFileFor("opencode:s1")
+  fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true })
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      server: "http://punk.test",
+      namespace: "agent-test-ns",
+      address: "opencode:s1",
+      pending_ids: [M0],
+      wake_times: [],
+      saved_at: Date.now(),
+    }),
+    { mode: 0o600 }
+  )
+  putMessage("opencode:s1", M0, "handed off in a previous life, never acked")
+
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(
+    () => punkTestServer.registeredAgents.some((r) => r.agent === "opencode:s1"),
+    "session registered (restore window now open)"
+  )
+  await sleep(150)
+  // Idle transition and inbox hint DURING the restore window: both must
+  // defer - no prompt, no leased fetch, nothing acked.
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+  emitHint("opencode:s1")
+  await sleep(200) // still inside the 600ms window
+  must(
+    promptCalls.length === 0,
+    "no drain may run before recovery state is restored, prompts=" + promptCalls.length
+  )
+  const leasedReads = fetchCalls.filter(
+    (c) => c.method === "GET" && c.path === "/v1/namespaces/agent-test-ns/messages" && c.query.indexOf("lease_seconds=") >= 0
+  )
+  must(leasedReads.length === 0, "no leased fetch before the restore completes, reads=" + leasedReads.length)
+  must(punkTestServer.ackedIds.length === 0, "nothing acked before the restore completes")
+
+  // Window closed: the queued drain re-acks m0 without re-prompting.
+  await until(() => punkTestServer.ackedIds.indexOf(M0) >= 0, "restored id re-acked after the gate opened", 6000)
+  must(
+    promptCalls.length === 0,
+    "the restored handoff is re-acked, never re-prompted, prompts=" + promptCalls.length
+  )
+  must(
+    punkTestServer.diagCalls.some((d) => d.state === "handoff_unconfirmed" && d.pending_ack_count >= 1),
+    "the restart reported the honest handoff-unconfirmed observation"
+  )
+
+  console.log("PASS restore-gate-blocks-drains")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"XDG_STATE_HOME":                  stateHome,
+		"PUNK_MESSAGING_RESTORE_DELAY_MS": "600",
+	}, driver)
+	if !strings.Contains(out, "PASS restore-gate-blocks-drains") {
+		t.Fatalf("driver did not report PASS restore-gate-blocks-drains:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryModulesSharedAcrossSessions: two sessions
+// registering in the same tick share ONE module-initialization promise -
+// the second session must never observe a half-initialized module set
+// (which silently skipped its restore, or persisted under a fallback-hash
+// filename no later life would read). Both pre-written pending ids are
+// restored and re-acked without a single prompt.
+func TestOpenCodeMessagingRecoveryModulesSharedAcrossSessions(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  // Server-shaped ids (32 lowercase hex): the restore validates persisted
+  // ids against the real server syntax.
+  const M1 = "b1" + "0".repeat(30)
+  const M2 = "b2" + "0".repeat(30)
+  for (const [sid, id] of [["s1", M1], ["s2", M2]]) {
+    const file = recoveryFileFor("opencode:" + sid)
+    fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true })
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        server: "http://punk.test",
+        namespace: "agent-test-ns",
+        address: "opencode:" + sid,
+        pending_ids: [id],
+        wake_times: [],
+        saved_at: Date.now(),
+      }),
+      { mode: 0o600 }
+    )
+    putMessage("opencode:" + sid, id, "handed off before the restart, session " + sid)
+  }
+
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  // Both sessions register and restore in the same tick, racing the
+  // module initialization against each other.
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s2" } } } })
+
+  await until(
+    () => punkTestServer.ackedIds.indexOf(M1) >= 0 && punkTestServer.ackedIds.indexOf(M2) >= 0,
+    "both sessions restored their pending ids through the shared init",
+    6000
+  )
+  must(
+    promptCalls.length === 0,
+    "neither restored handoff was re-prompted, prompts=" + promptCalls.length
+  )
+
+  console.log("PASS recovery-modules-shared")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-modules-shared") {
+		t.Fatalf("driver did not report PASS recovery-modules-shared:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsSerializeSlowFirstPost: reports are
+// serialized per session with latest-only coalescing. A slow FIRST
+// diagnostics POST must never COMPLETE after a newer observation: the
+// server ends up holding the newest state, and no older completion lands
+// behind a newer one. (Before serialization, the delayed first POST
+// resolved last and left stale ready/no-wakes state over the newer
+// ready/one-wake observation.)
+func TestOpenCodeMessagingDiagnosticsSerializeSlowFirstPost(t *testing.T) {
+	driver := `
+  punkTestServer.diagDelayFirst = 400
+  putMessage("opencode:s1", "m1", "serialize me")
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.diagStarted >= 1, "the first (registration) diagnostics POST is in flight")
+
+  // Newer observations arrive while the old POST is still in flight:
+  // busy, then idle, then a delivered message spends one wake.
+  await hooks["chat.message"](
+    { sessionID: "s1", messageID: "u1" },
+    { message: { role: "user" }, parts: [{ type: "text", text: "busy now" }] }
+  )
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked")
+
+  await until(
+    () =>
+      punkTestServer.diagOrder.some((d) => d.state === "ready" && d.wake_count === 1) &&
+      punkTestServer.diagOrder.some((d) => d.state === "ready" && d.wake_count === 0),
+    "the newest observation flushed AND the delayed first POST completed",
+    6000
+  )
+  const last = punkTestServer.diagOrder[punkTestServer.diagOrder.length - 1]
+  must(
+    last.state === "ready" && last.wake_count === 1,
+    "the server ends with the NEWEST observation, got " + JSON.stringify(last)
+  )
+  const newestAt = punkTestServer.diagOrder.findIndex((d) => d.state === "ready" && d.wake_count === 1)
+  for (let i = newestAt + 1; i < punkTestServer.diagOrder.length; i++) {
+    const d = punkTestServer.diagOrder[i]
+    must(
+      !(d.state === "ready" && d.wake_count === 0),
+      "no older ready observation completed after the newer one, order=" +
+        JSON.stringify(punkTestServer.diagOrder.map((x) => x.state + ":" + x.wake_count))
+    )
+  }
+  must(
+    punkTestServer.diagOrder.length <= 3,
+    "bounded: at most the in-flight report plus coalesced newer ones, completions=" + punkTestServer.diagOrder.length
+  )
+
+  console.log("PASS diagnostics-serialize-slow-first-post")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-serialize-slow-first-post") {
+		t.Fatalf("driver did not report PASS diagnostics-serialize-slow-first-post:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryRestoreRejectsOversizedFile: a recovery
+// file above the byte bound is untrusted input - the restore rejects it
+// wholesale (nothing restored, nothing thrown) and delivery proceeds
+// fail-open: the message is prompted FRESH (no restored id to re-ack) and
+// acked, and the next save rewrites the oversized file into a clean,
+// bounded record.
+func TestOpenCodeMessagingRecoveryRestoreRejectsOversizedFile(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  const file = recoveryFileFor("opencode:s1")
+  fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true })
+  // Valid identity and a real pending id, padded far past the byte bound
+  // with wake stamps so the file itself is oversized.
+  const wakePad = []
+  for (let i = 0; i < 6000; i++) wakePad.push(Date.now() - 5000)
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      server: "http://punk.test",
+      namespace: "agent-test-ns",
+      address: "opencode:s1",
+      pending_ids: ["m0"],
+      wake_times: wakePad,
+      saved_at: Date.now(),
+    }),
+    { mode: 0o600 }
+  )
+  must(fs.statSync(file).size > 65536, "test precondition: the file is oversized")
+  putMessage("opencode:s1", "m0", "a previous life handed this off, but the state file is junk")
+
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  // Fail-open: the oversized record restored nothing, so the message is
+  // delivered FRESH (one prompt) rather than re-acked.
+  await until(() => promptCalls.length === 1, "oversized state fails open: the message was delivered fresh")
+  await until(() => punkTestServer.ackedIds.indexOf("m0") >= 0, "and acked normally")
+
+  // The next save heals the file into a clean, bounded record.
+  await sleep(200)
+  const healed = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(Array.isArray(healed.pending_ids), "a well-formed record replaced the oversized one")
+  must(fs.statSync(file).size <= 65536, "the rewritten file is within the byte bound")
+
+  console.log("PASS recovery-oversized-file-rejected")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-oversized-file-rejected") {
+		t.Fatalf("driver did not report PASS recovery-oversized-file-rejected:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryRestoreBoundsIdsAndWakes: within the byte
+// bound, the restore still validates every field - over-long or non-string
+// pending ids are ignored (the server's own 256-byte id bound), the wake
+// array is capped at the explicit stamp maximum with the NEWEST kept, and
+// nothing invalid ever reaches an ACK body.
+func TestOpenCodeMessagingRecoveryRestoreBoundsIdsAndWakes(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  // Server-shaped id: the restore validates persisted ids against the
+  // real server syntax (32 lowercase hex).
+  const M0 = "a1" + "0".repeat(30)
+  const file = recoveryFileFor("opencode:s1")
+  fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true })
+  const wakeStamps = []
+  for (let i = 0; i < 2000; i++) wakeStamps.push(Date.now() - 5000) // all in-window
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      server: "http://punk.test",
+      namespace: "agent-test-ns",
+      address: "opencode:s1",
+      pending_ids: [
+        M0,
+        "junk-" + "x".repeat(300),
+        42,
+        "",
+        "z".repeat(32), // 32 chars but not hex: not server syntax
+        "a".repeat(31), // wrong length
+        "A".repeat(32), // uppercase: not server syntax
+      ],
+      wake_times: wakeStamps,
+      saved_at: Date.now(),
+    }),
+    { mode: 0o600 }
+  )
+  must(fs.statSync(file).size <= 65536, "test precondition: within the byte bound")
+  putMessage("opencode:s1", M0, "restorable handoff from a previous life")
+
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf(M0) >= 0, "the valid pending id was restored and re-acked", 6000)
+  must(promptCalls.length === 0, "the restored handoff was never re-prompted, prompts=" + promptCalls.length)
+
+  // Junk ids never reached an ACK body.
+  const ackBodies = fetchCalls.filter((c) => c.path === "/v1/namespaces/agent-test-ns/messages/ack").map((c) => c.body)
+  must(
+    ackBodies.every((b) => b.indexOf("junk-") < 0 && b.indexOf("zzzz") < 0),
+    "over-long or malformed ids never reached an ACK body"
+  )
+
+  // The next save writes the bounded window: at most the stamp maximum.
+  await sleep(200)
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(
+    rec.wake_times.length <= 1000,
+    "restored wake stamps are capped at the explicit maximum, got " + rec.wake_times.length
+  )
+  must(rec.pending_ids.indexOf(M0) < 0, "the confirmed ACK drained the restored id")
+  must(
+    rec.pending_ids.every((id) => /^[0-9a-f]{32}$/.test(id)),
+    "only server-syntax ids persist back, got " + JSON.stringify(rec.pending_ids)
+  )
+
+  console.log("PASS recovery-restore-bounds")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-restore-bounds") {
+		t.Fatalf("driver did not report PASS recovery-restore-bounds:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingDiagnosticsUnknownBusyReportsWaiting: a restored
+// session whose status snapshot FAILED binds with UNKNOWN busy state -
+// its registration diagnostic must report waiting_for_idle, never ready
+// (an unconfirmed snapshot never claims readiness).
+func TestOpenCodeMessagingDiagnosticsUnknownBusyReportsWaiting(t *testing.T) {
+	driver := `
+  punkTestServer.statusFails = true
+  punkTestServer.sessionList = [{ id: "unk-1", directory: "/tmp/punk-messaging-proj" }]
+  putMessage("opencode:unk-1", "mu", "deferred until an authoritative idle")
+
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await until(
+    () => punkTestServer.registeredAgents.some((r) => r.agent === "opencode:unk-1"),
+    "restored session registered despite the failed status snapshot"
+  )
+  await until(() => punkTestServer.diagCalls.length >= 1, "the registration diagnostic was posted")
+  const first = punkTestServer.diagCalls[0]
+  must(
+    first.state === "waiting_for_idle",
+    "unknown busy state reports waiting_for_idle, never ready, got " + first.state
+  )
+  await sleep(250)
+  must(promptCalls.length === 0, "unknown busy state still defers delivery")
+
+  console.log("PASS diagnostics-unknown-busy-waiting")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, nil, driver)
+	if !strings.Contains(out, "PASS diagnostics-unknown-busy-waiting") {
+		t.Fatalf("driver did not report PASS diagnostics-unknown-busy-waiting:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryIdentityMismatchNotMerged: a foreign record
+// whose identity fields do not match this session (filename collision or
+// stale rename) is never merged - its pending ids are not adopted, its
+// wake evidence is not unioned - while this process's own snapshot still
+// persists normally.
+func TestOpenCodeMessagingRecoveryIdentityMismatchNotMerged(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  putMessage("opencode:s1", "m1", "first delivery")
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked")
+  await sleep(150)
+
+  const file = recoveryFileFor("opencode:s1")
+  const lock = file + ".lock"
+  async function withLock(fn) {
+    const deadline = Date.now() + 5000
+    for (;;) {
+      try {
+        const fh = await fs.promises.open(lock, "wx")
+        await fh.close()
+        break
+      } catch (err) {}
+      if (Date.now() > deadline) throw new Error("could not take the state lock")
+      await sleep(25)
+    }
+    try {
+      await fn()
+    } finally {
+      await fs.promises.unlink(lock)
+    }
+  }
+  // A record claiming a DIFFERENT identity (another address) lands in this
+  // session's file - a hash collision or a stale rename away from it.
+  const foreignWake = Date.now() - 1000
+  await withLock(async () => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        server: "http://punk.test",
+        namespace: "agent-test-ns",
+        address: "opencode:s2",
+        pending_ids: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        wake_times: [foreignWake],
+        saved_at: Date.now() - 10,
+      }) + "\n"
+    )
+  })
+
+  // Our next handoff persists normally, and the mismatched record is
+  // neither adopted nor unioned.
+  putMessage("opencode:s1", "m2", "delivered over a mismatched on-disk record")
+  emitHint("opencode:s1")
+  await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "m2 delivered and acked")
+  await until(() => {
+    const r = JSON.parse(fs.readFileSync(file, "utf8"))
+    return r.address === "opencode:s1"
+  }, "our own snapshot was persisted over the mismatched record", 5000)
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(
+    rec.pending_ids.every((id) => id !== "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" && id !== "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    "the mismatched record's pending ids were never adopted, got " + JSON.stringify(rec.pending_ids)
+  )
+  must(
+    rec.wake_times.every((t) => t !== foreignWake),
+    "the mismatched record's wake evidence was never unioned"
+  )
+  must(
+    promptCalls.filter((p) => p.text.indexOf("m2") >= 0).length === 1 &&
+      promptCalls.filter((p) => p.text.indexOf("aaaa") >= 0).length === 0,
+    "the mismatched ids were never prompted"
+  )
+
+  console.log("PASS recovery-identity-mismatch-not-merged")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-identity-mismatch-not-merged") {
+		t.Fatalf("driver did not report PASS recovery-identity-mismatch-not-merged:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryTempCleanupOnRenameFail: when the atomic
+// rename fails (the state path is occupied by a directory), the write
+// fails open - delivery and ACK continue in memory - and the orphaned
+// temp file is cleaned up instead of lingering next to the state file.
+func TestOpenCodeMessagingRecoveryTempCleanupOnRenameFail(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  putMessage("opencode:s1", "m1", "first delivery")
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked")
+  await sleep(150)
+
+  // Replace the state file with a DIRECTORY: writeFile(tmp) succeeds (a
+  // sibling), rename(tmp, dir) fails, so the temp-cleanup path runs.
+  const file = recoveryFileFor("opencode:s1")
+  const lock = file + ".lock"
+  const fh = await fs.promises.open(lock, "wx")
+  await fh.close()
+  fs.rmSync(file)
+  fs.mkdirSync(file)
+  await fs.promises.unlink(lock)
+
+  putMessage("opencode:s1", "m2", "delivered despite the failed rename")
+  emitHint("opencode:s1")
+  await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "failed rename fails open: m2 delivered and acked")
+  await sleep(250)
+
+  const stateDir = process.env.XDG_STATE_HOME + "/punk/inbox/opencode"
+  const leftovers = fs.readdirSync(stateDir).filter((n) => n.indexOf(".tmp-") >= 0)
+  must(
+    leftovers.length === 0,
+    "a failed rename must not leave temp files behind, found " + JSON.stringify(leftovers)
+  )
+
+  console.log("PASS recovery-temp-cleanup-on-rename-fail")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-temp-cleanup-on-rename-fail") {
+		t.Fatalf("driver did not report PASS recovery-temp-cleanup-on-rename-fail:\n%s", out)
+	}
+	if !strings.Contains(out, "recovery state write failed; continuing in memory") {
+		t.Fatalf("expected the generic write-failure log line:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoverySaveBoundsWakesWithOverflow: with a
+// configured wake cap above the persisted stamp bound, the save writes at
+// most the bound in stamps plus a conservative overflow summary
+// {count, until}; restore turns that summary back into stamps expiring at
+// the documented last expiry, so the high-cap budget survives a restart
+// and the file never grows past the byte bound the restore itself
+// enforces.
+func TestOpenCodeMessagingRecoverySaveBoundsWakesWithOverflow(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  const file = recoveryFileFor("opencode:s1")
+  fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true })
+  // A previous life's record at the stamp bound with live overflow.
+  // (overflowUntil, not until: the harness until(cond, label) helper is
+  // shadowed otherwise.)
+  const overflowUntil = Date.now() + 8000
+  const stamps = []
+  for (let i = 0; i < 999; i++) stamps.push(Date.now() - 1000)
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      server: "http://punk.test",
+      namespace: "agent-test-ns",
+      address: "opencode:s1",
+      pending_ids: [],
+      wake_times: stamps,
+      wake_overflow: { count: 500, until: overflowUntil },
+      saved_at: Date.now(),
+    }),
+    { mode: 0o600 }
+  )
+
+  putMessage("opencode:s1", "m1", "one more wake on top of the restored budget")
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked (cap 2000 admits it)")
+  await sleep(200)
+
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(rec.wake_times.length <= 1000, "persisted stamps stay within the bound, got " + rec.wake_times.length)
+  must(
+    rec.wake_overflow && rec.wake_overflow.count === 500,
+    "the overflow summary conserves the stamps beyond the bound, got " + JSON.stringify(rec.wake_overflow)
+  )
+  must(
+    rec.wake_overflow.until === overflowUntil,
+    "the overflow expiry round-trips exactly (every dropped stamp has expired by it), got " + rec.wake_overflow.until
+  )
+  must(fs.statSync(file).size <= 65536, "the bounded record stays far inside the restore's own file bound")
+
+  console.log("PASS recovery-save-bounds-wakes-overflow")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"XDG_STATE_HOME":              stateHome,
+		"PUNK_MESSAGING_MAX_CONTINUE": "2000",
+	}, driver)
+	if !strings.Contains(out, "PASS recovery-save-bounds-wakes-overflow") {
+		t.Fatalf("driver did not report PASS recovery-save-bounds-wakes-overflow:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRestoreDelayCancellableOnDispose: the test-only
+// restore pacing delay rides the shared cancellable sleep - a plugin
+// disposed mid-restore leaves NO lingering timer behind (observed through
+// node's active-resource info: every punk-owned Timeout is gone well
+// before the 800ms delay would have elapsed on its own).
+func TestOpenCodeMessagingRestoreDelayCancellableOnDispose(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const timeoutCount = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length
+  const base = timeoutCount()
+  const hooks = await PunkMemoryPlugin({ directory: "/tmp/punk-messaging-proj", client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(
+    () => punkTestServer.registeredAgents.some((r) => r.agent === "opencode:s1"),
+    "session registered (the 800ms restore window is open)"
+  )
+  await sleep(100) // safely inside the restore window
+  await hooks.dispose()
+  // Every punk-owned timer must be cancelled by dispose well before the
+  // 800ms delay would elapse on its own.
+  let settled = false
+  const deadline = Date.now() + 300
+  while (Date.now() < deadline) {
+    if (timeoutCount() <= base) {
+      settled = true
+      break
+    }
+    await sleep(20)
+  }
+  must(
+    settled,
+    "dispose must cancel the in-flight restore delay instead of leaving the timer to run out, timeouts=" +
+      timeoutCount() +
+      " (base " + base + ")"
+  )
+  must(promptCalls.length === 0, "nothing was delivered")
+  must(punkTestServer.sseFetches === 0, "no SSE stream was ever started")
+
+  console.log("PASS restore-delay-cancellable")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{
+		"XDG_STATE_HOME":                  stateHome,
+		"PUNK_MESSAGING_RESTORE_DELAY_MS": "800",
+	}, driver)
+	if !strings.Contains(out, "PASS restore-delay-cancellable") {
+		t.Fatalf("driver did not report PASS restore-delay-cancellable:\n%s", out)
+	}
+}
+
+// TestOpenCodeMessagingRecoveryMergeKeepsForeignWakeMultiplicity: the
+// conservative wake-evidence merge takes, per identical timestamp, the MAX
+// of the two records' multiplicities - a foreign record carrying three
+// same-millisecond wakes keeps all three (never collapsed to 1), and a
+// timestamp present on both sides (shared restored lineage) is counted
+// once per side's multiplicity (max, never the sum).
+func TestOpenCodeMessagingRecoveryMergeKeepsForeignWakeMultiplicity(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	driver := `
+  const fs = await import("node:fs")
+  const D = "/tmp/punk-messaging-proj"
+` + recoveryFileJSHelper + `
+  putMessage("opencode:s1", "m1", "first delivery spends one wake")
+  const hooks = await PunkMemoryPlugin({ directory: D, client: punkTestClient })
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "s1" } } } })
+  await until(() => punkTestServer.ackedIds.indexOf("m1") >= 0, "m1 delivered and acked")
+  await sleep(150)
+
+  const file = recoveryFileFor("opencode:s1")
+  const ours = JSON.parse(fs.readFileSync(file, "utf8"))
+  must(ours.wake_times.length === 1, "one own wake stamp so far, got " + JSON.stringify(ours.wake_times))
+  const ownStamp = ours.wake_times[0]
+
+  // A foreign cooperating record (under the same lock convention) at or
+  // below our clock: three wakes at one identical millisecond T, plus the
+  // timestamp we already carry twice (shared lineage evidence).
+  const T = Date.now() - 2000
+  const lock = file + ".lock"
+  const fh = await fs.promises.open(lock, "wx")
+  await fh.close()
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      server: "http://punk.test",
+      namespace: "agent-test-ns",
+      address: "opencode:s1",
+      pending_ids: [],
+      wake_times: [T, T, T, ownStamp, ownStamp],
+      saved_at: Date.now() - 10,
+    }) + "\n"
+  )
+  await fs.promises.unlink(lock)
+
+  // Our next handoff merges the foreign wake evidence and persists it.
+  putMessage("opencode:s1", "m2", "second delivery triggers the merge")
+  emitHint("opencode:s1")
+  await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "m2 delivered and acked")
+  await sleep(200)
+
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"))
+  const countT = rec.wake_times.filter((t) => t === T).length
+  const countOwn = rec.wake_times.filter((t) => t === ownStamp).length
+  must(
+    countT === 3,
+    "three foreign same-millisecond wakes keep their count (max, not 1), got " + countT
+  )
+  must(
+    countOwn === 2,
+    "a timestamp on both sides takes the max multiplicity (2), never the sum (3), got " + countOwn
+  )
+  must(rec.wake_times.length >= 4, "our own evidence is retained alongside the merged foreign evidence")
+  must(promptCalls.length === 2, "exactly the two fresh messages were prompted, prompts=" + promptCalls.length)
+
+  console.log("PASS recovery-merge-foreign-wake-multiplicity")
+  process.exit(0)
+`
+	out := runOpenCodeMessagingHarness(t, map[string]string{"XDG_STATE_HOME": stateHome}, driver)
+	if !strings.Contains(out, "PASS recovery-merge-foreign-wake-multiplicity") {
+		t.Fatalf("driver did not report PASS recovery-merge-foreign-wake-multiplicity:\n%s", out)
 	}
 }

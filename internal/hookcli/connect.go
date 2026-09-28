@@ -49,7 +49,7 @@ func ConnectClaudeCode(settingsPath, punkPath, serverURL string) (changed bool, 
 // ConnectClaudeCodeNS is ConnectClaudeCode with a namespace override
 // baked into the generated hook commands (from punk connect --project).
 func ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
-	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, false)
+	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, false, false)
 }
 
 // ConnectClaudeCodeMessaging is ConnectClaudeCodeNS plus the opt-in
@@ -61,7 +61,20 @@ func ConnectClaudeCodeNS(settingsPath, punkPath, serverURL, ns string) (changed 
 // isPunkManagedInbox, independently of the capture groups, and the
 // capture groups are byte-identical to ConnectClaudeCodeNS's.
 func ConnectClaudeCodeMessaging(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
-	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, true)
+	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, true, false)
+}
+
+// ConnectClaudeCodeWake is ConnectClaudeCodeMessaging plus the opt-in
+// native wake entries (punk connect claude-code --wake, which implies
+// --messaging): a separate "punk hook wake --client claude-code" group
+// running --action ensure on SessionStart, UserPromptSubmit and Stop,
+// and --action stop on SessionEnd (see wake_connect.go). The wake
+// groups are deduped by isPunkManagedWake, independently of both the
+// capture and the inbox groups; without --wake the output stays
+// byte-identical to ConnectClaudeCodeMessaging's, and a no-wake
+// reconnect over a wake install leaves the wake groups untouched.
+func ConnectClaudeCodeWake(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
+	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, true, true)
 }
 
 // claudeInboxEvents maps each Claude Code/Codex event punk delivers
@@ -95,6 +108,17 @@ func mergeInboxGroups(raw any, punkPath, client, command string, matcher string)
 	}
 	if matcher != "" {
 		group["matcher"] = matcher
+	}
+	// The inbox group goes just before the first punk wake group (if a
+	// --wake install left any), so a messaging reconnect over a wake
+	// install is a byte-identical no-op instead of moving the inbox
+	// group past the wake group. Without wake groups this is
+	// append-last, exactly as before (mirrors mergeEventGroups placing
+	// the capture group before the first inbox group).
+	for i, g := range groups {
+		if isAnyPunkWakeGroup(g) {
+			return append(groups[:i], append([]any{group}, groups[i:]...)...)
+		}
 	}
 	return append(groups, group)
 }
@@ -138,7 +162,7 @@ func addClaudeShapedInbox(hooksAny map[string]any, punkPath, client, serverURL, 
 	}
 }
 
-func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging bool) (changed bool, err error) {
+func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging, wake bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(settingsPath)
 	if err != nil {
 		return false, err
@@ -167,6 +191,13 @@ func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging b
 		// Every inbox event is in hookEvents, so its shape was
 		// validated above.
 		addClaudeShapedInbox(hooksAny, punkPath, "claude-code", serverURL, ns, "")
+	}
+	if wake {
+		// The ensure events are in hookEvents too; SessionEnd is not,
+		// so addClaudeShapedWake validates its shape itself.
+		if err := addClaudeShapedWake(hooksAny, settingsPath, punkPath, "claude-code", serverURL, ns, ""); err != nil {
+			return false, err
+		}
 	}
 	settings["hooks"] = hooksAny
 
@@ -422,9 +453,10 @@ func isPunkManaged(cmd, punkPath string) bool {
 				return true
 			}
 			// "punk hook inbox ..." is the messaging entry, managed by
-			// isPunkManagedInbox: the capture merge must never replace
-			// or delete it (and vice versa).
-			if isInboxSubcommand(after) {
+			// isPunkManagedInbox, and "punk hook wake ..." is the native
+			// wake entry, managed by isPunkManagedWake: the capture merge
+			// must never replace or delete either (and vice versa).
+			if isInboxSubcommand(after) || isWakeSubcommand(after) {
 				return false
 			}
 			switch after[0] {

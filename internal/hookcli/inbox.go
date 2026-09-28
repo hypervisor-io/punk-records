@@ -125,11 +125,18 @@ type InboxPayload struct {
 // continuation slot was reserved for this delivery; when false with a
 // non-empty Rendered the writer may still place Rendered in a context
 // field, or decline (Delivered=false) if its event cannot carry context.
+// Guidance is hook-authored routing identity text (never peer content):
+// the Claude Code writer prints it as additionalContext on
+// SessionStart/UserPromptSubmit even when Rendered is empty, so the
+// model always knows its real session address and namespace. It is set
+// only after confirmed registration, carries no messages, and is never
+// ACKed, leased or continuation-budgeted.
 type Delivery struct {
 	Namespace string
 	Address   string
 	Messages  []InboxMessage // exactly the messages inside Rendered
 	Rendered  string
+	Guidance  string
 	Continue  bool
 	Truncated int // messages whose body was cut to the per-message budget
 	Deferred  int // leased but left for a later hook (delivery budget)
@@ -578,6 +585,34 @@ func renderHeader(ns, address string, n int) string {
 
 const inboxFooterAck = "The hook acknowledges these messages once this text is delivered; do not ack them yourself. A repeated message id is a redelivery."
 
+// inboxRoutingGuidance is the compact routing identity block the Claude
+// Code hook shows on every SessionStart/UserPromptSubmit that would
+// otherwise print nothing (empty inbox), so the model always knows its
+// real session address and namespace and never invents aliases or
+// coordination namespaces (observed failure mode: agents addressing a
+// guessed claude-code:planner-poll in a made-up namespace while the hook
+// delivers on the real session_id/cwd-derived pair). Hook-authored, not
+// peer content; a delivered envelope already names address and namespace
+// in its header and reply line, so guidance is never stacked on top of
+// it. One line per fact, headerField-safe inputs only. The wake line is
+// honest about capability: without a requested listener it states there
+// is no idle wake; with one it says the listener was requested and
+// whether the native endpoint is available, never that it is live.
+func inboxRoutingGuidance(ns, address string, wakeRequested, wakeCapable bool) string {
+	wakeLine := "There is no idle wake: an idle session picks up messages on its next prompt.\n"
+	switch {
+	case wakeRequested && wakeCapable:
+		wakeLine = "A native wake listener is configured for this session and its native endpoint is available; it sends a routing nudge when new mail arrives. This is a capability note, not a liveness guarantee: if no nudge arrives, read on your next prompt.\n"
+	case wakeRequested:
+		wakeLine = "A native wake listener was configured for this session, but its native endpoint is currently unavailable; an idle session picks up messages on its next prompt.\n"
+	}
+	return "[PUNK ROUTING] Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
+		"Send: send_message(namespace=" + quoteArg(ns) + ", sender=" + quoteArg(address) + ", recipient=\"<their address>\", body=\"...\"). " +
+		"Read/ack: read_messages/ack_messages(namespace=" + quoteArg(ns) + ", agent=" + quoteArg(address) + ").\n" +
+		"Use exactly this address and namespace; never invent aliases or namespaces. " +
+		wakeLine
+}
+
 func renderFooter(deferred int) string {
 	if deferred > 0 {
 		return fmt.Sprintf("At least %d more message(s) are waiting and will be delivered by a later hook.\n", deferred) + inboxFooterAck
@@ -932,6 +967,15 @@ func Inbox(opts InboxOpts, stdin io.Reader, out, errw io.Writer) error {
 	if !inboxEnabled(opts.Enabled) {
 		return run.reply(Delivery{}, nil)
 	}
+	if perr == nil && c.Name == "claude-code" && p.Event == "" {
+		// A Claude Code payload without hook_event_name leaves the hook
+		// inert (CanCarry admits nothing): say so plainly instead of
+		// looking like a silent success. The usual cause is a manual run
+		// without the client's native hook JSON on stdin. Below the
+		// enabled check: a disabled hook must stay fully silent.
+		run.note("payload carries no hook_event_name; the hook stays inert for unknown events. " +
+			`A manual run must pipe the native hook JSON on stdin, e.g. {"hook_event_name":"UserPromptSubmit","session_id":"...","cwd":"..."}`)
+	}
 	if perr != nil {
 		return run.failOpen(fmt.Errorf("bad payload: %w", perr))
 	}
@@ -953,6 +997,7 @@ type inboxRun struct {
 	errw    io.Writer
 	api     inboxAPI
 	state   string
+	diag    *inboxDiagnostic // nil until membership is confirmed: no report before registration
 }
 
 func (r *inboxRun) note(format string, args ...any) {
@@ -1012,6 +1057,7 @@ func (r *inboxRun) deliver() error {
 	if window <= 0 {
 		window = inboxDefaultWindow
 	}
+	capExhausted := false
 
 	ns, err := resolveInboxNamespace(r.opts, r.payload.CWD)
 	if err != nil {
@@ -1022,7 +1068,7 @@ func (r *inboxRun) deliver() error {
 	if wantCont {
 		if room, _ := peekContinuation(r.state, inboxNow(), maxCont, window); !room {
 			r.note("continuation cap reached (%d per %s); delivering as context", maxCont, window)
-			wantCont = false
+			wantCont, capExhausted = false, true
 		}
 	}
 	if !wantCont && r.mode == "wait" {
@@ -1052,6 +1098,13 @@ func (r *inboxRun) deliver() error {
 		}
 		st.RegisteredAt = now
 	}
+	// Membership is confirmed (registered now or by an earlier hook):
+	// arm the one best-effort diagnostic report. The deferred flush runs
+	// after the ACK outcome below, so the snapshot always names the final
+	// state and no report can precede an ACK. Paths that returned earlier
+	// (CanCarry skip, failed registration) never armed it and stay silent.
+	r.armDiagnostic(len(pruneContinuations(st.Continuations, inboxNow(), window)))
+	defer r.flushDiagnostic()
 
 	var batch inboxBatch
 	if r.mode == "wait" {
@@ -1060,10 +1113,26 @@ func (r *inboxRun) deliver() error {
 		batch, err = r.take(context.Background(), st)
 	}
 	if err != nil {
+		r.diagOutcome("delivery_failed", "fetch_failed", 0)
 		return r.failOpen(err)
 	}
 	if len(batch.deliver) == 0 {
-		return r.reply(Delivery{Namespace: ns, Address: addr, HeldBack: batch.held}, nil)
+		if batch.held > 0 {
+			r.diagOutcome("sender_filtered", "", 0)
+		}
+		d := Delivery{Namespace: ns, Address: addr, HeldBack: batch.held}
+		// Claude Code gets its routing identity on every context-carrying
+		// event, even with an empty inbox: compaction or a fresh context
+		// must never leave the model guessing its address. Registration
+		// is confirmed above, and nothing here leases, ACKs or spends a
+		// continuation slot (the batch is empty; Stop never reaches this
+		// branch as context). Other clients keep their silent minimum
+		// reply.
+		if r.c.Name == "claude-code" && (r.payload.Event == "SessionStart" || r.payload.Event == "UserPromptSubmit") {
+			wakeRequested, wakeCapable := WakeListenerStatus(r.c.Name, r.payload.SessionID)
+			d.Guidance = inboxRoutingGuidance(ns, addr, wakeRequested, wakeCapable)
+		}
+		return r.reply(d, nil)
 	}
 
 	budget := inboxBudget(r.c)
@@ -1073,6 +1142,7 @@ func (r *inboxRun) deliver() error {
 		// envelope: deliver nothing rather than overflow the cap.
 		r.note("render cap %d bytes is below the smallest safe envelope (%d bytes for message %s); nothing delivered, %d message(s) left unread",
 			budget.Total, rend.MinBytes, batch.deliver[0].ID, len(batch.deliver))
+		r.diagOutcome("delivery_failed", "render_cap", 0)
 		r.api.release(idsOf(batch.deliver), r.errw)
 		return r.reply(Delivery{Namespace: ns, Address: addr, Deferred: len(batch.deliver), HeldBack: batch.held}, nil)
 	}
@@ -1090,20 +1160,30 @@ func (r *inboxRun) deliver() error {
 		}
 		if granted {
 			d.Continue, stamp = true, now.Unix()
+			r.diagWakeUsed()
 		} else if rerr == nil {
 			r.note("continuation cap reached (%d per %s); delivering as context", maxCont, window)
+			capExhausted = true
 		}
 	}
 
 	if !r.write(d, nil) {
 		// Not placed in a consumed field, or stdout failed: nothing is
 		// acked, leases go back, a reserved continuation is refunded.
+		if capExhausted {
+			r.diagOutcome("wake_budget_exhausted", "continuation_cap", 0)
+		} else {
+			r.diagOutcome("delivery_failed", "handoff_failed", 0)
+		}
 		r.api.release(append(usedIDs, leftover...), r.errw)
 		if stamp != 0 {
-			_ = refundContinuation(r.state, stamp)
+			if rerr := refundContinuation(r.state, stamp); rerr == nil {
+				r.diagWakeRefund()
+			}
 		}
 		return nil
 	}
+	r.diagOutcome("waiting_for_next_prompt", "", 0)
 	// Printed: remember before ACK so a lost ACK re-acks silently next
 	// time instead of printing the same message again.
 	if err := updateInboxState(r.state, func(s *inboxState) { s.rememberAcked(usedIDs) }); err != nil {
@@ -1111,6 +1191,9 @@ func (r *inboxRun) deliver() error {
 	}
 	if err := r.api.ackAll(context.Background(), usedIDs); err != nil {
 		r.note("ack %d message(s): %v (they may be redelivered)", len(usedIDs), err)
+		r.diagOutcome("handoff_unconfirmed", "ack_failed", len(usedIDs))
+	} else if batch.held > 0 {
+		r.diagOutcome("sender_filtered", "", 0)
 	}
 	r.api.release(leftover, r.errw)
 	return nil

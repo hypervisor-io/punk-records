@@ -120,6 +120,10 @@ func New(log *slog.Logger, d Deps) *Server {
 					r.Post("/messages/release", s.handleReleaseMessages)
 					r.Get("/messages/events", s.handleMessageEvents)
 					r.Get("/messages/stream", s.handleMessageStream)
+					// Delivery diagnostics: latest bridge observation
+					// per member; never delivery or ACK truth.
+					r.Post("/messages/diagnostics", s.handleRecordMessageDiagnostic)
+					r.Get("/messages/diagnostics", s.handleListMessageDiagnostics)
 				}
 			})
 		}

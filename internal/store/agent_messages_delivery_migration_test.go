@@ -17,8 +17,33 @@ func exerciseMessageDeliveryMigration(t *testing.T, d *DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if last := st[len(st)-1]; last.Version != 25 || last.Name != "agent_messages_delivery" || !last.Applied {
-		t.Fatalf("missing migration 0025: %+v", last)
+	// Newer migrations may sit above 0025; step down to it first.
+	var found bool
+	for _, m := range st {
+		if m.Version == 25 {
+			found = m.Name == "agent_messages_delivery" && m.Applied
+		}
+	}
+	if !found {
+		t.Fatalf("missing migration 0025: %+v", st)
+	}
+	for {
+		st, err := d.MigrateStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tip := 0
+		for _, m := range st {
+			if m.Applied {
+				tip = m.Version
+			}
+		}
+		if tip == 25 {
+			break
+		}
+		if _, err := d.MigrateDown(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, id := range []string{"decoy", "target"} {
 		if _, err := d.ExecContext(ctx, d.Rebind(`INSERT INTO agent_messages (id, namespace, sender, recipient, body, created_at, leased_by, leased_until) VALUES ($1,$2,'a','b','body','2026-09-01','owner','2026-09-02')`), id, id); err != nil {

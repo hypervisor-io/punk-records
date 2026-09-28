@@ -2904,6 +2904,9 @@ func cmdHook(args []string) error {
 	if len(args) > 0 && args[0] == "inbox" {
 		return cmdHookInbox(args[1:])
 	}
+	if len(args) > 0 && args[0] == "wake" {
+		return cmdHookWake(args[1:])
+	}
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
 	from := fs.String("from", "", "source agent the stdin payload is native to (default empty = Claude Code passthrough; e.g. \"cursor\")")
@@ -3378,6 +3381,7 @@ func cmdConnectClaudeCode(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
+	wake := fs.Bool("wake", false, "also wire native wake hooks (SessionStart/UserPromptSubmit/Stop ensure, SessionEnd stop) so new agent messages nudge this idle session through its native transport; implies --messaging; Unix only; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3412,7 +3416,13 @@ func cmdConnectClaudeCode(args []string) error {
 	existedBefore := statErr == nil
 
 	var changed bool
-	if *messaging {
+	if *wake {
+		var hookErr error
+		changed, hookErr = hookcli.ConnectClaudeCodeWake(settingsPath, punkPath, serverURL, projNS)
+		if hookErr != nil {
+			return fmt.Errorf("connect claude-code: %w", hookErr)
+		}
+	} else if *messaging {
 		var hookErr error
 		changed, hookErr = hookcli.ConnectClaudeCodeMessaging(settingsPath, punkPath, serverURL, projNS)
 		if hookErr != nil {
@@ -3442,8 +3452,12 @@ func cmdConnectClaudeCode(args []string) error {
 	} else {
 		fmt.Printf("punk: %s already has punk's Claude Code hooks up to date\n", settingsPath)
 	}
-	if *messaging {
+	if *messaging && !*wake {
 		fmt.Println("punk: messaging - inbox hooks on SessionStart, UserPromptSubmit and Stop (continuation capped at 5 per 10 min; no idle wake)")
+	}
+	if *wake {
+		fmt.Println("punk: messaging - inbox hooks on SessionStart, UserPromptSubmit and Stop (continuation capped at 5 per 10 min)")
+		fmt.Println("punk: native wake - ensure hooks on SessionStart, UserPromptSubmit and Stop, stop hook on SessionEnd; one listener per session nudges this session over its native transport (Unix only; a session without the native capability reports unavailable and is left alone)")
 	}
 	mcpPath := filepath.Join(".mcp.json")
 	if !*project {
@@ -3472,7 +3486,7 @@ func cmdConnectClaudeCode(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("claude-code", *project, serverURL, projNS, *messaging)
+		installSkillFor("claude-code", *project, serverURL, projNS, *messaging || *wake)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
@@ -4344,11 +4358,15 @@ func cmdConnectCodex(args []string) error {
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
+	wake := fs.Bool("wake", false, "also wire native wake hooks (SessionStart/UserPromptSubmit/Stop ensure, SessionEnd stop) so new agent messages nudge this idle session through its native transport; implies --messaging; Unix only; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *messaging && *noHooks {
 		return fmt.Errorf("connect codex: --messaging needs hooks; drop --no-hooks")
+	}
+	if *wake && *noHooks {
+		return fmt.Errorf("connect codex: --wake needs hooks; drop --no-hooks")
 	}
 	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
 	punkPath, err := os.Executable()
@@ -4376,7 +4394,10 @@ func cmdConnectCodex(args []string) error {
 
 	if !*noHooks {
 		connectHooks := hookcli.ConnectCodexHooks
-		if *messaging {
+		switch {
+		case *wake:
+			connectHooks = hookcli.ConnectCodexHooksWake
+		case *messaging:
 			connectHooks = hookcli.ConnectCodexHooksMessaging
 		}
 		changed, err := connectHooks(hooksPath, punkPath, serverURL, ns)
@@ -4384,6 +4405,9 @@ func cmdConnectCodex(args []string) error {
 			return fmt.Errorf("connect codex hooks: %w", err)
 		}
 		fmt.Printf("punk: Codex hooks in %s (%s)\n", hooksPath, changedWord(changed))
+		if *wake {
+			fmt.Println("punk: native wake - ensure hooks on SessionStart, UserPromptSubmit and Stop, stop hook on SessionEnd; one listener per session nudges this session over its native transport (Unix only; a session without the native capability reports unavailable and is left alone)")
+		}
 		if *project {
 			// Codex merges global and project hook scopes; a punk group
 			// identical to the global one would fire every event twice.
@@ -4424,7 +4448,7 @@ func cmdConnectCodex(args []string) error {
 		}
 	}
 	if !*noSkill {
-		installSkillFor("codex", *project, serverURL, ns, *messaging)
+		installSkillFor("codex", *project, serverURL, ns, *messaging || *wake)
 	}
 	fmt.Println("punk: restart codex to pick up the changes")
 	return nil

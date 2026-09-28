@@ -6,6 +6,7 @@ package region
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -178,18 +179,25 @@ func (s *Store) Deregister(ctx context.Context, ns, agent string) error {
 // existed to delete. It is the primitive both Deregister and the DELETE
 // /members/{agent} HTTP route use; messages addressed to a removed
 // member stay in storage, and a session that comes back re-registers
-// through its hook or bridge.
+// through its hook or bridge. The member's delivery diagnostic snapshot
+// is deleted in the same transaction, so a returning session starts clean.
 func (s *Store) RemoveMember(ctx context.Context, ns, agent string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, s.db.Rebind(
-		`DELETE FROM region_members WHERE namespace = $1 AND agent = $2`), ns, agent)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	var removed bool
+	err := s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, s.db.Rebind(
+			`DELETE FROM region_members WHERE namespace = $1 AND agent = $2`), ns, agent)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		removed = n > 0
+		// Unconditional: also clears an orphan snapshot, if any.
+		return s.deleteMessageDiagnostic(ctx, tx, ns, agent)
+	})
+	return removed, err
 }
 
 // ExpireMembers removes members whose last_seen_at (falling back to

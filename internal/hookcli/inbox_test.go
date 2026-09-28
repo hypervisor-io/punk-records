@@ -167,6 +167,11 @@ func (f *fakeInbox) serve(w http.ResponseWriter, r *http.Request) {
 			out = append(out, m)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": out})
+	case strings.HasSuffix(r.URL.Path, "/messages/diagnostics"):
+		// This fixture models a pre-diagnostics server: the hook's
+		// best-effort report gets a 404 and must change nothing. The
+		// 200-contract diagnostics behavior lives in inbox_diag_test.go.
+		http.NotFound(w, r)
 	default:
 		f.t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
@@ -689,10 +694,15 @@ func TestInboxSelfRegistersOncePerStateFile(t *testing.T) {
 	// Another namespace is another state file: registers again.
 	runInbox(t, InboxOpts{Client: "fake", Mode: "context", BaseURL: srv.URL, Namespace: "ns2"}, fakeStdin)
 	f.mu.Lock()
-	last := f.requests[len(f.requests)-2:]
+	regs2 := 0
+	for _, r := range f.requests {
+		if strings.HasPrefix(r, "POST /v1/namespaces/ns2/members") {
+			regs2++
+		}
+	}
 	f.mu.Unlock()
-	if !strings.HasPrefix(last[0], "POST /v1/namespaces/ns2/members") {
-		t.Fatalf("ns2 did not register: %v", last)
+	if regs2 != 1 {
+		t.Fatalf("ns2 registered %d times, want once", regs2)
 	}
 }
 

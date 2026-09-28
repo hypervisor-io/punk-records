@@ -36,9 +36,11 @@ async function api(path, opts) {
 // colour for failed/rejected/canceled since the palette has no separate
 // danger hue. Anything not listed stays plain ink or dim.
 const STATE_COLOR = {
-  done: 'text-live', completed: 'text-live', approved: 'text-live', active: 'text-live', listening: 'text-live', finding: 'text-live',
+  done: 'text-live', completed: 'text-live', approved: 'text-live', active: 'text-live', listening: 'text-live', finding: 'text-live', ready: 'text-live',
   review: 'text-wait', blocked: 'text-wait', input_required: 'text-wait', proposed: 'text-wait', leased: 'text-wait', budget_exhausted: 'text-wait', waiting: 'text-wait',
+  waiting_for_idle: 'text-wait', waiting_for_next_prompt: 'text-wait', wake_budget_exhausted: 'text-wait', sender_filtered: 'text-wait',
   failed: 'text-brand', canceled: 'text-brand', rejected: 'text-brand', error: 'text-brand',
+  delivery_failed: 'text-brand', handoff_unconfirmed: 'text-brand',
   pending: 'text-dim', submitted: 'text-dim', disabled: 'text-dim', status_change: 'text-dim',
 };
 const stateClass = s => (Object.hasOwn(STATE_COLOR, s) ? STATE_COLOR[s] : '');
@@ -54,6 +56,7 @@ let namespaces = null; // cache; null forces a reload
 function setNS(name) {
   ns = name;
   localStorage.setItem('ns', name);
+  diagUnsupported = false; // probe the diagnostics route once for the newly selected namespace
   renderNamespaces();
   closeRail();
   refreshCurrent();
@@ -403,6 +406,8 @@ let msgLoadedNS = null;      // namespace msgLog belongs to; a change resets sel
 let msgExhausted = false;    // true once "Load older" has reached the start of the log
 let msgNextBefore = 0;       // `before` cursor for the next "Load older" page
 let msgMembers = [];         // cached /members rows, for participant liveness
+let msgDiag = Object.create(null); // address -> latest diagnostic snapshot, tagged by msgDiagNS
+let msgDiagNS = '';          // namespace msgDiag was fetched for (never show one namespace's report in another)
 let msgSelected = '';        // selected conversation's pair key ('' = none selected)
 let msgRenderedFor = null;   // conversation key last painted into the thread pane
 let msgMobileView = 'list';  // 'list' | 'thread'; only matters below 768px
@@ -452,6 +457,8 @@ function resetMessagesState() {
   msgNextBefore = 0;
   msgSelected = '';
   msgMobileView = 'list';
+  msgDiag = Object.create(null); // diagnostics belong to the namespace they were fetched in
+  msgDiagNS = '';
   applyMsgMobileView();
 }
 
@@ -521,6 +528,8 @@ async function loadMessages() {
   } catch (e) {
     msgMembers = []; // liveness is best-effort; the thread/list still render
   }
+  const dm = await fetchDiagnostics();
+  if (dm) { msgDiag = dm; msgDiagNS = ns; } // null keeps the previous map (still ns-tagged)
   renderParticipants();
   ensureMessageStream();
 }
@@ -735,6 +744,7 @@ function msgParticipantRow(addr) {
   return `<div class="border-b border-line py-2 text-sm last:border-b-0">
       <div>${addressCell(addr)}</div>
       <div class="mt-1">${m ? statusCell(m) : '<span class="text-dim">not a member of this namespace</span>'}</div>
+      <div class="mt-1">${diagnosticsHTML(diagFor(msgDiag, msgDiagNS, addr))}</div>
     </div>`;
 }
 
@@ -885,6 +895,8 @@ async function streamMessages(streamNS, signal) {
 
 let agentsMembers = [];   // cached GET /members rows for the current namespace
 let agentsUnread = {};    // address -> count of log rows with empty acked_at
+let agentsDiag = Object.create(null); // address -> latest diagnostic snapshot, tagged by agentsDiagNS
+let agentsDiagNS = '';    // namespace agentsDiag was fetched for (never show one namespace's report in another)
 
 const AGENTS_ACTIVE_WINDOW_MIN = 10; // "seen in the last 10 minutes" / "live only"
 
@@ -939,6 +951,98 @@ function addressCell(addr) {
   }
   return '<span class="font-mono break-all"><span class="text-ink font-semibold">' + esc(addr.slice(0, i)) + '</span>' +
     '<span class="text-dim">' + esc(addr.slice(i)) + '</span></span>';
+}
+
+// ---------------------------------------------------------------------
+// Delivery diagnostics (shared by the Agents and Messages views)
+//
+// GET /v1/namespaces/<ns>/messages/diagnostics returns one bounded
+// latest snapshot per address, reported by the client's bridge or hook:
+// capability (client + delivery_mode), the last reported state word and
+// short machine reason, attempt timestamps and a pending-ACK count. It
+// is the client's own observation, labeled "last reported" everywhere;
+// it NEVER overrides the member liveness badge (listening/last_seen_at)
+// or a message's ACK state, and a snapshot the server flags `stale`
+// (older than 120 s) is shown dimmed with a "(stale)" marker rather
+// than hidden. Servers older than the diagnostics route answer 404, in
+// which case the console stops asking (diagUnsupported) and the views
+// render exactly as before. Every remote string passes through esc().
+// ---------------------------------------------------------------------
+
+let diagUnsupported = false; // true after a 404: this server predates diagnostics
+
+// diagWords renders a machine token ("waiting_for_idle") for operators.
+function diagWords(s) {
+  return String(s || '').replace(/_/g, ' ');
+}
+
+// relEta is relAge for future timestamps ("in 5m"), used for a reported
+// next retry time; null when the timestamp is missing or unparsable.
+function relEta(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const secs = Math.floor((t - Date.now()) / 1000);
+  if (secs <= 0) return 'now';
+  if (secs < 60) return 'in ' + secs + 's';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return 'in ' + mins + 'm';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return 'in ' + hours + 'h';
+  return 'in ' + Math.floor(hours / 24) + 'd';
+}
+
+// fetchDiagnostics returns an address -> snapshot map, null when the
+// fetch failed or the namespace changed underneath it (callers keep
+// their previous map, which is still namespace-tagged), and {} once the
+// server is known to predate the route (404) so the poll stops asking.
+// The map is prototypeless and the agent key is validated as a string,
+// so a hostile address like "__proto__" or "constructor" can never
+// shadow Object members or pollute a prototype.
+async function fetchDiagnostics() {
+  if (!ns || diagUnsupported) return {};
+  const reqNS = ns; // captured: a namespace switch mid-flight discards this result
+  try {
+    const d = await api('/v1/namespaces/' + encodeURIComponent(reqNS) + '/messages/diagnostics');
+    if (ns !== reqNS) return null; // late response for a namespace no longer shown
+    const map = Object.create(null);
+    (d.diagnostics || []).forEach(x => {
+      if (x && typeof x.agent === 'string' && x.agent) map[x.agent] = x;
+    });
+    return map;
+  } catch (e) {
+    if (ns !== reqNS) return null; // a dead namespace's failure never marks the new one
+    if (/: 404\b/.test(e.message)) { diagUnsupported = true; return {}; }
+    return null;
+  }
+}
+
+// diagFor reads one address from a namespace-tagged map. Diagnostics are
+// only ever shown for the namespace they were fetched in: after a switch,
+// a map that belongs to the old namespace (kept because its replacement
+// fetch failed or is still in flight) reads as "no reports", never as
+// the other namespace's stale state for the same address.
+function diagFor(map, mapNS, addr) {
+  if (!map || mapNS !== ns) return undefined;
+  return map[addr];
+}
+
+// diagnosticsHTML projects one snapshot (or null) as a compact,
+// non-authoritative observation line. Colour only reinforces the state
+// word; the "last reported" label and stale marker carry the authority
+// caveat in text.
+function diagnosticsHTML(d) {
+  if (!d) return '<span class="text-dim">no reports</span>';
+  const cap = [d.client, d.delivery_mode ? diagWords(d.delivery_mode) : ''].filter(Boolean).join(' · ');
+  const parts = [];
+  if (cap) parts.push('<span class="text-dim">' + esc(cap) + '</span>');
+  parts.push('<span class="' + (d.stale ? 'text-dim' : stateClass(d.state)) + '">' + esc(diagWords(d.state)) + '</span>');
+  if (d.last_error) parts.push('<span class="' + (d.stale ? 'text-dim' : 'text-brand') + '">' + esc(diagWords(d.last_error)) + '</span>');
+  const eta = relEta(d.next_attempt_at);
+  if (eta) parts.push('<span class="text-dim">retry ' + esc(eta) + '</span>');
+  if (d.pending_ack_count > 0) parts.push('<span class="text-dim">' + esc(d.pending_ack_count) + ' unacked</span>');
+  parts.push('<span class="text-dim">last reported ' + esc(relAge(d.updated_at) || 'at an unknown time') + (d.stale ? ' (stale)' : '') + '</span>');
+  return '<div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">' + parts.join('') + '</div>';
 }
 
 function mountAgents(el) {
@@ -997,6 +1101,8 @@ async function loadAgentsView() {
   } catch (e) {
     agentsUnread = {}; // unread is best-effort; the members table still renders
   }
+  const dm = await fetchDiagnostics();
+  if (dm) { agentsDiag = dm; agentsDiagNS = ns; } // null keeps the previous map (still ns-tagged)
   renderAgentsView();
   loadSpecialistAgents();
 }
@@ -1022,13 +1128,14 @@ function renderAgentsView() {
 
   $('#agentsTable').innerHTML = rows.length
     ? `<div class="table-wrap"><table class="data-table">
-        <colgroup><col style="width:16%"><col style="width:32%"><col style="width:14%"><col style="width:12%"><col style="width:26%"></colgroup>
-        <thead><tr><th>Status</th><th>Address</th><th>Role</th><th class="num">Unread</th><th>Joined</th></tr></thead>
+        <colgroup><col style="width:14%"><col style="width:26%"><col style="width:12%"><col style="width:8%"><col style="width:26%"><col style="width:14%"></colgroup>
+        <thead><tr><th>Status</th><th>Address</th><th>Role</th><th class="num">Unread</th><th>Last reported delivery</th><th>Joined</th></tr></thead>
         <tbody>${rows.map(m => { const unread = agentsUnread[m.agent] || 0; return `<tr>
             <td data-label="Status">${statusCell(m)}</td>
             <td data-label="Address">${addressCell(m.agent)}</td>
             <td data-label="Role">${esc(m.role || '-')}</td>
             <td class="num font-mono${unread ? ' text-wait' : ' text-dim'}" data-label="Unread">${unread}</td>
+            <td data-label="Last reported delivery">${diagnosticsHTML(diagFor(agentsDiag, agentsDiagNS, m.agent))}</td>
             <td class="mono" data-label="Joined">${esc((m.joined_at || '').slice(0, 16))}</td>
           </tr>`; }).join('')}</tbody>
       </table></div>`
@@ -1119,6 +1226,7 @@ function refreshCurrent() {
   VIEWS[current].refresh();
 }
 function refreshAll() {
+  diagUnsupported = false; // a new token may point at a different server
   loadNamespacesAndRefresh();
 }
 
@@ -1127,3 +1235,17 @@ $$('#bottombar .bottom-btn').forEach(b => b.classList.toggle('on', b.dataset.vie
 buildViewShell();
 refreshAll();
 setInterval(refreshCurrent, 5000);
+
+// Test seam for node --test (internal/api/ui/console.test.mjs), which
+// evaluates this file in a vm sandbox with DOM stubs and a `module`
+// global. Browsers never define `module`, so this block is inert when
+// the console is served; it only re-exports existing bindings.
+if (typeof module === 'object' && module && module.exports) {
+  module.exports = {
+    esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
+    stateClass,
+    getDiagUnsupported: () => diagUnsupported,
+    setDiagUnsupported: v => { diagUnsupported = v; },
+    setNS: v => { ns = v; },
+  };
+}

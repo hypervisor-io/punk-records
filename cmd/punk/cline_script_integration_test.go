@@ -34,6 +34,7 @@ func TestClineGeneratedHookExecutableRoundtrip(t *testing.T) {
 	}
 	var mu sync.Mutex
 	acks, reads, captures := 0, 0, 0
+	var diags []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -54,6 +55,14 @@ func TestClineGeneratedHookExecutableRoundtrip(t *testing.T) {
 		case "/v1/namespaces/team/messages/ack":
 			acks++
 			_, _ = io.WriteString(w, `{"acked":1}`)
+		case "/v1/namespaces/team/messages/diagnostics":
+			var d map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+				t.Errorf("diagnostic body: %v", err)
+			}
+			d["acks_so_far"] = acks // diagnostics must follow the ACK outcome
+			diags = append(diags, d)
+			_, _ = io.WriteString(w, `{"status":"recorded"}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -100,6 +109,21 @@ func TestClineGeneratedHookExecutableRoundtrip(t *testing.T) {
 	defer mu.Unlock()
 	if captures != 3 || reads != 2 || acks != 2 {
 		t.Fatalf("capture/read/ACK=%d/%d/%d", captures, reads, acks)
+	}
+	// The two content-carrying events (TaskStart, UserPromptSubmit) each
+	// report one diagnostic after their ACK; TaskComplete carries nothing
+	// and reports nothing.
+	if len(diags) != 2 {
+		t.Fatalf("diagnostics=%d, want 2: %v", len(diags), diags)
+	}
+	for i, d := range diags {
+		if d["agent"] != "cline:t1" || d["client"] != "cline" || d["delivery_mode"] != "catch_up" ||
+			d["state"] != "waiting_for_next_prompt" {
+			t.Fatalf("diagnostic %d: %v", i, d)
+		}
+		if d["acks_so_far"].(int) != i+1 {
+			t.Fatalf("diagnostic %d arrived before its ACK: %v", i, d)
+		}
 	}
 	if _, err := os.Stat(bin); err != nil {
 		t.Fatal(err)

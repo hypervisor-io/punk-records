@@ -136,9 +136,28 @@ func TestBuiltPunkClaudeCodexInboxHooksDeliver(t *testing.T) {
 			return `{"session_id":"sess-` + c.client + `","cwd":"/work/m6","hook_event_name":"` + event + `"` + extra + `}`
 		}
 
-		// SessionStart registers the address (empty inbox: no output).
-		if out := shell(nsEnv, startCmd, payload("SessionStart", `,"source":"startup"`)); out != "" {
-			t.Fatalf("%s empty SessionStart printed %q", c.client, out)
+		// SessionStart registers the address. Claude Code then emits its
+		// routing identity guidance (hand-authored expectation below):
+		// empty inbox, nothing ACKed, nothing unread consumed. Codex keeps
+		// its silent empty reply.
+		startOut := shell(nsEnv, startCmd, payload("SessionStart", `,"source":"startup"`))
+		if c.client == "claude-code" {
+			guidance := "[PUNK ROUTING] Your punk messaging address is " + addr + " in namespace " + ns + ".\n" +
+				"Send: send_message(namespace=\"" + ns + "\", sender=\"" + addr + "\", recipient=\"<their address>\", body=\"...\"). " +
+				"Read/ack: read_messages/ack_messages(namespace=\"" + ns + "\", agent=\"" + addr + "\").\n" +
+				"Use exactly this address and namespace; never invent aliases or namespaces. " +
+				"There is no idle wake: an idle session picks up messages on its next prompt.\n"
+			wantRaw, _ := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+				"hookEventName": "SessionStart", "additionalContext": guidance}})
+			if want := string(wantRaw) + "\n"; startOut != want {
+				t.Fatalf("claude-code guidance\ngot  %q\nwant %q", startOut, want)
+			}
+			rec := g.do(t, http.MethodGet, "/v1/namespaces/"+ns+"/messages/count?agent="+addr, "")
+			if strings.TrimSpace(rec.Body.String()) != `{"unread":0}` {
+				t.Fatalf("guidance is not delivery: unread changed: %s", rec.Body.String())
+			}
+		} else if startOut != "" {
+			t.Fatalf("%s empty SessionStart printed %q", c.client, startOut)
 		}
 		id1 := send(addr, "first task")
 		out := shell(nsEnv, promptCmd, payload("UserPromptSubmit", `,"prompt":"hi"`))

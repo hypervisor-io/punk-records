@@ -52,6 +52,9 @@ func TestClineCombinedCaptureMemoryAndInbox(t *testing.T) {
 					}
 					ack++
 					_, _ = io.WriteString(w, `{"acked":1}`)
+				case "/v1/namespaces/team/messages/diagnostics":
+					// pre-diagnostics server: the best-effort report must change nothing
+					w.WriteHeader(404)
 				default:
 					t.Errorf("unexpected %s", r.URL.Path)
 					w.WriteHeader(404)
@@ -158,6 +161,9 @@ func TestClineCombinedFailedStdoutNeverACKs(t *testing.T) {
 		case "/v1/namespaces/team/messages/release":
 			released++
 			_, _ = io.WriteString(w, `{"released":1}`)
+		case "/v1/namespaces/team/messages/diagnostics":
+			// pre-diagnostics server: the best-effort report must change nothing
+			w.WriteHeader(404)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
 		}

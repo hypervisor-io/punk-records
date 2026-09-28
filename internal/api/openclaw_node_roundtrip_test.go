@@ -176,6 +176,7 @@ main().catch((err) => {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, nodePath, harnessPath)
 	cmd.Dir = openClawNodeRTCWD
+	cmd.Env = nodeHarnessEnv(t)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("node harness did not complete within 15s: %s", out)

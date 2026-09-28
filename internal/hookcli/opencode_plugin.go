@@ -437,6 +437,14 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // OpenClaw bridges so every bridge renders and consumes identically.
 %s
 
+  // ---- punk delivery diagnostics + restart recovery (OpenCode only) ----
+  // Spliced from the Go generator (opencode_diagjs.go): bounded,
+  // deduplicated delivery observations POSTed to the shared
+  // /messages/diagnostics contract, plus the restart-persistent
+  // successful-handoff/unACKed ids and wake timestamps. Not shared with
+  // the other bridges - see the fragment's own doc comment.
+%s
+
   // punkAlive is the identity guard applied after every await in the
   // bridge: a session's async work may only continue while that exact
   // state object is still the one registered under sessionID, the plugin
@@ -595,6 +603,30 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           if (res && res.status === "registered") {
             st.registered = true
             st.registering = false
+            // Restore recovery state BEFORE anything can drain: restored
+            // pending ids must already sit in the delivered set so the
+            // first fetch pass treats them as re-acks (never re-prompts),
+            // and restored wake stamps must already count against the
+            // cap. st.recoveryReady (checked by punkRequestDrain and at
+            // punkDeliverSession entry) keeps idle transitions and inbox
+            // hints that fire while the restore await is in flight from
+            // draining WITHOUT the restored ids - they fold into one
+            // queued drain instead. Fail-open: a missing/corrupt/
+            // unwritable record restores nothing and never breaks the
+            // bridge.
+            const restoredIds = await punkRecoveryRestore(ns, st)
+            st.recoveryReady = true
+            if (!punkAlive(st, sessionID) || !st.registered) return
+            if (restoredIds > 0) {
+              // Honest restart observation: ids the previous life handed
+              // off whose ACK was never confirmed.
+              punkDiagReport(st, "handoff_unconfirmed")
+            } else {
+              // Only a KNOWN-idle session reports ready: unknown busy
+              // state (a failed status snapshot) reports waiting_for_idle
+              // - an unconfirmed snapshot never claims readiness.
+              punkDiagReport(st, st.busy === false ? "ready" : "waiting_for_idle")
+            }
             if (!st.listening) {
               st.listening = true
               punkListenSSE(sessionID, st, ns)
@@ -660,6 +692,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       return
     }
     st.busy = false
+    punkDiagTransition(sessionID, "ready")
     punkRequestDrain(sessionID)
   }
 
@@ -681,6 +714,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     }
     if (properties.status.type === "busy" || properties.status.type === "retry") {
       st.busy = true
+      punkDiagTransition(properties.sessionID, "waiting_for_idle")
     } else if (properties.status.type === "idle") {
       punkMarkIdle(properties.sessionID)
     }
@@ -689,13 +723,17 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // punkRequestDrain schedules delivery work for a session. If a drain is
   // already running, the trigger is folded into exactly ONE queued drain
   // (run when the current one finishes) instead of being dropped - a hint
-  // arriving mid-delivery must not be lost. Busy or unknown sessions
-  // defer: their messages stay queued server-side until an authoritative
-  // idle transition requests the drain.
+  // arriving mid-delivery must not be lost. A session whose recovery
+  // restore is still in flight (registered but not yet recoveryReady)
+  // folds the same way: draining before the restore completes would fetch
+  // without the restored pending ids and wake stamps, re-prompting ids
+  // the previous life already handed off. Busy or unknown sessions defer:
+  // their messages stay queued server-side until an authoritative idle
+  // transition requests the drain.
   function punkRequestDrain(sessionID, ns) {
     const st = punkSessions.get(sessionID)
     if (!st || !st.registered) return
-    if (st.delivering) {
+    if (st.delivering || !st.recoveryReady) {
       st.drainQueued = true
       return
     }
@@ -898,13 +936,24 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // starve behind a persistently failing sibling; a pending ACK is
   // never thrown away, a post-expiry pass reacquires and re-acks it. On
   // a failed prompt nothing new is acked for that message; the next
-  // trigger re-prompts it. A failed fetch schedules one bounded retry.
-  // Identity is re-checked after every await: results are never applied
-  // to a disposed, deleted, or rebound session. Never rejects.
+  // trigger re-prompts it. A failed fetch schedules one bounded retry. A
+  // clean, non-exhausted pass queues exactly one follow-up drain so a
+  // multi-batch backlog drains completely without depending on hint
+  // timing. Every successful handoff is persisted to the recovery file (awaited,
+  // so the write completes) BEFORE its ACK is attempted, so a crash
+  // between the ACK attempt and its confirmation still restores as
+  // re-ack-without-re-prompt; the residual crash window between the host
+  // handoff and the save stays ambiguous (at-least-once, never claimed
+  // exactly-once). Each drain outcome ends in one bounded, deduplicated
+  // diagnostics observation. Identity is re-checked after every await:
+  // results are never applied to a disposed, deleted, or rebound
+  // session. Never rejects.
   async function punkDeliverSession(sessionID, nsArg) {
     const st = punkSessions.get(sessionID)
-    if (!st || !st.registered || st.busy !== false || st.delivering) return
+    if (!st || !st.registered || !st.recoveryReady || st.busy !== false || st.delivering) return
     st.delivering = true
+    let promptFailed = false
+    let ackFailed = false
     try {
       const ns = nsArg || (await punkResolveNamespace())
       if (!ns || !punkAlive(st, sessionID) || st.busy !== false) return
@@ -913,12 +962,18 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
         // Non-OK or dead fetch: one bounded retry instead of waiting for
         // the next external hint.
         punkInboxScheduleDrainRetry(st, () => punkRequestDrain(sessionID))
+        punkDiagReport(st, "delivery_failed", { lastError: "fetch_failed", lastAttempt: true })
         return
       }
       if (!punkAlive(st, sessionID)) return
       if (pass.reack.length) {
         const ok = await punkInboxAckIds(ns, st, pass.reack)
-        if (!ok) punkInboxScheduleReackRetry(ns, st)
+        if (ok) {
+          punkRecoverySave(ns, st)
+        } else {
+          ackFailed = true
+          punkInboxScheduleReackRetry(ns, st)
+        }
       }
       if (pass.deniedCount > 0) {
         console.error("punk connect opencode: held back " + pass.deniedCount + " message(s) from senders outside PUNK_MESSAGING_FROM")
@@ -933,20 +988,30 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
         if (!ok) {
           // Failed delivery: stop prompting further messages, but the
           // already-delivered subset below still gets its ACK flushed.
+          promptFailed = true
           break
         }
         st.delivered.add(m.id)
         toAck.push(m.id)
         punkInboxRecordWake(st)
+        // Successful handoff: await the recovery save BEFORE attempting
+        // the ACK, so a crash before the ACK confirms still restores this
+        // id as re-ack-without-re-prompt. A crash between the host
+        // handoff and this save remains ambiguous.
+        await punkRecoverySave(ns, st)
+        if (!punkAlive(st, sessionID)) return
       }
       if (toAck.length > 0 && punkAlive(st, sessionID)) {
         const ok = await punkInboxAckIds(ns, st, toAck)
-        if (!ok) {
+        if (ok) {
+          punkRecoverySave(ns, st)
+        } else {
           // A failed or partial ACK (expired lease answers {acked:n} with
           // n < len) leaves the ids pending: the recurrent post-expiry
           // pass reacquires and re-acks them. The next drain re-acks them
           // without re-prompting. Memory stays bounded (delivered drains
           // on ACK; recentAcks is a capped ring).
+          ackFailed = true
           punkInboxScheduleReackRetry(ns, st)
         }
       }
@@ -963,6 +1028,53 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       // when waking is disabled outright (cap 0: no timer can ever help).
       if (leftoverDeliver.length > 0 && !punkInboxWakeAllowed(st)) {
         punkInboxScheduleWakeRetry(st, punkInboxNextWakeDelayMs(st), () => punkRequestDrain(sessionID))
+      }
+      // A pass that returned deliver rows before scanning the whole
+      // backlog (exhausted=false) may have more rows behind the batch.
+      // When this drain consumed its batch cleanly - every row prompted
+      // and acked, nothing suppressed or failed, session still idle -
+      // queue exactly one follow-up drain so a multi-batch backlog drains
+      // completely without depending on further hint timing (every hint
+      // that triggered this drain may already have been consumed
+      // mid-batch). The chain is bounded: an exhausted or empty pass, a
+      // failed prompt, a suppressed row, or a busy session ends it.
+      if (
+        !pass.exhausted &&
+        pass.deliver.length > 0 &&
+        toAck.length === pass.deliver.length &&
+        st.busy === false &&
+        punkAlive(st, sessionID)
+      ) {
+        st.drainQueued = true
+      }
+      // One honest observation for the drain's outcome (identical
+      // consecutive snapshots are deduplicated inside punkDiagReport):
+      // a busy break waits for idle; a cap-suppressed backlog reports the
+      // exhausted (or disabled) wake budget with its retry time; a failed
+      // prompt or fetch reports the machine reason; a failed ACK reports
+      // the unconfirmed handoff with the scheduled re-ack time; a
+      // denied-sender-only pass reports the filter; everything else ran
+      // clean.
+      if (st.busy !== false) {
+        punkDiagReport(st, "waiting_for_idle")
+      } else if (leftoverDeliver.length > 0 && !punkInboxWakeAllowed(st)) {
+        const maxCont = punkInboxEnvIntNonNeg("PUNK_MESSAGING_MAX_CONTINUE", PUNK_INBOX_WAKE_MAX_DEFAULT)
+        if (maxCont <= 0) {
+          punkDiagReport(st, "disabled")
+        } else {
+          punkDiagReport(st, "wake_budget_exhausted", { nextAttemptMs: punkInboxNextWakeDelayMs(st) })
+        }
+      } else if (promptFailed) {
+        punkDiagReport(st, "delivery_failed", { lastError: "prompt_failed", lastAttempt: true })
+      } else if (ackFailed) {
+        punkDiagReport(st, "handoff_unconfirmed", {
+          lastError: "ack_failed",
+          nextAttemptMs: punkInboxLeaseMs() + 250,
+        })
+      } else if (pass.deniedCount > 0 && toAck.length === 0) {
+        punkDiagReport(st, "sender_filtered")
+      } else {
+        punkDiagReport(st, "ready")
       }
     } catch (err) {
       console.error("punk connect opencode: messaging delivery failed:", err && err.message ? err.message : err)
@@ -1186,6 +1298,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           // first sign of life: bind (register + listen) so its inbox is
           // delivered once the turn ends.
           punkBindSession(sessionID, true)
+          punkDiagTransition(sessionID, "waiting_for_idle")
         }
       } catch (err) {
         console.error("punk connect opencode: chat.message hook failed:", err && err.message ? err.message : err)
@@ -1260,5 +1373,5 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
 // runtime via the PUNK_URL environment variable, see the rendered
 // plugin's own header comment and punkServerURL().
 func openCodePluginContent(serverURL string) string {
-	return fmt.Sprintf(openCodePluginTemplate, jsStringLiteral(serverURL), inboxBridgeJS())
+	return fmt.Sprintf(openCodePluginTemplate, jsStringLiteral(serverURL), inboxBridgeJS(), openCodeBridgeExtrasJS)
 }

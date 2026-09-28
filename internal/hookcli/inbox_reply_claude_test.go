@@ -407,6 +407,115 @@ func TestClaudeInboxRespectsClientRenderCap(t *testing.T) {
 	}
 }
 
+// Claude Code routing guidance: on SessionStart/UserPromptSubmit with an
+// empty inbox the hook still emits its compact routing identity (after
+// confirmed registration), so the model never invents aliases or
+// namespaces. It is not peer delivery: nothing is ACKed, leased beyond
+// the ordinary fetch, or continuation-budgeted, and a delivered envelope
+// (which already names address and namespace) never stacks guidance.
+func TestClaudeInboxRoutingGuidance(t *testing.T) {
+	inboxTestEnv(t)
+	f, srv := newFakeInbox(t)
+	run := func(client, event string) string {
+		out, _ := runInbox(t, InboxOpts{Client: client, Mode: "context", BaseURL: srv.URL, Namespace: "ns1"},
+			`{"session_id":"s1","cwd":"/w","hook_event_name":"`+event+`"}`)
+		return out
+	}
+	guidance := func(out, event string) string {
+		t.Helper()
+		var ctx struct {
+			HookSpecificOutput struct{ HookEventName, AdditionalContext string }
+		}
+		if err := json.Unmarshal([]byte(out), &ctx); err != nil || ctx.HookSpecificOutput.HookEventName != event {
+			t.Fatalf("%s guidance reply: %q", event, out)
+		}
+		ac := ctx.HookSpecificOutput.AdditionalContext
+		for _, want := range []string{"[PUNK ROUTING]", "address is claude-code:s1 in namespace ns1",
+			`send_message(namespace="ns1", sender="claude-code:s1"`, `read_messages/ack_messages(namespace="ns1", agent="claude-code:s1")`,
+			"never invent aliases or namespaces", "no idle wake"} {
+			if !strings.Contains(ac, want) {
+				t.Fatalf("%s guidance missing %q: %s", event, want, ac)
+			}
+		}
+		return ac
+	}
+
+	// Empty inbox on both context events, twice: guidance rides every
+	// prompt (compaction must not orphan the identity), and nothing is
+	// ACKed or leased beyond the fetch.
+	for i := 0; i < 2; i++ {
+		guidance(run("claude-code", "SessionStart"), "SessionStart")
+		guidance(run("claude-code", "UserPromptSubmit"), "UserPromptSubmit")
+	}
+	if ids := f.ackedIDs(); len(ids) != 0 {
+		t.Fatalf("guidance ACKed %v; it is not peer delivery", ids)
+	}
+
+	// Stop stays silent: guidance never becomes a continuation and never
+	// spends the wake budget.
+	if out, _ := runInbox(t, InboxOpts{Client: "claude-code", Mode: "continue", BaseURL: srv.URL, Namespace: "ns1"},
+		`{"session_id":"s1","cwd":"/w","hook_event_name":"Stop"}`); out != "" {
+		t.Fatalf("empty Stop printed %q", out)
+	}
+
+	// A delivered envelope already names address and namespace: no
+	// guidance is stacked, and the message is ACKed as before.
+	f.add(InboxMessage{ID: "m1", Namespace: "ns1", Sender: "lead", Recipient: "claude-code:s1", Body: "hi", CreatedAt: "t"})
+	out := run("claude-code", "UserPromptSubmit")
+	if strings.Contains(out, "[PUNK ROUTING]") {
+		t.Fatalf("guidance stacked onto a routing-identified envelope: %q", out)
+	}
+	if !strings.Contains(out, "--- punk message m1 from lead") || strings.Join(f.ackedIDs(), ",") != "m1" {
+		t.Fatalf("delivery changed: out=%q acked=%v", out, f.ackedIDs())
+	}
+
+	// Other clients keep their silent minimum reply on an empty inbox.
+	if out := run("codex", "UserPromptSubmit"); out != "" {
+		t.Fatalf("codex empty inbox printed %q", out)
+	}
+
+	// Disabled messaging stays fully silent (and request-free).
+	t.Setenv("PUNK_MESSAGING", "")
+	if out := run("claude-code", "SessionStart"); out != "" {
+		t.Fatalf("disabled hook printed %q", out)
+	}
+}
+
+// A Claude Code payload without hook_event_name leaves the hook inert;
+// stderr must say so and name the manual-run fix, without touching the
+// server.
+func TestClaudeInboxMissingEventNameDiagnostic(t *testing.T) {
+	inboxTestEnv(t)
+	f, srv := newFakeInbox(t)
+	out, errw := runInbox(t, InboxOpts{Client: "claude-code", Mode: "context", BaseURL: srv.URL, Namespace: "ns1"},
+		`{"session_id":"s1","cwd":"/w"}`)
+	if out != "" {
+		t.Fatalf("eventless payload printed %q", out)
+	}
+	if !strings.Contains(errw, "hook_event_name") || !strings.Contains(errw, "stdin") {
+		t.Fatalf("missing-event diagnostic absent from stderr: %q", errw)
+	}
+	if n := f.requestCount(); n != 0 {
+		t.Fatalf("eventless payload made %d requests", n)
+	}
+}
+
+// A disabled hook is fully inert: no stdout AND no stderr diagnostics,
+// including the missing-event note.
+func TestClaudeInboxMissingEventNameSilentWhenDisabled(t *testing.T) {
+	inboxTestEnv(t)
+	t.Setenv("PUNK_MESSAGING", "0") // kill switch, even over --messaging
+	f, srv := newFakeInbox(t)
+	out, errw := runInbox(t, InboxOpts{Client: "claude-code", Mode: "context", BaseURL: srv.URL, Namespace: "ns1", Enabled: true},
+		`{"session_id":"s1","cwd":"/w"}`)
+	if out != "" || errw != "" {
+		t.Fatalf("disabled hook was not silent: out=%q errw=%q", out, errw)
+	}
+	if n := f.requestCount(); n != 0 {
+		t.Fatalf("disabled hook made %d requests", n)
+	}
+}
+
 // Codex merges global and project hook scopes; an identical inbox group
 // in both would run the inbox hook twice per event.
 func TestDedupeCodexHookScopesRemovesIdenticalInboxGroups(t *testing.T) {

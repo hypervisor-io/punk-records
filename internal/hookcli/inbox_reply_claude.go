@@ -80,21 +80,35 @@ func claudeCanCarry(p InboxPayload, cont bool) bool {
 
 // claudeInboxReply writes the Claude-shaped reply. Every path without
 // deliverable text prints nothing, which both clients treat as "no
-// decision" on every wired event.
+// decision" on every wired event. The exception is Claude Code routing
+// guidance (Delivery.Guidance): on SessionStart/UserPromptSubmit it is
+// printed as additionalContext even with an empty inbox, ahead of any
+// rendered envelope; it never appears on Stop, where it would read as a
+// continuation.
 func claudeInboxReply(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
-	if d.Rendered == "" {
+	if d.Rendered == "" && d.Guidance == "" {
 		return InboxReply{}
 	}
 	var v any
 	switch req.Payload.Event {
 	case "SessionStart", "UserPromptSubmit":
+		text := d.Rendered
+		if d.Guidance != "" {
+			// Guidance first: identity before peer content. An envelope
+			// already names address and namespace, so the deliver path
+			// never sets Guidance and nothing is duplicated.
+			text = d.Guidance + text
+		}
+		if text == "" {
+			return InboxReply{}
+		}
 		v = map[string]any{"hookSpecificOutput": map[string]any{
 			"hookEventName":     req.Payload.Event,
-			"additionalContext": d.Rendered,
+			"additionalContext": text,
 		}}
 	case "Stop":
-		if !d.Continue {
+		if !d.Continue || d.Rendered == "" {
 			return InboxReply{}
 		}
 		v = map[string]any{"decision": "block", "reason": d.Rendered}
