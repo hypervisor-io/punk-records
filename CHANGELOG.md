@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.13.0 (2026-09-28)
+
+### Added
+- Opt-in native wake bridge: `punk connect claude-code --wake` and
+  `punk connect codex --wake` (implies `--messaging`) add a third managed
+  hook group whose ensure entries keep one detached listener alive per
+  native session (SessionEnd stops it). The listener watches the
+  session's own addressed inbox over SSE and nudges the IDLE session
+  through its native transport - Claude Code's own-session messaging
+  socket (live-proven on 2.1.283), or the owning Codex app-server daemon
+  reached through `codex app-server proxy` with `thread/queue/add`
+  (live-proven on 0.157.1; queueing means a racing human turn is never
+  steered). The nudge is a routing notification only: peer bodies are
+  never forwarded, the listener never leases or ACKs, and the existing
+  inbox hooks still deliver and acknowledge on the woken turn. Wake
+  volume shares the Stop-continuation budget knobs (default 5 per 600 s,
+  persisted per identity so a restart cannot reset it), a 60 s
+  unchanged-inbox cooldown, the `PUNK_MESSAGING_FROM` allowlist, and
+  `PUNK_MESSAGING_MAX_CONTINUE=0` disables waking while monitoring
+  continues. Unix-only; sessions without the native capability are
+  reported unavailable and left alone.
+- Delivery diagnostics: `POST/GET
+  /v1/namespaces/{ns}/messages/diagnostics` store one bounded, latest
+  bridge observation per address (state, machine reason, retry ETA,
+  wake budget) in additive migration `0026` (SQLite and PostgreSQL),
+  deleted with the member. Bridges and `punk hook inbox` report
+  wait/failure states (waiting for idle, wake budget exhausted, sender
+  filtered, handoff unconfirmed, ...); the operator console shows them
+  as clearly-labelled "last reported" values that never override member
+  liveness or ACK state, and degrade silently on older servers.
+- OpenCode bridge restart recovery: the generated plugin persists the
+  IDs it handed off but has not ACKed, plus its wake-window timestamps,
+  in a local atomic state file (never credentials or bodies). A
+  restarted bridge restores them before its first drain, so it re-ACKs
+  handed-off messages without prompting the model again and keeps its
+  wake budget. Corrupt or unwritable state fails open.
+- Routing identity guidance: on every Claude Code SessionStart and
+  UserPromptSubmit with an empty inbox, the hook prints the session's
+  REAL punk address and namespace with the exact send/read/ack
+  parameters, so agents stop inventing aliases in namespaces no hook
+  reads (the observed failure mode behind "claude-code does nothing").
+  A manual `punk hook inbox` run without native JSON on stdin now says
+  so on stderr instead of looking like silent success.
+
+### Fixed
+- The OpenCode bridge drains a multi-batch backlog deterministically
+  (one queued follow-up pass per clean batch) instead of depending on
+  hint-storm timing.
+- Node round-trip tests are hermetic: inherited `PUNK_*` variables and
+  `XDG_STATE_HOME` no longer leak a developer shell's messaging flag or
+  live server into the harnesses (this is what made two baseline tests
+  flap).
+
 ## v1.12.1 (2026-09-26)
 
 ### Fixed
