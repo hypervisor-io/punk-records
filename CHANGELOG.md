@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.14.2 (2026-10-10)
+
+### Added
+- Message content policy: `send_message` bodies matching a
+  dangerous-intent registry (destructive filesystem/system/git/db/k8s
+  commands, exfiltration phrasing, reverse shells, persistence,
+  credential minting, instruction override, encoding evasion,
+  replication, supply-chain redirects) are rejected before storage or
+  delivery. Default `messaging.content_filter.mode: block`, with a
+  namespace skip list and an off switch (`PUNK_MESSAGING_CONTENT_FILTER`).
+  This is the server-side layer underneath the envelope framing, not a
+  replacement for it: a regex cannot distinguish an attack from a
+  security discussion that quotes the same words, so benign lookalikes
+  are occasionally rejected with a named category the sender can
+  rephrase around. HTTP 422; MCP surfaces the same error text.
+
 ## v1.14.1 (2026-10-09)
 
 ### Fixed
