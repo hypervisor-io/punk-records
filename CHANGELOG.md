@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.14.1 (2026-10-09)
+
+### Fixed
+- Skills (`punk-memory`, `punk-plan`): rendered frontmatter was invalid
+  YAML (unquoted description containing a colon); registration was
+  described as if it granted access (it requires a namespace write
+  grant and grants nothing); claim guidance conflated member heartbeat
+  with claim expiry and told planners to release already-auto-released
+  claims; the five optional messaging tools and the skill-index
+  discovery workflow were undocumented; Pi was told to use MCP tools it
+  does not have.
+- Generated plugins (opencode, pi, openclaw): ignored per-address inbox
+  bindings and cached one namespace globally, so a namespace switch
+  could carry pending ACKs and leases across namespaces (a switch now
+  builds cold coordination state and releases old leases in the old
+  namespace). OpenCode acknowledged messages whose envelope failed to
+  render. Pi's `--project` pin did not reach capture and context
+  requests.
+- Subprocess hooks: a cached registration timestamp suppressed
+  re-registration forever, so a session resumed after member expiry or
+  removal never recovered membership (all seven hook clients now
+  re-confirm before each eligible poll).
+- Client auth: OpenCode MCP entries used `${NAME}` instead of its
+  `{env:NAME}` substitution; literal bearer tokens were written into
+  group/world-readable configs (now owner-only everywhere, including
+  the Hermes YAML writer, with mode repair and an AST guard classifying
+  every `Connect*MCP` writer); `--verify` probed with a different
+  credential than the written config uses and now fails closed when
+  the selected variable is unset; JSON settings files with trailing
+  content were silently truncated on rewrite.
+- CI: `actions/setup-node` pinned by SHA so the Node-backed plugin
+  tests execute instead of silently skipping; pre-existing lint
+  findings cleared so the lint step passes.
+
+### Changed
+- Dependencies: otel sdk/exporters 1.44.0 -> 1.45.0 and grpc
+  1.81.1 -> 1.83.2, clearing the published security advisories against
+  these modules.
+
 ## v1.14.0 (2026-09-28)
 
 ### Added
