@@ -228,6 +228,13 @@ func (s *Store) SendMessage(ctx context.Context, in MessageInput) (*Message, err
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	// Content policy runs before any storage or locking: a blocked body
+	// is never stored, never delivered, and never counts against the
+	// recipient's unread cap. The error names the category and pattern
+	// (never the body) so a legitimate sender can rephrase.
+	if cat, name := s.ContentPolicy.Check(in.Namespace, in.Body); cat != "" {
+		return nil, fmt.Errorf("%w: %s (%s)", ErrMessageBlocked, cat, name)
+	}
 	m := &Message{ID: newMessageID(), Namespace: in.Namespace, Sender: in.Sender, Recipient: in.Recipient,
 		Body: in.Body, TaskID: in.TaskID, ReplyTo: in.ReplyTo, CreatedAt: store.TimeToDB(s.now())}
 	var existing *Message

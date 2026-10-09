@@ -683,6 +683,17 @@ func cmdServe(args []string) error {
 	regionStore := region.New(db, nil)
 	regionStore.MaxUnreadPerRecipient = cfg.Messaging.MaxUnreadPerRecipient
 	regionStore.MessageRetention = time.Duration(cfg.Messaging.RetentionDays) * 24 * time.Hour
+	if cfg.Messaging.ContentFilter.Mode == "" {
+		cfg.Messaging.ContentFilter.Mode = "block" // config default; env-only configs rely on this
+	}
+	regionStore.ContentPolicy, err = region.NewContentPolicy(region.ContentFilterConfig{
+		Mode:          cfg.Messaging.ContentFilter.Mode,
+		Namespaces:    cfg.Messaging.ContentFilter.Namespaces,
+		ExtraPatterns: cfg.Messaging.ContentFilter.ExtraPatterns,
+	})
+	if err != nil {
+		return fmt.Errorf("content filter: %w", err)
+	}
 	emb, err := newEmbedder(context.Background(), cfg, log)
 	if err != nil {
 		return err

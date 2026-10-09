@@ -61,6 +61,8 @@ func writeMessageErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err)
 	case errors.Is(err, region.ErrMessageBacklog):
 		writeErr(w, http.StatusTooManyRequests, err)
+	case errors.Is(err, region.ErrMessageBlocked):
+		writeErr(w, http.StatusUnprocessableEntity, err)
 	default:
 		writeErr(w, http.StatusInternalServerError, err)
 	}

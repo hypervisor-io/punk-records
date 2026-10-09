@@ -31,10 +31,21 @@ type Config struct {
 }
 
 type Messaging struct {
-	Enabled               bool `yaml:"enabled"`                  // MCP message tools; HTTP routes keep namespace grants
-	MaxUnreadPerRecipient int  `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
-	RetentionDays         int  `yaml:"retention_days"`           // ACK age; 0 disables deletion
-	MemberExpiryDays      int  `yaml:"member_expiry_days"`       // last_seen_at age; 0 disables; listening members never expire
+	Enabled               bool             `yaml:"enabled"`                  // MCP message tools; HTTP routes keep namespace grants
+	MaxUnreadPerRecipient int              `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
+	RetentionDays         int              `yaml:"retention_days"`           // ACK age; 0 disables deletion
+	MemberExpiryDays      int              `yaml:"member_expiry_days"`       // last_seen_at age; 0 disables; listening members never expire
+	ContentFilter         ContentFilterCfg `yaml:"content_filter"`           // dangerous-intent blocking at send time
+}
+
+// ContentFilterCfg configures the message content policy. Mode "block"
+// (the default) rejects SendMessage bodies matching the dangerous-intent
+// registry; "off" disables it. Namespaces is a skip list for coordination
+// namespaces that legitimately discuss attack payloads (security research).
+type ContentFilterCfg struct {
+	Mode          string   `yaml:"mode"`
+	Namespaces    []string `yaml:"namespaces"`
+	ExtraPatterns []string `yaml:"extra_patterns"`
 }
 
 type HTTP struct {
@@ -205,7 +216,7 @@ func Default() *Config {
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
 		Authz:     Authz{Enforcement: "off"},
-		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7},
+		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7, ContentFilter: ContentFilterCfg{Mode: "block"}},
 	}
 }
 
@@ -292,6 +303,7 @@ func applyEnv(c *Config) error {
 	boolean("PUNK_MESSAGING", &c.Messaging.Enabled)
 	integer("PUNK_MESSAGING_RETENTION_DAYS", &c.Messaging.RetentionDays)
 	integer("PUNK_MESSAGING_MEMBER_EXPIRY_DAYS", &c.Messaging.MemberExpiryDays)
+	str("PUNK_MESSAGING_CONTENT_FILTER", &c.Messaging.ContentFilter.Mode)
 
 	return errors.Join(errs...)
 }

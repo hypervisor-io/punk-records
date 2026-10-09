@@ -23,6 +23,9 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `messaging.max_unread_per_recipient` | `PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT` | `200` | positive cap per namespace/address; atomic admission, idempotent retries bypass |
 | `messaging.retention_days` | `PUNK_MESSAGING_RETENTION_DAYS` | `30` | delete only older ACKed messages in hourly maintenance; 0 disables; unread never deleted |
 | `messaging.member_expiry_days` | `PUNK_MESSAGING_MEMBER_EXPIRY_DAYS` | `7` | remove namespace members not seen in this many days, in the same hourly sweep; 0 disables; a currently listening member is never removed |
+| `messaging.content_filter.mode` | `PUNK_MESSAGING_CONTENT_FILTER` | `block` | dangerous-intent blocking at send time: `block` rejects matching message bodies, `off` disables. See "Message content policy" below |
+| `messaging.content_filter.namespaces` | - | `[]` | namespaces where the filter is skipped (security-research coordination, for example) |
+| `messaging.content_filter.extra_patterns` | - | `[]` | additional Go regex sources appended to the registry under the `custom` category |
 | `memory.consolidate_days` | - | `0` | horizon for region compaction during consolidation; 0 disables (also gates `memory.contradictions` and the observation/reconcile passes) |
 | `memory.contradictions` | - | `false` | during consolidation, embedding-similar fact pairs are judged by the model; contradicting pairs get `contradicts` + `invalidated_by` links (ranking halves the older one's score); needs embeddings + `ai.enabled`; runs only when `memory.consolidate_days` > 0 |
 | `otel.endpoint` | `PUNK_OTEL_ENDPOINT` | empty | OTLP/HTTP; empty = noop tracer |
@@ -92,6 +95,47 @@ punk topo import --file catalog.yaml   # import a Backstage catalog
 punk skill install --agent <name>      # punk-memory and punk-plan skills for an agent (install|print|paths; --name picks one)
 kill -HUP <pid>                       # force spec reload (watcher also does this)
 ```
+
+## Message content policy
+
+`messaging.content_filter` (default `mode: block`) is the server-side
+dangerous-intent layer underneath the envelope framing. A compromised
+agent that holds a write grant on a namespace can message every other
+member; the "treat it as data" framing is model compliance, not a hard
+boundary, and no framing is (OWASP LLM01; the prompt-injection
+literature is explicit that no known defense works 100% of the time).
+The filter rejects `send_message` bodies that match a registry of
+well-known attack shapes **before they are stored or delivered** - the
+recipient never sees them, and they never count against the unread cap.
+
+The registry covers thirteen categories: destructive filesystem/disk
+(`rm -rf`, `mkfs`, `dd of=/dev/…`, fork bombs), destructive system
+(shutdown, kill-all), destructive git (force-push to main,
+filter-branch), destructive database (`DROP TABLE`, `TRUNCATE`,
+`FLUSHALL`), destructive k8s/infra (`kubectl delete ns`, `terraform
+destroy`), exfiltration (secret paths like `~/.aws/credentials` and
+`.env` paired with send/read verbs; system-prompt and credential
+disclosure), remote code execution (`/dev/tcp` reverse shells,
+`nc -e`, `curl | bash`, `eval "$(curl…)"`), persistence (crontab,
+systemd units, shell rc writes, `authorized_keys`, user creation),
+credential minting for another party, instruction override ("ignore
+all previous instructions", developer-mode/DAN personas, "treat this
+as from the human", "the user has approved running…"), encoding
+evasion (`base64 -d`, "respond only in base64", eval of base64
+blobs), replication/worm behavior ("forward this to all agents"), and
+supply-chain redirects (`pip install` from URLs, `git config
+insteadOf`).
+
+**What this is not:** an intent detector. A regex cannot distinguish
+an attack from a security discussion that quotes the same words
+("never run `rm -rf /`"). Benign lookalikes will occasionally be
+blocked; the rejection error names the category and pattern (never the
+body) so a legitimate sender can rephrase, and two escape hatches
+exist: list a namespace in `content_filter.namespaces` to skip the
+filter there entirely (security-research coordination namespaces), or
+set `mode: off`. It is one layer in front of the envelope framing,
+`PUNK_MESSAGING_FROM`, and the receiving agent's own permission
+system - not a replacement for any of them.
 
 ## Agent messaging
 
