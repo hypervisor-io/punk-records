@@ -3316,6 +3316,30 @@ func printCodexVerify(ctx context.Context, serverURL, apiKey string, hookScopes 
 	return nil
 }
 
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectOpenCodeVerifyUsesConfiguredAPIKeyEnv,TestConnectOpenCodeVerifyMissingConfiguredAPIKeyEnvFailsClosed
+// connectVerifyAPIKey selects the credential the newly written MCP entry
+// will use. An explicit environment reference wins over ResolveServer's
+// generic CLI credential; a missing selected variable fails before any
+// network probe and never falls back to a different identity.
+func connectVerifyAPIKey(apiKey, apiKeyEnv string) (string, error) {
+	if apiKeyEnv == "" {
+		return apiKey, nil
+	}
+	selected, ok := os.LookupEnv(apiKeyEnv)
+	if !ok || selected == "" {
+		return "", fmt.Errorf("connect verify: configured API-key environment variable $%s is missing or empty; the MCP connection was written but not verified", apiKeyEnv)
+	}
+	return selected, nil
+}
+
+func printConnectVerify(ctx context.Context, serverURL, apiKey, apiKeyEnv string, sides verifySides) error {
+	selected, err := connectVerifyAPIKey(apiKey, apiKeyEnv)
+	if err != nil {
+		return err
+	}
+	return printVerify(ctx, serverURL, selected, sides)
+}
+
 // printVerify proves an MCP session to the server works and - only when
 // both sides of the connection are known - that the namespace the hooks
 // capture into for the current directory is the one MCP sessions
@@ -3377,7 +3401,7 @@ func cmdConnectClaudeCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server or its permission rule")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
@@ -3481,7 +3505,7 @@ func cmdConnectClaudeCode(args []string) error {
 		fmt.Println("punk: restart Claude Code or start a new session to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, settingsPath, false, projNS, mcpPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides(projNS, settingsPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3572,7 +3596,7 @@ func cmdConnectCursor(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcpServers.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (sessionStart context catch-up, stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
@@ -3669,7 +3693,7 @@ func cmdConnectCursor(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
 		if *verify {
-			if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
+			if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 				return err
 			}
 		}
@@ -3679,7 +3703,7 @@ func cmdConnectCursor(args []string) error {
 		return nil
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides(projNS, hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3752,8 +3776,8 @@ func cmdConnectOpenCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
-	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
+	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer {env:NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -3790,7 +3814,7 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", pluginPath, false, "", configPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", pluginPath, false, "", configPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -3823,7 +3847,7 @@ func cmdConnectPi(args []string) error {
 	project := fs.Bool("project", false, "write ./.pi/extensions/punk-memory.ts instead of the global ~/.pi/agent/extensions/punk-memory.ts; bakes the remote-derived namespace into the extension")
 	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
 	verify := fs.Bool("verify", false, "after writing the extension, call the server's /v1/agent/namespace with this machine's credentials (pi tools use the HTTP API, not MCP)")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3921,7 +3945,7 @@ func cmdConnectAntigravity(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (PreInvocation context on every invocation, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -3997,7 +4021,7 @@ func cmdConnectAntigravity(args []string) error {
 	if *verify {
 		// ConnectAntigravity has no namespace-pin variant: the hooks are
 		// always unpinned, so only the MCP side carries projNS.
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", hooksPath, false, projNS, mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -4063,7 +4087,7 @@ func cmdConnectCopilot(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -4133,7 +4157,7 @@ func cmdConnectCopilot(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", hooksPath, false, "", mcpPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", hooksPath, false, "", mcpPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -4177,7 +4201,7 @@ func cmdConnectHermes(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	messaging := fs.Bool("messaging", false, "also wire a punk hook inbox entry (pre_llm_call per-turn context catch-up) so agent messages reach this session; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -4235,7 +4259,7 @@ func cmdConnectHermes(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", path, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", path, false, "", path, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", path, false, "", path, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -4272,7 +4296,7 @@ func cmdConnectOpenClaw(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer ${NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4327,7 +4351,7 @@ func cmdConnectOpenClaw(args []string) error {
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", configPath, changedWord(mcpChanged))
 	}
 	if *verify {
-		if err := printVerify(context.Background(), serverURL, apiKey, connectVerifySides("", pluginDir, false, "", configPath, *noMCP)); err != nil {
+		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", pluginDir, false, "", configPath, *noMCP)); err != nil {
 			return err
 		}
 	}
@@ -4356,7 +4380,7 @@ func cmdConnectCodex(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "name of the env var Codex reads the bearer token from (default PUNK_API_KEY when a key is configured)")
 	agent := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the punk-memory skill")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
 	messaging := fs.Bool("messaging", false, "also wire punk hook inbox entries (SessionStart/UserPromptSubmit context catch-up, Stop continuation) so agent messages reach this session; see docs/agent-messaging.md")
 	wake := fs.Bool("wake", false, "also wire native wake hooks (SessionStart/UserPromptSubmit/Stop ensure, SessionEnd stop) so new agent messages nudge this idle session through its native transport; implies --messaging; Unix only; see docs/agent-messaging.md")
 	if err := fs.Parse(args); err != nil {
@@ -4443,7 +4467,11 @@ func cmdConnectCodex(args []string) error {
 	}
 	if *verify {
 		hookScopes, mcpScopes := codexVerifyScopes(codexHome, punkPath)
-		if err := printCodexVerify(context.Background(), serverURL, apiKey, hookScopes, mcpScopes); err != nil {
+		verifyAPIKey, err := connectVerifyAPIKey(apiKey, *apiKeyEnv)
+		if err != nil {
+			return err
+		}
+		if err := printCodexVerify(context.Background(), serverURL, verifyAPIKey, hookScopes, mcpScopes); err != nil {
 			return err
 		}
 	}

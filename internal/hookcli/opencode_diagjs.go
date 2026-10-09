@@ -15,7 +15,7 @@ package hookcli
 // (kept out of any future Sprintf-of-the-splice footgun), no template
 // literals and no U+2028/U+2029. It expects the host template to already
 // define punkFetch(path, init) (bounded, never-rejecting,
-// parsed-JSON-or-null), messagingEnabled, punkSessions, punkNamespaceCache,
+// parsed-JSON-or-null), messagingEnabled, punkSessions,
 // punkServerURL, fnv1aHex, and the shared inbox machinery
 // (punkInboxEnvInt, punkInboxStAlive, PUNK_INBOX_WAKE_WINDOW_MS_DEFAULT,
 // PUNK_INBOX_WAKE_MAX_DEFAULT, punkInboxLeaseMs). Every identifier it
@@ -239,7 +239,7 @@ const openCodeBridgeExtrasJS = `
   // how many ids were restored.
   async function punkRecoveryRestore(ns, st) {
     try {
-      if (!messagingEnabled || !st || st.punkRestored) return 0
+      if (!messagingEnabled || !punkInboxStAlive(st) || st.ns !== ns || st.punkRestored) return 0
       st.punkRestored = true
       if (!(await punkRecoveryModules())) return 0
       // TEST-ONLY pacing knob: hold the restore window open so tests can
@@ -249,6 +249,7 @@ const openCodeBridgeExtrasJS = `
       // not wait the delay out.
       const delayMs = punkInboxEnvInt("PUNK_MESSAGING_RESTORE_DELAY_MS", 0)
       if (delayMs > 0) await punkInboxCancellableSleep(st, delayMs)
+      if (!punkInboxStAlive(st)) return 0
       const file = punkRecoveryFile(ns, st.agent)
       if (!file) return 0
       let size = 0
@@ -265,7 +266,7 @@ const openCodeBridgeExtrasJS = `
       } catch (err) {
         return 0
       }
-      if (raw.length > PUNK_RECOVERY_MAX_FILE_BYTES) return 0
+      if (!punkInboxStAlive(st) || raw.length > PUNK_RECOVERY_MAX_FILE_BYTES) return 0
       const rec = JSON.parse(raw)
       if (!rec || typeof rec !== "object") return 0
       if (rec.server !== punkServerURL() || rec.namespace !== ns || rec.address !== st.agent) return 0
@@ -398,11 +399,12 @@ const openCodeBridgeExtrasJS = `
   // purely in memory.
   function punkRecoverySave(ns, st) {
     try {
-      if (!messagingEnabled || !st || st.punkRecoveryBroken) return Promise.resolve()
+      if (!messagingEnabled || !punkInboxStAlive(st) || st.ns !== ns || st.punkRecoveryBroken) return Promise.resolve()
       const run = async () => {
         try {
           if (st.punkRecoveryBroken || !punkInboxStAlive(st)) return
           if (!(await punkRecoveryModules())) return
+          if (!punkInboxStAlive(st)) return
           const file = punkRecoveryFile(ns, st.agent)
           if (!file) return
           const dir = file.slice(0, file.lastIndexOf("/"))
@@ -422,6 +424,7 @@ const openCodeBridgeExtrasJS = `
             } catch (err) {
               cur = null
             }
+            if (!punkInboxStAlive(st)) return
             const now = Date.now()
             const windowMs =
               punkInboxEnvInt("PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS", PUNK_INBOX_WAKE_WINDOW_MS_DEFAULT / 1000) * 1000
@@ -522,6 +525,7 @@ const openCodeBridgeExtrasJS = `
             let renamed = false
             try {
               await punkRecoveryFsMod.promises.writeFile(tmp, JSON.stringify(rec) + "\n", { mode: 384 })
+              if (!punkInboxStAlive(st)) return
               await punkRecoveryFsMod.promises.rename(tmp, file)
               renamed = true
             } finally {
@@ -555,16 +559,6 @@ const openCodeBridgeExtrasJS = `
     }
   }
 
-  // punkDiagNamespace: the namespace a diagnostics POST targets - the
-  // resolved cache (or the PUNK_NAMESPACE override) once registration
-  // confirmed it. Empty means "not known yet": reports are skipped rather
-  // than guessed at.
-  function punkDiagNamespace() {
-    if (punkNamespaceCache) return punkNamespaceCache
-    const o = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE
-    return o || ""
-  }
-
   // punkDiagWindowWakeCount: the wake stamps still inside the sliding
   // window - the budget the operator sees.
   function punkDiagWindowWakeCount(st) {
@@ -593,8 +587,8 @@ const openCodeBridgeExtrasJS = `
   // second does not dodge the dedup window.
   function punkDiagReport(st, state, opts) {
     try {
-      if (!messagingEnabled || !st || !st.registered) return
-      const ns = punkDiagNamespace()
+      if (!messagingEnabled || !punkInboxStAlive(st) || !st.registered || st.bindingPending) return
+      const ns = st.ns
       if (!ns) return
       const o = opts || {}
       const now = Date.now()
@@ -643,6 +637,7 @@ const openCodeBridgeExtrasJS = `
             await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/messages/diagnostics", {
               method: "POST",
               body: JSON.stringify(next),
+              signal: st.abortController.signal,
             })
           }
         } catch (err) {

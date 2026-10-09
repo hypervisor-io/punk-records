@@ -30,7 +30,7 @@ func isPunkMCPEntry(entry any) bool {
 // refusing to overwrite a foreign punk entry unless force. isOurs decides
 // whether an existing entry was written by punk. seed is merged into a
 // freshly created file (schema pointers and the like).
-func upsertServerEntry(path, section string, entry map[string]any, isOurs func(any) bool, seed map[string]any, force bool) (bool, error) {
+func upsertServerEntry(path, section string, entry map[string]any, isOurs func(any) bool, seed map[string]any, force, private bool) (bool, error) {
 	cfg, existing, err := loadSettings(path)
 	if err != nil {
 		return false, err
@@ -58,11 +58,17 @@ func upsertServerEntry(path, section string, entry map[string]any, isOurs func(a
 	if err != nil {
 		return false, err
 	}
-	if existing != nil && string(out) == string(existing) {
+	if existing != nil && string(out) == string(existing) && (!private || !privateModeNeedsRepair(path)) {
 		return false, nil
 	}
-	if err := writePreservingSymlinkAndMode(path, out, 0o644); err != nil {
-		return false, err
+	var writeErr error
+	if private {
+		writeErr = writePrivatePreservingSymlinkAndMode(path, out)
+	} else {
+		writeErr = writePreservingSymlinkAndMode(path, out, 0o644)
+	}
+	if writeErr != nil {
+		return false, writeErr
 	}
 	return true, nil
 }
@@ -73,9 +79,13 @@ func upsertServerEntry(path, section string, entry map[string]any, isOurs func(a
 type MCPEntryOpts struct {
 	ServerURL string
 	APIKey    string // literal token, written as-is
-	APIKeyEnv string // when set, written as ${NAME} for hosts that expand env vars; wins over APIKey
+	APIKeyEnv string // when set, written in the target host's env-reference syntax; wins over APIKey
 	Namespace string
 	Agent     string
+}
+
+func hasLiteralMCPToken(o MCPEntryOpts) bool {
+	return o.APIKeyEnv == "" && o.APIKey != ""
 }
 
 func mcpHeaders(o MCPEntryOpts) map[string]any {
@@ -112,7 +122,7 @@ func withHeaders(entry map[string]any, o MCPEntryOpts) map[string]any {
 // An existing punk entry that punk did not write is refused unless force.
 func ConnectClaudeCodeMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
 	return upsertServerEntry(configPath, "mcpServers",
-		withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL)}, o), isPunkMCPEntry, nil, force)
+		withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL)}, o), isPunkMCPEntry, nil, force, hasLiteralMCPToken(o))
 }
 
 // ConnectClineMCP uses the extension's explicit streamableHttp transport and
@@ -130,7 +140,7 @@ func ConnectClineMCP(configPath string, o MCPEntryOpts, force bool) (bool, error
 	if o.APIKeyEnv != "" {
 		entry["headers"].(map[string]any)["Authorization"] = "Bearer ${env:" + o.APIKeyEnv + "}"
 	}
-	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force)
+	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force, hasLiteralMCPToken(o))
 }
 
 // ConnectCursorMCP registers punk in a Cursor mcp.json ({"mcpServers":{"punk":{"url":...}}}).
@@ -143,7 +153,7 @@ func ConnectCursorMCP(mcpPath string, o MCPEntryOpts, force bool) (bool, error) 
 		u, _ := m["url"].(string)
 		return strings.Contains(u, "/mcp")
 	}
-	return upsertServerEntry(mcpPath, "mcpServers", withHeaders(map[string]any{"url": mcpEndpoint(o.ServerURL)}, o), ours, nil, force)
+	return upsertServerEntry(mcpPath, "mcpServers", withHeaders(map[string]any{"url": mcpEndpoint(o.ServerURL)}, o), ours, nil, force, hasLiteralMCPToken(o))
 }
 
 // ConnectOpenCodeMCP registers punk in an opencode.json ({"mcp":{"punk":{"type":"remote","url":...,"enabled":true}}}).
@@ -156,9 +166,13 @@ func ConnectOpenCodeMCP(configPath string, o MCPEntryOpts, force bool) (bool, er
 		u, _ := m["url"].(string)
 		return m["type"] == "remote" && strings.Contains(u, "/mcp")
 	}
-	return upsertServerEntry(configPath, "mcp",
-		withHeaders(map[string]any{"type": "remote", "url": mcpEndpoint(o.ServerURL), "enabled": true}, o),
-		ours, map[string]any{"$schema": "https://opencode.ai/config.json"}, force)
+	entry := withHeaders(map[string]any{"type": "remote", "url": mcpEndpoint(o.ServerURL), "enabled": true}, o)
+	// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectOpenCodeMCPUsesOpenCodeEnvSyntax
+	if o.APIKeyEnv != "" {
+		entry["headers"].(map[string]any)["Authorization"] = "Bearer {env:" + o.APIKeyEnv + "}"
+	}
+	return upsertServerEntry(configPath, "mcp", entry,
+		ours, map[string]any{"$schema": "https://opencode.ai/config.json"}, force, hasLiteralMCPToken(o))
 }
 
 // EnsureClaudePermission appends rule to permissions.allow in a Claude
@@ -208,7 +222,7 @@ func EnsureClaudePermission(settingsPath, rule string) (changed bool, err error)
 // {"mcpServers":{"punk":{"type":"http","url":...,"headers":{...},"tools":["*"]}}}.
 func ConnectCopilotMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
 	entry := withHeaders(map[string]any{"type": "http", "url": mcpEndpoint(o.ServerURL), "tools": []any{"*"}}, o)
-	return upsertServerEntry(configPath, "mcpServers", entry, isPunkMCPEntry, nil, force)
+	return upsertServerEntry(configPath, "mcpServers", entry, isPunkMCPEntry, nil, force, hasLiteralMCPToken(o))
 }
 
 // ConnectAntigravityMCP registers punk in an Antigravity mcp_config.json.
@@ -225,7 +239,7 @@ func ConnectAntigravityMCP(configPath string, o MCPEntryOpts, force bool) (bool,
 		return strings.Contains(u, "/mcp")
 	}
 	entry := withHeaders(map[string]any{"serverUrl": mcpEndpoint(o.ServerURL)}, o)
-	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force)
+	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force, hasLiteralMCPToken(o))
 }
 
 // ConnectOpenClawMCP registers punk under mcp.servers.punk in OpenClaw's
@@ -255,11 +269,18 @@ func ConnectOpenClawMCP(configPath string, o MCPEntryOpts, force bool) (bool, er
 	if err != nil {
 		return false, err
 	}
-	if existing != nil && string(out) == string(existing) {
+	private := hasLiteralMCPToken(o)
+	if existing != nil && string(out) == string(existing) && (!private || !privateModeNeedsRepair(configPath)) {
 		return false, nil
 	}
-	if err := writePreservingSymlinkAndMode(configPath, out, 0o644); err != nil {
-		return false, err
+	var writeErr error
+	if private {
+		writeErr = writePrivatePreservingSymlinkAndMode(configPath, out)
+	} else {
+		writeErr = writePreservingSymlinkAndMode(configPath, out, 0o644)
+	}
+	if writeErr != nil {
+		return false, writeErr
 	}
 	return true, nil
 }

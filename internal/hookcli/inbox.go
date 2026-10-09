@@ -25,10 +25,11 @@ import (
 // punk hook inbox (task M5) is the single client-side delivery path for
 // agent messages on every subprocess-hook client: it resolves the
 // session address from the client's native stdin payload, self-registers
-// that address as a namespace member once, leases the unread messages,
-// renders them into the fixed untrusted envelope, hands that to the
-// client's reply writer, and acknowledges only what the writer says
-// reached a client-consumed field after the reply was written to stdout.
+// that address as a namespace member before each eligible poll, leases
+// unread messages, renders them into the fixed untrusted envelope, hands
+// that to the client's reply writer, and acknowledges only what the
+// writer says reached a client-consumed field after the reply was
+// written to stdout.
 //
 // Client adapters (M6-M9) never touch this file: each registers an
 // InboxClient from its own inbox_reply_<client>.go init() through
@@ -526,11 +527,12 @@ var inboxLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", 
 // whitespace and invisible format characters, starts with an envelope
 // marker (case-insensitive), so a body can never open, close or forge
 // a marker. Every line-break variant is normalised to \n first.
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=message-framing test=TestInboxNeutralisesForgedAckFooter
 func neutraliseBody(body string) string {
 	lines := strings.Split(inboxLineBreaks.Replace(body), "\n")
 	for i, l := range lines {
 		t := strings.TrimLeftFunc(l, func(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) })
-		for _, mk := range []string{InboxMarkerOpen, strings.TrimSpace(InboxMarkerClose), InboxMarkerHeader, strings.TrimSpace(InboxMarkerOpen)} {
+		for _, mk := range []string{InboxMarkerOpen, strings.TrimSpace(InboxMarkerClose), InboxMarkerHeader, strings.TrimSpace(InboxMarkerOpen), inboxFooterAck} {
 			if len(t) >= len(mk) && strings.EqualFold(t[:len(mk)], mk) {
 				lines[i] = "> " + l
 				break
@@ -1095,14 +1097,17 @@ func (r *inboxRun) deliver() error {
 	}
 
 	st := readInboxState(r.state)
+	// Membership can expire independently of the local state file. Confirm
+	// it on every eligible poll with an idempotent plain registration; this
+	// must never bind or rebind the inbox. RegisteredAt is historical only.
+	role := r.c.Name + " session " + clipRunes(headerField(r.payload.CWD), 200)
+	if fallback {
+		role += " (no session id: cwd-derived address)"
+	}
+	if err := r.api.register(role); err != nil {
+		return r.failOpen(fmt.Errorf("register %s in %s: %w", addr, ns, err))
+	}
 	if st.RegisteredAt == 0 {
-		role := r.c.Name + " session " + clipRunes(headerField(r.payload.CWD), 200)
-		if fallback {
-			role += " (no session id: cwd-derived address)"
-		}
-		if err := r.api.register(role); err != nil {
-			return r.failOpen(fmt.Errorf("register %s in %s: %w", addr, ns, err))
-		}
 		now := inboxNow().Unix()
 		if err := updateInboxState(r.state, func(s *inboxState) {
 			s.Server, s.Namespace, s.Address, s.RegisteredAt = r.opts.BaseURL, ns, addr, now
@@ -1111,7 +1116,7 @@ func (r *inboxRun) deliver() error {
 		}
 		st.RegisteredAt = now
 	}
-	// Membership is confirmed (registered now or by an earlier hook):
+	// Membership is confirmed for this invocation:
 	// arm the one best-effort diagnostic report. The deferred flush runs
 	// after the ACK outcome below, so the snapshot always names the final
 	// state and no report can precede an ACK. Paths that returned earlier

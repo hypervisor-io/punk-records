@@ -443,11 +443,19 @@ func ConnectHermesMCP(configPath string, o MCPEntryOpts, force bool) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("encode config: %w", err)
 	}
-	if existing != nil && bytes.Equal(out, existing) {
+	// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectHermesMCPLiteralTokenPermissionMatrix
+	private := hasLiteralMCPToken(o)
+	if existing != nil && bytes.Equal(out, existing) && (!private || !privateModeNeedsRepair(configPath)) {
 		return false, nil
 	}
-	if err := writePreservingSymlinkAndMode(configPath, out, 0o644); err != nil {
-		return false, err
+	var writeErr error
+	if private {
+		writeErr = writePrivatePreservingSymlinkAndMode(configPath, out)
+	} else {
+		writeErr = writePreservingSymlinkAndMode(configPath, out, 0o644)
+	}
+	if writeErr != nil {
+		return false, writeErr
 	}
 	return true, nil
 }

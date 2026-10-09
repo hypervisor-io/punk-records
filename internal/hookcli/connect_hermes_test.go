@@ -365,7 +365,7 @@ func TestConnectHermesMCP(t *testing.T) {
 	if err := os.WriteFile(p, []byte("model: sonnet\nmcp_servers:\n  github:\n    command: gh-mcp\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "prk_h"}
+	o := MCPEntryOpts{ServerURL: "https://punk.example.com", APIKey: "dummy-hermes-token"}
 	if changed, err := ConnectHermesMCP(p, o, false); err != nil || !changed {
 		t.Fatal(changed, err)
 	}
@@ -382,12 +382,92 @@ func TestConnectHermesMCP(t *testing.T) {
 	if punk["url"] != "https://punk.example.com/mcp?toolset=agent" || servers["github"] == nil {
 		t.Fatalf("servers = %v", servers)
 	}
-	if punk["headers"].(map[string]any)["Authorization"] != "Bearer prk_h" {
+	if punk["headers"].(map[string]any)["Authorization"] != "Bearer dummy-hermes-token" {
 		t.Fatalf("headers = %v", punk["headers"])
 	}
 	if changed, _ := ConnectHermesMCP(p, o, false); changed {
 		t.Fatal("idempotent")
 	}
+}
+
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectHermesMCPLiteralTokenPermissionMatrix
+func TestConnectHermesMCPLiteralTokenPermissionMatrix(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		if _, err := ConnectHermesMCP(p, MCPEntryOpts{ServerURL: "https://punk.example.test", APIKey: "dummy-hermes-token"}, false); err != nil {
+			t.Fatal(err)
+		}
+		requirePrivateConfig(t, p)
+	})
+
+	t.Run("existing public with unrelated config", func(t *testing.T) {
+		p := writeHermesFile(t, "model: hermes-test\n")
+		if _, err := ConnectHermesMCP(p, MCPEntryOpts{ServerURL: "https://punk.example.test", APIKey: "dummy-hermes-token"}, false); err != nil {
+			t.Fatal(err)
+		}
+		requirePrivateConfig(t, p)
+		_, raw := readHermesConfig(t, p)
+		if !strings.Contains(raw, "model: hermes-test") {
+			t.Fatalf("unrelated Hermes config was lost:\n%s", raw)
+		}
+	})
+
+	t.Run("byte equal mode repair", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		o := MCPEntryOpts{ServerURL: "https://punk.example.test", APIKey: "dummy-hermes-token"}
+		if _, err := ConnectHermesMCP(p, o, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		changed, err := ConnectHermesMCP(p, o, false)
+		if err != nil || !changed {
+			t.Fatalf("mode-only repair: changed=%v err=%v", changed, err)
+		}
+		requirePrivateConfig(t, p)
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "shared.yaml")
+		link := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(target, []byte("model: hermes-test\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ConnectHermesMCP(link, MCPEntryOpts{ServerURL: "https://punk.example.test", APIKey: "dummy-hermes-token"}, false); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("Hermes config symlink was replaced: info=%v err=%v", info, err)
+		}
+		requirePrivateConfig(t, target)
+	})
+
+	t.Run("env reference keeps existing privacy and omits literal", func(t *testing.T) {
+		p := writeHermesFile(t, "model: hermes-test\n")
+		if err := os.Chmod(p, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ConnectHermesMCP(p, MCPEntryOpts{
+			ServerURL: "https://punk.example.test",
+			APIKey:    "dummy-must-not-be-written",
+			APIKeyEnv: "HERMES_TEST_API_KEY",
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+		requirePrivateConfig(t, p)
+		_, raw := readHermesConfig(t, p)
+		if strings.Contains(raw, "dummy-must-not-be-written") {
+			t.Fatal("Hermes env auth must not persist the literal fallback")
+		}
+		if !strings.Contains(raw, "Bearer ${HERMES_TEST_API_KEY}") {
+			t.Fatalf("Hermes env reference missing:\n%s", raw)
+		}
+	})
 }
 
 // --- --messaging inbox wiring (M7 addendum) ----------------------------

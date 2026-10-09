@@ -265,7 +265,7 @@ only the storage engine changes. Move an existing SQLite brain over with
 
 Punk Records doubles as persistent memory for the agents you already run: a
 hook or plugin captures what the agent does, and the next session starts with
-the project's memory injected as context. Six of the eight targets below are
+the project's memory injected as context. Eight of the ten targets below are
 coding agents; Hermes Agent and OpenClaw are general assistants with their own
 hook and plugin systems, wired the same way.
 
@@ -276,9 +276,9 @@ punk connect claude-code  # or cursor, opencode, pi, antigravity, copilot, herme
 
 `punk connect claude-code` (also `cursor`, `opencode`) now wires three things: the capture and injection hooks, the punk MCP server entry (`/mcp?toolset=agent`, the lean session toolset), and, for Claude Code, the `mcp__punk` permission rule so calls never prompt. Add `--verify` to open a real MCP session and call `whoami` before you trust it. Use `--no-mcp` to keep the old hooks-only behaviour and `--force` to replace an `mcpServers.punk` entry punk did not write.
 
-Inside a session the agent can omit `namespace` on every tool: it resolves from the workspace root the client advertises, exactly as the hooks derive it. `whoami` shows the result. `remember_many` writes up to 200 facts in one call; the stdio server (`punk mcp`) also accepts `remember_document {path}`. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
+Inside an MCP session, `whoami` shows the default namespace and routing identity. Tools that accept an omitted namespace resolve it from the header, advertised workspace root, then server default; inspect the tool schema rather than assuming every parameter is optional. Hooks and project pins can resolve differently. Pass an agreed coordination namespace explicitly. Registration creates region membership on demand but, under enforced HTTP authorization, requires a write grant first; it neither grants access nor changes the MCP defaults. `search_skills` and `load_skill` have a separate skill-index default and may need a separate read grant. `remember_many` writes up to 200 facts; `remember_document` accepts text or source sections, and a local path on stdio only. Subscribe to `punk://memory/<namespace>/<prefix>` to be notified of changes without polling.
 
-Agent messaging is opt-in: enable server `messaging.enabled` (or `PUNK_MESSAGING=1`), then `punk connect <subprocess-client> --messaging`. Pi/OpenCode/OpenClaw use ordinary connect plus runtime `PUNK_MESSAGING=1`, not a connect flag. Message tools use explicit session addresses and namespace/sender arguments, which can differ from MCP identity defaults. `list_region_members` orders live inboxes first (`listening`, `last_seen_at`; `active_only: true` filters), because a namespace keeps every address ever registered. See the [delivery matrix and limits](docs/agent-messaging.md#client-delivery-matrix). Default lean tool schemas and guidance remain unchanged; the server switch hides MCP tools, not authorized HTTP routes.
+Agent messaging is opt-in: enable server `messaging.enabled` (or `PUNK_MESSAGING=1`), then `punk connect <subprocess-client> --messaging`. Pi/OpenCode/OpenClaw use ordinary connect plus runtime `PUNK_MESSAGING=1`, not a connect flag. Message tools use explicit session addresses and namespace/sender arguments, which can differ from MCP identity defaults. `list_region_members` orders live inboxes first (`listening`, `last_seen_at`; `active_only: true` filters); stale memberships expire under the server's configured policy. To move your own session's inbox, use `register` with its actual address, the authorized namespace and `inbox: true`. See [dynamic binding](docs/agent-messaging.md#dynamic-inbox-binding) for pin precedence and delivery timing. The server switch hides MCP message tools, not authorized HTTP routes. Reading, ACK, task completion and review approval are separate operations.
 
 | Target | Capture hooks | In-session tools | Where the tools come from |
 | --- | --- | --- | --- |
@@ -293,9 +293,11 @@ Agent messaging is opt-in: enable server `messaging.enabled` (or `PUNK_MESSAGING
 | cline | native event files | MCP | `~/.cline/data/settings/cline_mcp_settings.json`, `type:streamableHttp`; `CLINE_MCP_SETTINGS_PATH` overrides |
 | pi | extension | extension tools | `punk_whoami`, `punk_recall`, `punk_search`, `punk_remember` in the same extension file |
 
-Established targets accept `--verify` (real round trip), `--no-mcp` (hooks only), `--force` (replace a foreign `punk` entry), `--api-key-env NAME`, `--agent NAME`, and `--no-skill`. All but `openclaw` and `hermes` also accept `--project`, which writes project-local files and derives the namespace from the git remote. Cline supports `--project`, `--messaging`, `--no-mcp`, `--force`, `--api-key-env`, and `--agent`, but does not install skills or expose `--verify`; use `punk connect verify` separately. Its native file hooks refuse to overwrite user executables. Cline 4.1.20+ receives catch-up on TaskStart/UserPromptSubmit only, without stop continuation or idle wake. See [agent messaging](docs/agent-messaging.md#cline-file-hooks-catch-up-only).
+The MCP connectors except Cline accept `--verify` (MCP round trip), `--no-mcp`, `--force`, `--api-key-env NAME`, `--agent NAME`, and `--no-skill`. Pi instead installs four native HTTP memory tools, not MCP: its `--verify` checks HTTP namespace resolution, and it has no `--no-mcp`, `--force`, `--api-key-env` or `--agent` flag. Global `punk connect <target>` is enough to install; `--project` optionally changes installation scope, not namespace permissions. Hermes and OpenClaw do not accept `--project`. Cline supports `--project`, `--messaging`, `--no-mcp`, `--force`, `--api-key-env`, and `--agent`, but installs no skills and has no connect `--verify`; standalone `punk connect verify` probes the server, not its installed file hooks. Cline 4.1.20+ receives catch-up on TaskStart/UserPromptSubmit only, without stop continuation or idle wake. See [agent messaging](docs/agent-messaging.md#cline-file-hooks-catch-up-only).
 
-Every `punk connect <agent>` except Cline also installs two skills where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). `punk-memory` teaches namespaces, read routing, key conventions, claims and the `/tasks` coordination convention (the worker side: `list_tasks`, `claim_work`, `set_task_status`, `await_tasks`), feedback and compact output. `punk-plan` is the planner side: create a coordination namespace, write `/plan/summary`, conventions and one `/tasks/<id>` fact per task with `depends_on`, leave a `/plan/current` pointer in the repository namespace, hand workers a prompt, then gate with the task board, review each finished task, and release. A file you edited yourself is never overwritten. `punk skill print --agent <name> [--name punk-memory|punk-plan]` shows the text; `--no-skill` skips both.
+Every `punk connect <agent>` except Cline also installs two skills where that agent loads skills from (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.agents/skills` for OpenCode, Cursor, Copilot and OpenClaw, `~/.gemini/config/skills`, `~/.hermes/skills/memory`, `~/.pi/agent/skills`; `--project` writes the project-local equivalent). `punk-memory` teaches retrieval, capability discovery, namespace permissions, claims and task reporting. `punk-plan` covers planning and review; commits and delivery actions still require user authorization. Pi's skills distinguish its four memory tools from MCP-only claim operations. Files without the managed marker are preserved; retaining that marker allows regeneration of the whole file, including manual edits. Global Codex skill reconciliation additionally preserves differing existing copies. Back up custom content before refreshing. `punk skill print --agent <name> [--name punk-memory|punk-plan]` previews the render; `--messaging` adds optional messaging guidance and `--no-skill` skips installation during connect.
+
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=agent-guidance test=internal/hookcli/agent_guidance_test.go doc=README.md -->
 
 Codex asks once to trust the punk hook; with API keys enabled, export `PUNK_API_KEY` in the shell that starts Codex because Codex reads bearer tokens from the environment, not from a file.
 
@@ -372,8 +374,8 @@ What happens per session, whichever agent you wired up:
   runs a pass immediately, and `diagnose` reports
   `last_consolidated_at` + `writes_since_consolidation`
 
-A cross-project **profile card** rides every
-session-start block: stable facts and standing instructions about you,
+A cross-project **profile card** can be included in a
+session-start block when the caller can read `user-profile`: stable user-managed facts about you,
 kept under `/profile/` in the global `user-profile` namespace and capped
 at 40 entries. Manage it with:
 
@@ -440,7 +442,7 @@ on the version they started with). Skills are
 | Surface | What |
 |---|---|
 | REST `/v1` | tasks, proposals, memory, webhook intake, agent hooks - bearer-keyed (`punk apikey create`) |
-| MCP | `punk mcp` (stdio) or `/mcp` (HTTP): `submit_task`, `get_task`, `list_agents`, `remember`, `remember_document`, `remember_model`, `recall`, `recall_as_of`, `forget`, `search` (hybrid / scored / interleave / temporal / reranked / `max_tokens` / `expand` / `strategy`), `unified_search`, `triplet_search`, `reflect` (when a model is configured), `list_keys`, `list_tasks`, `await_tasks`, `set_task_status`, `register`, `list_models`, `list_entities`, `feedback`, `profile`, `diagnose`, `link` / `unlink` / `neighbors` |
+| MCP | `punk mcp` (stdio) or `/mcp` (HTTP). Connect selects the lean `agent` toolset: memory reads/writes, `search_skills`/`load_skill`, registration, taskboards, claims and feedback. Messaging adds four message tools and `list_region_members`. The `full` toolset adds domain-agent tasks, history, relationship editing, diagnostics and other operator tools; inspect `tools/list` for the actual server capabilities. |
 | A2A (in) | `POST /v1/a2a` (Agent2Agent v0.3 JSON-RPC + SSE): `message/send`, `message/stream`, `tasks/{get,cancel,resubscribe}`, push configs; card at `/.well-known/agent-card.json` |
 | A2A (out) | delegate to foreign agents: `punk a2a card\|send` (CLI) or the `delegate` MCP tool over `a2a.remotes` |
 | CLI | `serve` / `migrate` / `validate` / `apikey` / `export` + `import` (memory JSONL) / `a2a` / `itbench` / `membench` / `hook` / `connect` / `skills` |
@@ -456,6 +458,14 @@ With `ai.embeddings.provider: local`, punk embeds in-process with a pinned stati
 Agents coordinate through `/tasks/<id>` facts; the task board reads them back as data. `list_tasks` (MCP) or `GET /v1/namespaces/<ns>/tasks` returns one row per task with its parsed state (`pending`, `in_progress`, `review`, `blocked`, `done`), the first line of its status, `depends_on`, the live claim holder and lease, whether it is `ready` (pending, unclaimed, dependencies done), plus `next`, per-state counts and the region's members with `last_seen_at`.
 
 `await_tasks` (MCP) or `GET /v1/namespaces/<ns>/tasks?wait=55` blocks until a task, status or claim changes in the namespace, then returns the board with `changed` and the keys that fired. `set_task_status` (MCP) or `POST /v1/namespaces/<ns>/tasks/<id>/status` writes the status fact in the canonical shape with structured attributes; `done` and `blocked` release the caller's claim on the task.
+
+Give each concurrent worker a session-unique coordination ID, not a shared
+`user@host`. Use it consistently for registration, claim/release `holder` and
+status `agent`. Claim the task and shared files before editing; renew leases
+before expiry. A heartbeat does not renew a lease, and an old member timestamp
+does not cancel a live claim. Check `released_claim` on terminal status writes
+and release separate file claims yourself. A status fact, message ACK or worker
+completion report is not independent evidence that the work passed review.
 
 ```json
 {
