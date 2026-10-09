@@ -14,6 +14,11 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      # Generated plugin and hook tests must execute, not silently skip Node.
+      # codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=verification test=TestPluginBindingRebindColdState
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
       - name: Build
         run: make build
       - name: Test
@@ -46,6 +51,9 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
       - name: Store tests against Postgres
         env:
           PUNK_TEST_PG_DSN: postgres://punk:punk@localhost:5432/punk_test

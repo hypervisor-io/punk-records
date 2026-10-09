@@ -140,8 +140,8 @@ func jsStringLiteral(s string) string {
 //     Session}} and session.status as {properties:{sessionID,
 //     status:{type}}}. The bridge binds each observed/restored session to
 //     the agent address opencode:<sessionID>, registers it as a member of
-//     the punk namespace (PUNK_NAMESPACE overrides the cwd-derived
-//     /v1/agent/namespace resolution) with bounded autonomous retries
+//     the punk namespace (PUNK_NAMESPACE overrides the per-address binding
+//     returned by /v1/agent/namespace) with bounded autonomous retries
 //     until the server confirms, listens on the addressed SSE inbox
 //     stream (bounded connect + idle-heartbeat watchdogs, exponential
 //     capped backoff that only resets after a connection actually
@@ -213,8 +213,8 @@ const openCodePluginTemplate = openCodePluginMarker + `
 //   - BLOCKING: experimental.chat.system.transform. The model's system
 //     prompt is genuinely incomplete until this either succeeds or gives
 //     up, bounded by punkFetch's 2-second timeout (and by the messaging
-//     block's own namespace resolution, same bound, negative-cached for
-//     15s after a failure so a dead server cannot stall every turn).
+//     block's namespace resolution and registration, each with that same
+//     bound; guidance failures are negative-cached per session for 15s).
 //   - OBSERVATIONAL (fire-and-forget, never awaited): event,
 //     tool.execute.after, chat.message. Nothing in the running session is
 //     waiting on these; awaiting them would stall a tool call or session
@@ -222,9 +222,9 @@ const openCodePluginTemplate = openCodePluginMarker + `
 //     or unreachable. The messaging bridge work these hooks trigger
 //     (bind/unbind/status/drain) is likewise fire-and-forget with its own
 //     internal error handling.
-//   - dispose is awaited by OpenCode on shutdown and only flips local
-//     flags and aborts the messaging bridge's SSE streams - no network
-//     calls, so it cannot stall shutdown.
+//   - dispose is awaited by OpenCode on shutdown. It aborts the bridge and
+//     starts best-effort lease releases without awaiting them, so it
+//     cannot stall shutdown.
 //
 // This plugin runs inside the OpenCode process (Bun, or Node per the
 // docs' TypeScript-support note) with no external dependencies. Every
@@ -262,6 +262,12 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // try/catch and, for the observational hooks below, no await needed.
   async function punkFetch(path, init) {
     const controller = new AbortController()
+    const parent = init && init.signal
+    const abort = () => controller.abort()
+    if (parent) {
+      if (parent.aborted) abort()
+      else parent.addEventListener("abort", abort, { once: true })
+    }
     const timer = setTimeout(() => controller.abort(), 2000)
     try {
       const headers = Object.assign({ "Content-Type": "application/json" }, init && init.headers)
@@ -282,6 +288,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       return null
     } finally {
       clearTimeout(timer)
+      if (parent) parent.removeEventListener("abort", abort)
     }
   }
 
@@ -335,9 +342,11 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // Semantics:
   //   - Identity: every observed or restored session binds to the address
   //     opencode:<sessionID>, so two sessions on one machine never share
-  //     an inbox. Namespace: PUNK_NAMESPACE overrides the server's
-  //     cwd-derived resolution (GET /v1/agent/namespace?cwd=...);
-  //     resolution caches only successes.
+  //     an inbox. PUNK_NAMESPACE overrides the server's per-address
+  //     binding (GET /v1/agent/namespace?cwd=...&agent=...), whose fallback
+  //     is cwd. Host events, turn guidance and SSE reconnects refresh it.
+  //     A namespace change replaces coordination state and aborts/releases
+  //     the old identity; an always-idle healthy stream has no rebind hint.
   //   - Registration is confirmed, not assumed: the bridge retries
   //     namespace resolution AND member registration autonomously with
   //     bounded exponential backoff until the server answers
@@ -404,11 +413,6 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   const punkSessions = new Map()
   const punkDeletedSessions = new Set()
   let punkDisposed = false
-  let punkNamespaceCache = ""
-  // Negative cache for the messaging guidance block's namespace lookup:
-  // until this timestamp, the transform hook skips re-resolving (and so
-  // cannot stall every turn) after a resolution failure.
-  let punkNamespaceNegUntil = 0
   // Retry backoff: starts at punkBackoffBase, doubles per failed attempt
   // up to punkBackoffMax, and (for SSE) resets only after a connection
   // actually delivered bytes. PUNK_MESSAGING_BACKOFF_MS overrides the
@@ -471,15 +475,20 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     if (!sessionID || punkDisposed || punkDeletedSessions.has(sessionID)) return null
     let st = punkSessions.get(sessionID)
     if (st) return st
-    st = punkInboxState(sessionID, "opencode")
-    st.busy = null
+    st = punkNewSessionState(sessionID, "", null)
+    punkSessions.set(sessionID, st)
+    return st
+  }
+
+  function punkNewSessionState(sessionID, ns, previous) {
+    const st = punkInboxState(sessionID, "opencode", ns)
+    // Busy is host state; lease/ACK/wake/recovery fields stay cold on a rebind.
+    st.busy = previous ? previous.busy : null
     st.delivering = false
     st.drainQueued = false
     st.registered = false
-    st.registering = false
     st.listening = false
     st.backoff = punkBackoffBase
-    punkSessions.set(sessionID, st)
     return st
   }
 
@@ -513,35 +522,6 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     })
   }
 
-  async function punkResolveNamespace() {
-    if (punkNamespaceCache) return punkNamespaceCache
-    const override = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE
-    if (override) {
-      punkNamespaceCache = override
-      return punkNamespaceCache
-    }
-    const data = await punkFetch("/v1/agent/namespace?cwd=" + encodeURIComponent(directory || ""))
-    if (data && typeof data.namespace === "string" && data.namespace) {
-      punkNamespaceCache = data.namespace
-    }
-    return punkNamespaceCache
-  }
-
-  // punkMessageEnvelope renders one delivered message as the shared M5
-  // envelope - [PUNK INBOX] markers, a neutralised and budget-bounded
-  // body, and reply instructions naming the namespace and this session's
-  // address explicitly (the model's punk MCP identity is the host user
-  // and its default workspace namespace need not match the messaging
-  // namespace, so omitted values route to the wrong place) - through the
-  // same renderer punk hook inbox uses, byte-identical, pinned by
-  // inbox_render_parity_test.go. It replaces the M4-era unbounded ad-hoc
-  // frame so every bridge renders identically; the peer-data framing and
-  // no-callback-URL guidance live in the per-turn messaging block below.
-  function punkMessageEnvelope(m, ns, agent) {
-    const rend = punkRenderInbox(ns, agent, [m])
-    return rend.text
-  }
-
   // punkMessagingBlock is the system-prompt guidance injected on EVERY
   // LLM turn (OpenCode hands the plugin a fresh output.system per turn,
   // so a once-per-session block would vanish from all later turns). Like
@@ -567,7 +547,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // restored session whose status snapshot says busy/"retry", and null
   // when the snapshot failed - null leaves the state UNKNOWN, which
   // defers delivery until an authoritative idle event. Synchronous,
-  // never throws; the actual work lives in punkRegisterSession.
+  // never throws; the actual work lives in punkRefreshSession.
   function punkBindSession(sessionID, initiallyBusy) {
     if (!messagingEnabled || !sessionID || punkDisposed || punkDeletedSessions.has(sessionID)) return
     if (!client || !client.session || typeof client.session.prompt !== "function") return
@@ -575,92 +555,32 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     if (!st) return
     if (initiallyBusy === true) st.busy = true
     else if (initiallyBusy === false && st.busy !== true) st.busy = false
-    if (st.registered || st.registering) return
-    st.registering = true
-    punkRegisterSession(sessionID, st)
+    return punkRefreshSession(sessionID)
   }
 
-  // punkRegisterSession retries namespace resolution and member
-  // registration with bounded exponential backoff until the server
-  // confirms {status:"registered"} - a transient failure must not create
-  // a permanently-bound-but-unregistered session, and a namespace outage
-  // must not permanently abort binding. Only a CONFIRMED registration
-  // starts the SSE listener and the first drain. Cancelled instantly by
-  // deletion/dispose (cancellable sleeps + the alive guard). Never
-  // rejects.
-  async function punkRegisterSession(sessionID, st) {
-    try {
-      let attempt = 0
-      while (punkAlive(st, sessionID) && !st.registered) {
-        const ns = await punkResolveNamespace()
-        if (!punkAlive(st, sessionID) || st.registered) return
-        if (ns) {
-          const res = await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/members", {
-            method: "POST",
-            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
-          })
-          if (!punkAlive(st, sessionID) || st.registered) return
-          if (res && res.status === "registered") {
-            st.registered = true
-            st.registering = false
-            // Restore recovery state BEFORE anything can drain: restored
-            // pending ids must already sit in the delivered set so the
-            // first fetch pass treats them as re-acks (never re-prompts),
-            // and restored wake stamps must already count against the
-            // cap. st.recoveryReady (checked by punkRequestDrain and at
-            // punkDeliverSession entry) keeps idle transitions and inbox
-            // hints that fire while the restore await is in flight from
-            // draining WITHOUT the restored ids - they fold into one
-            // queued drain instead. Fail-open: a missing/corrupt/
-            // unwritable record restores nothing and never breaks the
-            // bridge.
-            const restoredIds = await punkRecoveryRestore(ns, st)
-            st.recoveryReady = true
-            if (!punkAlive(st, sessionID) || !st.registered) return
-            if (restoredIds > 0) {
-              // Honest restart observation: ids the previous life handed
-              // off whose ACK was never confirmed.
-              punkDiagReport(st, "handoff_unconfirmed")
-            } else {
-              // Only a KNOWN-idle session reports ready: unknown busy
-              // state (a failed status snapshot) reports waiting_for_idle
-              // - an unconfirmed snapshot never claims readiness.
-              punkDiagReport(st, st.busy === false ? "ready" : "waiting_for_idle")
-            }
-            if (!st.listening) {
-              st.listening = true
-              punkListenSSE(sessionID, st, ns)
-            }
-            punkRequestDrain(sessionID, ns)
-            return
-          }
-          console.error(
-            "punk connect opencode: messaging registration not confirmed for " +
-              st.agent +
-              " (attempt " +
-              (attempt + 1) +
-              "), retrying"
-          )
-        } else {
-          console.error(
-            "punk connect opencode: messaging namespace resolution failed for " +
-              st.agent +
-              " (attempt " +
-              (attempt + 1) +
-              "), retrying"
-          )
+  // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=TestPluginBindingRebindColdState,TestPluginBindingOpenCodeUnrenderable
+  // Resolution, confirmed registration and namespace retirement share one
+  // lifecycle with Pi/OpenClaw. OpenCode owns recovery, busy state and SDK
+  // handoff; concurrent refreshes join the same namespace's restore.
+  function punkRefreshSession(sessionID) {
+    if (!messagingEnabled || !client || !client.session || typeof client.session.prompt !== "function") return Promise.resolve(null)
+    const st = punkSessionState(sessionID)
+    if (!st) return Promise.resolve(null)
+    return punkInboxRefreshBinding(punkSessions, st, directory || "", "",
+      (ns, previous) => punkNewSessionState(sessionID, ns, previous),
+      async (bound) => {
+        if (!bound.recoveryPromise) bound.recoveryPromise = punkRecoveryRestore(bound.ns, bound)
+        const restoredIds = await bound.recoveryPromise
+        if (!punkAlive(bound, sessionID) || bound.bindingPending) return
+        const first = !bound.recoveryReady
+        bound.recoveryReady = true
+        punkDiagReport(bound, first && restoredIds > 0 ? "handoff_unconfirmed" : bound.busy === false ? "ready" : "waiting_for_idle")
+        if (!bound.listening) {
+          bound.listening = true
+          punkListenSSE(sessionID, bound, bound.ns)
         }
-        await punkCancellableSleep(st, Math.min(punkBackoffBase * Math.pow(2, attempt), punkBackoffMax))
-        attempt++
-      }
-    } catch (err) {
-      console.error("punk connect opencode: messaging registration loop failed:", err && err.message ? err.message : err)
-    } finally {
-      // Abnormal exit without a confirmed registration: allow a later
-      // bind trigger (e.g. another session.created) to try again. A
-      // deleted/disposed session cannot - punkSessionState refuses.
-      if (!st.registered) st.registering = false
-    }
+        punkRequestDrain(sessionID, bound)
+      })
   }
 
   // punkUnbindSession removes all bridge state for a deleted/disposed
@@ -671,14 +591,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     punkDeletedSessions.add(sessionID)
     const st = punkSessions.get(sessionID)
     punkSessions.delete(sessionID)
-    if (st) {
-      try {
-        st.abortController.abort()
-      } catch (err) {
-        // abort() on an already-aborted controller is a no-op; any other
-        // failure here is still not worth breaking the hook that called us.
-      }
-    }
+    punkInboxRetire(st)
   }
 
   // punkMarkIdle records an authoritative idle transition and requests a
@@ -692,8 +605,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       return
     }
     st.busy = false
-    punkDiagTransition(sessionID, "ready")
-    punkRequestDrain(sessionID)
+    punkBindSession(sessionID, false)
   }
 
   // punkSessionStatus reacts to the SDK's session.status event
@@ -714,7 +626,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     }
     if (properties.status.type === "busy" || properties.status.type === "retry") {
       st.busy = true
-      punkDiagTransition(properties.sessionID, "waiting_for_idle")
+      punkBindSession(properties.sessionID, true)
     } else if (properties.status.type === "idle") {
       punkMarkIdle(properties.sessionID)
     }
@@ -730,15 +642,15 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // the previous life already handed off. Busy or unknown sessions defer:
   // their messages stay queued server-side until an authoritative idle
   // transition requests the drain.
-  function punkRequestDrain(sessionID, ns) {
+  function punkRequestDrain(sessionID, expected) {
     const st = punkSessions.get(sessionID)
-    if (!st || !st.registered) return
+    if (!st || !st.registered || st.bindingPending || (expected && expected !== st)) return
     if (st.delivering || !st.recoveryReady) {
       st.drainQueued = true
       return
     }
     if (st.busy !== false) return
-    punkDeliverSession(sessionID, ns)
+    punkDeliverSession(sessionID)
   }
 
   // punkHandleSSEBlock parses one SSE event block (lines separated by
@@ -746,7 +658,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // comments/keepalives and ignored. Only "inbox" events act, as hints:
   // the full unread set is always re-fetched from storage, so a malformed
   // or spoofed hint payload can never inject message content.
-  function punkHandleSSEBlock(sessionID, ns, block) {
+  function punkHandleSSEBlock(sessionID, st, block) {
     let name = ""
     const lines = block.split("\n")
     for (let i = 0; i < lines.length; i++) {
@@ -757,8 +669,8 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       }
     }
     if (name !== "inbox") return
-    if (!punkSessions.has(sessionID)) return
-    punkRequestDrain(sessionID, ns)
+    if (!punkAlive(st, sessionID)) return
+    punkRequestDrain(sessionID, st)
   }
 
   // punkReadWithWatchdog races one reader.read() against the idle
@@ -796,7 +708,17 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // a connection actually delivered bytes. Never rejects.
   async function punkListenSSE(sessionID, st, ns) {
     const path = punkInboxMessagesBase(ns) + "/events?agent=" + encodeURIComponent(st.agent)
+    let reconnect = false
     while (punkAlive(st, sessionID)) {
+      if (reconnect) {
+        const bound = await punkRefreshSession(sessionID)
+        if (!punkAlive(st, sessionID)) return
+        if (!bound) {
+          await punkCancellableSleep(st, st.backoff)
+          continue
+        }
+      }
+      reconnect = true
       const conn = new AbortController()
       const onSessionAbort = () => {
         try {
@@ -867,7 +789,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
             } catch (err2) {}
             break
           }
-          if (!chunk || chunk.done) break
+          if (!chunk || chunk.done || !punkAlive(st, sessionID)) break
           if (!gotBytes) {
             gotBytes = true
             st.backoff = punkBackoffBase
@@ -877,7 +799,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           while (sep >= 0) {
             const block = buf.slice(0, sep)
             buf = buf.slice(sep + 2)
-            punkHandleSSEBlock(sessionID, ns, block)
+            punkHandleSSEBlock(sessionID, st, block)
             sep = buf.indexOf("\n\n")
           }
         }
@@ -905,12 +827,12 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // human UserPromptSubmit nor marks the session busy for its own
   // delivery; a real human message during the prompt is not
   // synthetic-only and is still fully honored.
-  async function punkPromptSession(sessionID, st, m, ns) {
+  async function punkPromptSession(sessionID, text) {
     try {
       const res = await client.session.prompt({
         path: { id: sessionID },
         body: {
-          parts: [{ type: "text", text: punkMessageEnvelope(m, ns, st.agent), synthetic: true }],
+          parts: [{ type: "text", text: text, synthetic: true }],
         },
       })
       return res != null && !res.error
@@ -948,16 +870,21 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // diagnostics observation. Identity is re-checked after every await:
   // results are never applied to a disposed, deleted, or rebound
   // session. Never rejects.
-  async function punkDeliverSession(sessionID, nsArg) {
+  async function punkDeliverSession(sessionID) {
     const st = punkSessions.get(sessionID)
-    if (!st || !st.registered || !st.recoveryReady || st.busy !== false || st.delivering) return
+    if (!st || !st.registered || !st.recoveryReady || st.bindingPending || st.busy !== false || st.delivering) return
     st.delivering = true
     let promptFailed = false
     let ackFailed = false
+    let renderFailed = false
     try {
-      const ns = nsArg || (await punkResolveNamespace())
+      const ns = st.ns
       if (!ns || !punkAlive(st, sessionID) || st.busy !== false) return
       const pass = await punkInboxFetchPass(ns, st)
+      if (!punkAlive(st, sessionID) || st.bindingPending) {
+        await punkInboxReleasePass(ns, st, pass)
+        return
+      }
       if (!pass) {
         // Non-OK or dead fetch: one bounded retry instead of waiting for
         // the next external hint.
@@ -968,6 +895,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       if (!punkAlive(st, sessionID)) return
       if (pass.reack.length) {
         const ok = await punkInboxAckIds(ns, st, pass.reack)
+        if (!punkAlive(st, sessionID)) return
         if (ok) {
           punkRecoverySave(ns, st)
         } else {
@@ -981,9 +909,14 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       const toAck = []
       for (let i = 0; i < pass.deliver.length; i++) {
         const m = pass.deliver[i]
-        if (st.busy !== false || !punkAlive(st, sessionID)) break
+        if (st.busy !== false || st.bindingPending || !punkAlive(st, sessionID)) break
         if (!punkInboxWakeAllowed(st)) break
-        const ok = await punkPromptSession(sessionID, st, m, ns)
+        const rend = punkRenderInbox(ns, st.agent, [m])
+        if (!rend.text || !rend.used.length) {
+          renderFailed = true
+          break
+        }
+        const ok = await punkPromptSession(sessionID, rend.text)
         if (!punkAlive(st, sessionID)) return
         if (!ok) {
           // Failed delivery: stop prompting further messages, but the
@@ -1003,6 +936,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       }
       if (toAck.length > 0 && punkAlive(st, sessionID)) {
         const ok = await punkInboxAckIds(ns, st, toAck)
+        if (!punkAlive(st, sessionID)) return
         if (ok) {
           punkRecoverySave(ns, st)
         } else {
@@ -1021,6 +955,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       }
       const leftover = leftoverDeliver.concat(pass.denied)
       if (leftover.length) await punkInboxReleaseIds(ns, st, leftover)
+      if (!punkAlive(st, sessionID)) return
       // Cap-suppressed backlog: one cancellable wake at the next window
       // expiry, so the remaining messages deliver themselves when the
       // window rolls instead of waiting for an unrelated event. Skipped
@@ -1064,6 +999,8 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
         } else {
           punkDiagReport(st, "wake_budget_exhausted", { nextAttemptMs: punkInboxNextWakeDelayMs(st) })
         }
+      } else if (renderFailed) {
+        punkDiagReport(st, "delivery_failed", { lastError: "render_cap", lastAttempt: true })
       } else if (promptFailed) {
         punkDiagReport(st, "delivery_failed", { lastError: "prompt_failed", lastAttempt: true })
       } else if (ackFailed) {
@@ -1199,8 +1136,9 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           // A deleted session's inbox binding, SSE stream, and pending
           // registration retries go away with it, and it is never rebound
           // (even by a late restored-session bind or a duplicate
-          // session.created). Its unacked messages stay server-side -
-          // there is no member deregistration in the messaging contract.
+          // session.created). This bridge does not deregister the member;
+          // it remains until explicit removal or configured expiry. Removing
+          // membership does not delete messages or the server inbox binding.
           if (
             messagingEnabled &&
             event.properties &&
@@ -1298,7 +1236,6 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           // first sign of life: bind (register + listen) so its inbox is
           // delivered once the turn ends.
           punkBindSession(sessionID, true)
-          punkDiagTransition(sessionID, "waiting_for_idle")
         }
       } catch (err) {
         console.error("punk connect opencode: chat.message hook failed:", err && err.message ? err.message : err)
@@ -1318,8 +1255,8 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     //   - The messaging guidance block rides EVERY call: OpenCode hands
     //     the plugin a fresh output.system per LLM turn, so a block
     //     pushed only once would vanish from every subsequent turn. Its
-    //     namespace lookup is negative-cached for 15s after a failure so
-    //     a dead server cannot re-stall each turn.
+    //     namespace lookup is negative-cached per session for 15s after a
+    //     failure so a dead server cannot re-stall each turn.
     "experimental.chat.system.transform": async (input, output) => {
       try {
         const sessionID = input && input.sessionID
@@ -1335,12 +1272,13 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           }
         }
         if (messagingEnabled) {
-          if (Date.now() >= punkNamespaceNegUntil) {
-            const ns = await punkResolveNamespace()
-            if (ns) {
-              output.system.push(punkMessagingBlock(ns, sessionID))
+          const st = punkSessionState(sessionID)
+          if (st && Date.now() >= (st.namespaceNegUntil || 0)) {
+            const bound = await punkRefreshSession(sessionID)
+            if (bound && punkAlive(bound, sessionID)) {
+              output.system.push(punkMessagingBlock(bound.ns, sessionID))
             } else {
-              punkNamespaceNegUntil = Date.now() + 15000
+              st.namespaceNegUntil = Date.now() + 15000
             }
           }
         }
@@ -1349,10 +1287,10 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
       }
     },
 
-    // dispose: OpenCode awaits this on shutdown. Purely local - flips the
+    // dispose: OpenCode awaits this on shutdown. Flips the
     // disposed latch (no new binds, drains, or registrations may start or
-    // continue) and aborts every session's sleeps and SSE connections. No
-    // network calls, so shutdown can never stall on a dead server.
+    // continue) and aborts every session's sleeps and SSE connections.
+    // Best-effort old-namespace lease releases are never awaited here.
     dispose: async () => {
       try {
         punkDisposed = true

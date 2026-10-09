@@ -669,7 +669,7 @@ func TestInboxWaitSecondsClamp(t *testing.T) {
 	}
 }
 
-func TestInboxSelfRegistersOncePerStateFile(t *testing.T) {
+func TestInboxSelfRegistersBeforeEveryEligiblePoll(t *testing.T) {
 	inboxTestEnv(t)
 	f, srv := newFakeInbox(t)
 	fakeReplyClient(t, "fake", false, "")
@@ -678,20 +678,28 @@ func TestInboxSelfRegistersOncePerStateFile(t *testing.T) {
 	}
 	f.mu.Lock()
 	regs := 0
+	reads := 0
 	for _, r := range f.requests {
 		if strings.HasPrefix(r, "POST /v1/namespaces/ns1/members") {
 			regs++
 		}
+		if strings.HasPrefix(r, "GET /v1/namespaces/ns1/messages?") {
+			reads++
+			if regs != reads {
+				t.Errorf("poll %d was not preceded by registration: registrations=%d", reads, regs)
+			}
+		}
 	}
 	role := f.members["fake:s1"]
+	members := len(f.members)
 	f.mu.Unlock()
-	if regs != 1 {
-		t.Fatalf("registered %d times, want once per state file", regs)
+	if regs != 3 || reads != 3 || members != 1 {
+		t.Fatalf("registrations=%d reads=%d members=%d, want 3 confirmations of the same member", regs, reads, members)
 	}
 	if role != "fake session /work/proj" {
 		t.Fatalf("role %q", role)
 	}
-	// Another namespace is another state file: registers again.
+	// A namespace switch must confirm membership in the new namespace too.
 	runInbox(t, InboxOpts{Client: "fake", Mode: "context", BaseURL: srv.URL, Namespace: "ns2"}, fakeStdin)
 	f.mu.Lock()
 	regs2 := 0
@@ -703,6 +711,53 @@ func TestInboxSelfRegistersOncePerStateFile(t *testing.T) {
 	f.mu.Unlock()
 	if regs2 != 1 {
 		t.Fatalf("ns2 registered %d times, want once", regs2)
+	}
+}
+
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=hook-registration test=TestInboxCachedRegistrationFailureFailsOpenWithoutFetching
+func TestInboxCachedRegistrationFailureFailsOpenWithoutFetching(t *testing.T) {
+	inboxTestEnv(t)
+	f, srv := newFakeInbox(t)
+	seen := fakeReplyClient(t, "fake-blocking", true, `{"continue":true}`)
+	opts := InboxOpts{Client: "fake-blocking", Mode: "continue", BaseURL: srv.URL, Namespace: "ns1"}
+	runInbox(t, opts, fakeStdin)
+	path := inboxStatePath(opts.Client, srv.URL, "ns1", "fake-blocking:s1")
+	if st := readInboxState(path); st.RegisteredAt == 0 {
+		t.Fatal("first hook did not persist registration")
+	}
+
+	f.mu.Lock()
+	f.noRegister = true
+	f.requests = nil
+	f.reads = nil
+	f.mu.Unlock()
+	m := msg("m1", "lead", "leave unread until registration is confirmed")
+	m.Recipient = "fake-blocking:s1"
+	f.add(m)
+	out, errs := runInbox(t, opts, fakeStdin)
+	if out != "{\"continue\":true}\n" || !strings.Contains(errs, "register fake-blocking:s1 in ns1") {
+		t.Errorf("cached registration bypassed failed confirmation: out=%q stderr=%q", out, errs)
+	}
+	f.mu.Lock()
+	requests := append([]string(nil), f.requests...)
+	reads, leases := len(f.reads), len(f.leases)
+	f.mu.Unlock()
+	if len(requests) != 1 || requests[0] != "POST /v1/namespaces/ns1/members?" || reads != 0 || leases != 0 || len(f.ackedIDs()) != 0 {
+		t.Errorf("failed registration must skip fetch, ACK and diagnostics: requests=%v reads=%d leases=%d acked=%v", requests, reads, leases, f.ackedIDs())
+	}
+	if len(*seen) != 2 || (*seen)[1].Err == nil || (*seen)[1].Delivery.Rendered != "" {
+		t.Errorf("writer must receive one fail-open reply: %+v", *seen)
+	}
+	if st := readInboxState(path); len(st.Continuations) != 0 || len(st.LastAckIDs) != 0 {
+		t.Errorf("failed confirmation spent a continuation or remembered a delivery: %+v", st)
+	}
+
+	f.mu.Lock()
+	f.noRegister = false
+	f.mu.Unlock()
+	out, errs = runInbox(t, opts, fakeStdin)
+	if !strings.Contains(out, m.Body) || errs != "" || strings.Join(f.ackedIDs(), ",") != m.ID {
+		t.Fatalf("next hook did not recover after confirmation succeeded: out=%q stderr=%q acked=%v", out, errs, f.ackedIDs())
 	}
 }
 

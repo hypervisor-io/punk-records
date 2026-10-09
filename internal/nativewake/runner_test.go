@@ -452,21 +452,7 @@ type timingOverrides struct {
 // setTestTimings applies overrides and returns a restore function.
 func setTestTimings(o timingOverrides) (restore func()) {
 	old := timing
-	timing = runnerTimings{
-		coalesce:      o.coalesce,
-		diagInterval:  o.diagInterval,
-		reconnectMin:  o.reconnectMin,
-		reconnectMax:  o.reconnectMax,
-		watchdog:      o.watchdog,
-		busyRetry:     o.busyRetry,
-		wakeRetry:     o.wakeRetry,
-		fetchRetry:    o.fetchRetry,
-		controlPoll:   o.controlPoll,
-		requestBounds: o.requestBounds,
-		livenessProbe: o.livenessProbe,
-		lockWait:      o.lockWait,
-		lockRetry:     o.lockRetry,
-	}
+	timing = runnerTimings(o)
 	return func() { timing = old }
 }
 

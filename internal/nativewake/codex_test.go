@@ -172,7 +172,15 @@ type fakeDaemon struct {
 
 func newFakeDaemon(t *testing.T, cfg daemonCfg) *fakeDaemon {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "app-server-control.sock")
+	// Subtest names in t.TempDir can exceed the Unix socket path limit even
+	// with an ordinary TMPDIR. Keep the socket fixture name short instead.
+	// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=verification test=TestCodexRPCErrorResults,TestCodexBrokenResultShapes
+	dir, err := os.MkdirTemp("", "punk-wake-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "app-server-control.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

@@ -92,6 +92,7 @@ func inboxRendererJS() string {
       PUNK_INBOX_MARKER_CLOSE.trim(),
       PUNK_INBOX_MARKER_HEADER,
       PUNK_INBOX_MARKER_OPEN.trim(),
+      PUNK_INBOX_FOOTER_ACK,
     ];
     for (let i = 0; i < lines.length; i++) {
       const t = punkTrimMarkerLead(lines[i]);
@@ -403,11 +404,10 @@ const inboxBridgeCoreJS = `
   // Common per-session state; host bridges extend it with their own
   // fields (busy/listening for pi, nothing much for OpenClaw, the SDK
   // session bits for OpenCode).
-  function punkInboxState(sessionID, prefix) {
-    return {
-      sid: sessionID,
-      agent: prefix + ":" + sessionID,
+  function punkInboxState(sessionID, prefix, ns) {
+    const st = {
       owner: punkInboxOwner(prefix),
+      leased: new Map(), // id -> local expiry bound; retired in their original namespace
       delivered: new Set(), // enqueued/injected, ACK not yet confirmed
       recentAckIds: [],
       recentAckSet: new Set(),
@@ -418,11 +418,114 @@ const inboxBridgeCoreJS = `
       drainRetryScheduled: false,
       wakeRetryScheduled: false,
       inboxBackoff: 0,
+      bindingVersion: 0,
+      bindingPending: false,
     };
+    // Identity never changes beneath an awaited read/ACK/recovery write.
+    // An unresolved placeholder has ns="" and is replaced before any I/O
+    // in a namespace; a rebind always gets cold lease/ACK/wake state.
+    Object.defineProperties(st, {
+      sid: { value: sessionID, enumerable: true },
+      agent: { value: prefix + ":" + sessionID, enumerable: true },
+      ns: { value: ns || "", enumerable: true },
+    });
+    return st;
   }
 
   function punkInboxStAlive(st) {
     return st !== undefined && st !== null && !st.abortController.signal.aborted;
+  }
+
+  // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=TestPluginBindingAddressNamespaces,TestPluginBindingStaleFetch
+  // EXTEND the shared bridge: pins are local, otherwise resolve the server's
+  // per-address binding fresh at host events/reconnects. No global ns cache
+  // and no guessed cwd fallback when the server cannot answer the lookup.
+  async function punkInboxResolveNamespace(cwd, agent, pin, signal) {
+    const env = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE;
+    if (env || pin) return env || pin;
+    const data = await punkFetch(
+      "/v1/agent/namespace?cwd=" + encodeURIComponent(cwd || "") + "&agent=" + encodeURIComponent(agent),
+      { signal: signal }
+    );
+    return data && typeof data.namespace === "string" ? data.namespace : "";
+  }
+
+  function punkInboxRetire(st) {
+    if (!st) return;
+    st.abortController.abort();
+    // Release is intentionally not tied to the aborted signal. It is a
+    // bounded best-effort request, and must use the OLD immutable identity.
+    punkInboxPruneLeases(st);
+    if (st.ns && st.leased.size) punkInboxReleaseIds(st.ns, st, Array.from(st.leased.keys()));
+  }
+
+  function punkInboxPruneLeases(st) {
+    const now = Date.now();
+    for (const [id, until] of st.leased) {
+      if (until <= now) st.leased.delete(id);
+    }
+  }
+
+  // Shared resolution/registration lifecycle. Host callbacks create only
+  // host-specific fields (e.g. busy), and start their own delivery/SSE or
+  // recovery paths after confirmed registration. New events supersede old
+  // lookups; concurrent checks in one namespace share the member POST.
+  // Hosts own idempotent activation. No retry sleep blocks a content hook.
+  async function punkInboxRefreshBinding(sessions, st, cwd, pin, makeState, onRegistered) {
+    if (!punkInboxStAlive(st) || sessions.get(st.sid) !== st) return null;
+    let version = ++st.bindingVersion;
+    st.bindingPending = true;
+    const current = () => punkInboxStAlive(st) && sessions.get(st.sid) === st && st.bindingVersion === version;
+    const retry = () => {
+      if (!current()) return;
+      const base = punkInboxEnvInt("PUNK_MESSAGING_BACKOFF_MS", PUNK_INBOX_BACKOFF_BASE_DEFAULT);
+      st.bindingBackoff = st.bindingBackoff ? Math.min(st.bindingBackoff * 2, PUNK_INBOX_BACKOFF_MAX) : base;
+      punkInboxCancellableSleep(st, st.bindingBackoff).then(() => {
+        if (current()) punkInboxRefreshBinding(sessions, st, cwd, pin, makeState, onRegistered);
+      });
+    };
+    try {
+      const ns = await punkInboxResolveNamespace(cwd, st.agent, pin, st.abortController.signal);
+      if (!current()) return null;
+      if (!ns) {
+        retry();
+        return null;
+      }
+      if (ns !== st.ns) {
+        const previous = st;
+        st = makeState(ns, previous);
+        version = ++st.bindingVersion;
+        sessions.set(st.sid, st);
+        punkInboxRetire(previous);
+      }
+      st.bindingPending = false;
+      st.inboxCwd = cwd;
+      if (!st.registered) {
+        if (!st.registrationPromise) {
+          st.registrationPromise = punkFetch("/v1/namespaces/" + encodeURIComponent(st.ns) + "/members", {
+            method: "POST",
+            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
+            signal: st.abortController.signal,
+          });
+        }
+        const res = await st.registrationPromise;
+        if (!current()) return null;
+        if (!res || res.status !== "registered") {
+          st.registrationPromise = null;
+          retry();
+          return null;
+        }
+        st.registered = true;
+      }
+      st.bindingBackoff = 0;
+      // The callback is idempotent per state and runs again on a successful
+      // refresh so deferred work resumes even after a failed binding lookup.
+      await onRegistered(st);
+      return current() ? st : null;
+    } catch (err) {
+      retry();
+      return null;
+    }
   }
 
   // Bounded recently-acked ring absorbing read/ack races (the server's
@@ -531,25 +634,39 @@ const inboxBridgeCoreJS = `
   // stranded hidden until expiry. exhausted=true when the whole backlog
   // was scanned without a deliverable row.
   async function punkInboxFetchPass(ns, st) {
+    punkInboxPruneLeases(st);
     const allow = punkInboxAllowlist();
     const out = { deliver: [], reack: [], denied: [], deniedCount: 0, exhausted: false };
     const acquired = [];
     for (let round = 0; round < PUNK_INBOX_MAX_ROUNDS; round++) {
+      if (!punkInboxStAlive(st) || st.ns !== ns || st.bindingPending) {
+        if (acquired.length) await punkInboxReleaseIds(ns, st, acquired);
+        return null;
+      }
       const q =
         "?agent=" + encodeURIComponent(st.agent) +
         "&limit=" + PUNK_INBOX_FETCH_LIMIT +
         "&lease_seconds=" + Math.round(punkInboxLeaseMs() / 1000) +
         "&leased_by=" + encodeURIComponent(st.owner);
-      const data = await punkFetch(punkInboxMessagesBase(ns) + q);
+      const data = await punkFetch(punkInboxMessagesBase(ns) + q, { signal: st.abortController.signal });
       if (!data || !Array.isArray(data.messages)) {
         if (acquired.length) await punkInboxReleaseIds(ns, st, acquired);
         return null;
       }
-      st.inboxBackoff = 0; // a successful read resets the drain retry ladder
       const rows = data.messages;
       for (const m of rows) {
+        if (m && typeof m.id === "string" && m.id) {
+          acquired.push(m.id);
+          st.leased.set(m.id, Date.now() + punkInboxLeaseMs());
+        }
+      }
+      if (!punkInboxStAlive(st) || st.bindingPending) {
+        await punkInboxReleaseIds(ns, st, acquired);
+        return null;
+      }
+      st.inboxBackoff = 0; // a successful read resets the drain retry ladder
+      for (const m of rows) {
         if (!m || typeof m.id !== "string" || !m.id) continue;
-        acquired.push(m.id);
         if (m.recipient && m.recipient !== st.agent) {
           out.denied.push(m.id);
           continue;
@@ -597,13 +714,17 @@ const inboxBridgeCoreJS = `
     }
     let allOk = true;
     for (let i = 0; i < unique.length; i += PUNK_INBOX_MAX_IDS) {
+      if (!punkInboxStAlive(st) || st.ns !== ns) return false;
       const batch = unique.slice(i, i + PUNK_INBOX_MAX_IDS);
       const res = await punkFetch(punkInboxMessagesBase(ns) + "/ack", {
         method: "POST",
         body: JSON.stringify({ agent: st.agent, ids: batch, leased_by: st.owner }),
+        signal: st.abortController.signal,
       });
+      if (!punkInboxStAlive(st)) return false;
       if (res && typeof res.acked === "number" && res.acked >= batch.length) {
         for (const id of batch) {
+          st.leased.delete(id);
           st.delivered.delete(id);
           punkInboxRememberAck(st, id);
         }
@@ -618,7 +739,7 @@ const inboxBridgeCoreJS = `
   // id bound (a server without the route lets the lease expire instead).
   // Never rejects.
   async function punkInboxReleaseIds(ns, st, ids) {
-    if (!ids.length) return;
+    if (!ids.length || st.ns !== ns) return;
     const unique = [];
     const seen = new Set();
     for (const id of ids) {
@@ -629,11 +750,22 @@ const inboxBridgeCoreJS = `
     }
     for (let i = 0; i < unique.length; i += PUNK_INBOX_MAX_IDS) {
       const batch = unique.slice(i, i + PUNK_INBOX_MAX_IDS);
-      await punkFetch(punkInboxMessagesBase(ns) + "/release", {
+      const res = await punkFetch(punkInboxMessagesBase(ns) + "/release", {
         method: "POST",
         body: JSON.stringify({ agent: st.agent, ids: batch, leased_by: st.owner }),
       });
+      if (res && typeof res.released === "number") {
+        for (const id of batch) st.leased.delete(id);
+      }
     }
+  }
+
+  // A host event can start resolution between a completed fetch pass and
+  // its consumer's continuation. Return that pass's leases rather than
+  // hiding undelivered rows until expiry, even if the namespace stays put.
+  function punkInboxReleasePass(ns, st, pass) {
+    if (!pass) return Promise.resolve();
+    return punkInboxReleaseIds(ns, st, pass.deliver.map((m) => m.id).concat(pass.reack, pass.denied));
   }
 
   // Standalone re-ack pass: fetch (which re-leases any expired
@@ -651,13 +783,15 @@ const inboxBridgeCoreJS = `
   async function punkInboxReackPass(ns, st) {
     try {
       const pass = await punkInboxFetchPass(ns, st);
-      if (!pass || !punkInboxStAlive(st)) {
+      if (!pass || !punkInboxStAlive(st) || st.bindingPending) {
+        await punkInboxReleasePass(ns, st, pass);
         if (punkInboxStAlive(st) && st.delivered.size > 0) punkInboxScheduleReackRetry(ns, st);
         return;
       }
       const ackedSet = new Set();
       if (pass.reack.length) {
         const ok = await punkInboxAckIds(ns, st, pass.reack);
+        if (!punkInboxStAlive(st)) return;
         if (ok) {
           for (const id of pass.reack) ackedSet.add(id);
         }

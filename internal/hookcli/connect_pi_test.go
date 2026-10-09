@@ -123,6 +123,12 @@ export default function punkPiExtension(pi) {
   // for the observational handlers below, no await needed.
   async function punkFetch(path, init) {
     const controller = new AbortController()
+    const parent = init && init.signal
+    const abort = () => controller.abort()
+    if (parent) {
+      if (parent.aborted) abort()
+      else parent.addEventListener("abort", abort, { once: true })
+    }
     const timer = setTimeout(() => controller.abort(), 2000)
     try {
       const headers = Object.assign({ "Content-Type": "application/json" }, init && init.headers)
@@ -143,11 +149,13 @@ export default function punkPiExtension(pi) {
       return null
     } finally {
       clearTimeout(timer)
+      if (parent) parent.removeEventListener("abort", abort)
     }
   }
 
   function postHook(body) {
-    return punkFetch("/v1/agent/hooks", { method: "POST", body: JSON.stringify(body) })
+    const query = PUNK_NAMESPACE_OVERRIDE ? "?ns=" + encodeURIComponent(PUNK_NAMESPACE_OVERRIDE) : ""
+    return punkFetch("/v1/agent/hooks" + query, { method: "POST", body: JSON.stringify(body) })
   }
 
   // fnv1aHex is a 32-bit FNV-1a hash, hex-encoded - the same algorithm as
@@ -282,6 +290,7 @@ export default function punkPiExtension(pi) {
       PUNK_INBOX_MARKER_CLOSE.trim(),
       PUNK_INBOX_MARKER_HEADER,
       PUNK_INBOX_MARKER_OPEN.trim(),
+      PUNK_INBOX_FOOTER_ACK,
     ];
     for (let i = 0; i < lines.length; i++) {
       const t = punkTrimMarkerLead(lines[i]);
@@ -541,11 +550,10 @@ export default function punkPiExtension(pi) {
   // Common per-session state; host bridges extend it with their own
   // fields (busy/listening for pi, nothing much for OpenClaw, the SDK
   // session bits for OpenCode).
-  function punkInboxState(sessionID, prefix) {
-    return {
-      sid: sessionID,
-      agent: prefix + ":" + sessionID,
+  function punkInboxState(sessionID, prefix, ns) {
+    const st = {
       owner: punkInboxOwner(prefix),
+      leased: new Map(), // id -> local expiry bound; retired in their original namespace
       delivered: new Set(), // enqueued/injected, ACK not yet confirmed
       recentAckIds: [],
       recentAckSet: new Set(),
@@ -556,11 +564,114 @@ export default function punkPiExtension(pi) {
       drainRetryScheduled: false,
       wakeRetryScheduled: false,
       inboxBackoff: 0,
+      bindingVersion: 0,
+      bindingPending: false,
     };
+    // Identity never changes beneath an awaited read/ACK/recovery write.
+    // An unresolved placeholder has ns="" and is replaced before any I/O
+    // in a namespace; a rebind always gets cold lease/ACK/wake state.
+    Object.defineProperties(st, {
+      sid: { value: sessionID, enumerable: true },
+      agent: { value: prefix + ":" + sessionID, enumerable: true },
+      ns: { value: ns || "", enumerable: true },
+    });
+    return st;
   }
 
   function punkInboxStAlive(st) {
     return st !== undefined && st !== null && !st.abortController.signal.aborted;
+  }
+
+  // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=TestPluginBindingAddressNamespaces,TestPluginBindingStaleFetch
+  // EXTEND the shared bridge: pins are local, otherwise resolve the server's
+  // per-address binding fresh at host events/reconnects. No global ns cache
+  // and no guessed cwd fallback when the server cannot answer the lookup.
+  async function punkInboxResolveNamespace(cwd, agent, pin, signal) {
+    const env = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE;
+    if (env || pin) return env || pin;
+    const data = await punkFetch(
+      "/v1/agent/namespace?cwd=" + encodeURIComponent(cwd || "") + "&agent=" + encodeURIComponent(agent),
+      { signal: signal }
+    );
+    return data && typeof data.namespace === "string" ? data.namespace : "";
+  }
+
+  function punkInboxRetire(st) {
+    if (!st) return;
+    st.abortController.abort();
+    // Release is intentionally not tied to the aborted signal. It is a
+    // bounded best-effort request, and must use the OLD immutable identity.
+    punkInboxPruneLeases(st);
+    if (st.ns && st.leased.size) punkInboxReleaseIds(st.ns, st, Array.from(st.leased.keys()));
+  }
+
+  function punkInboxPruneLeases(st) {
+    const now = Date.now();
+    for (const [id, until] of st.leased) {
+      if (until <= now) st.leased.delete(id);
+    }
+  }
+
+  // Shared resolution/registration lifecycle. Host callbacks create only
+  // host-specific fields (e.g. busy), and start their own delivery/SSE or
+  // recovery paths after confirmed registration. New events supersede old
+  // lookups; concurrent checks in one namespace share the member POST.
+  // Hosts own idempotent activation. No retry sleep blocks a content hook.
+  async function punkInboxRefreshBinding(sessions, st, cwd, pin, makeState, onRegistered) {
+    if (!punkInboxStAlive(st) || sessions.get(st.sid) !== st) return null;
+    let version = ++st.bindingVersion;
+    st.bindingPending = true;
+    const current = () => punkInboxStAlive(st) && sessions.get(st.sid) === st && st.bindingVersion === version;
+    const retry = () => {
+      if (!current()) return;
+      const base = punkInboxEnvInt("PUNK_MESSAGING_BACKOFF_MS", PUNK_INBOX_BACKOFF_BASE_DEFAULT);
+      st.bindingBackoff = st.bindingBackoff ? Math.min(st.bindingBackoff * 2, PUNK_INBOX_BACKOFF_MAX) : base;
+      punkInboxCancellableSleep(st, st.bindingBackoff).then(() => {
+        if (current()) punkInboxRefreshBinding(sessions, st, cwd, pin, makeState, onRegistered);
+      });
+    };
+    try {
+      const ns = await punkInboxResolveNamespace(cwd, st.agent, pin, st.abortController.signal);
+      if (!current()) return null;
+      if (!ns) {
+        retry();
+        return null;
+      }
+      if (ns !== st.ns) {
+        const previous = st;
+        st = makeState(ns, previous);
+        version = ++st.bindingVersion;
+        sessions.set(st.sid, st);
+        punkInboxRetire(previous);
+      }
+      st.bindingPending = false;
+      st.inboxCwd = cwd;
+      if (!st.registered) {
+        if (!st.registrationPromise) {
+          st.registrationPromise = punkFetch("/v1/namespaces/" + encodeURIComponent(st.ns) + "/members", {
+            method: "POST",
+            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
+            signal: st.abortController.signal,
+          });
+        }
+        const res = await st.registrationPromise;
+        if (!current()) return null;
+        if (!res || res.status !== "registered") {
+          st.registrationPromise = null;
+          retry();
+          return null;
+        }
+        st.registered = true;
+      }
+      st.bindingBackoff = 0;
+      // The callback is idempotent per state and runs again on a successful
+      // refresh so deferred work resumes even after a failed binding lookup.
+      await onRegistered(st);
+      return current() ? st : null;
+    } catch (err) {
+      retry();
+      return null;
+    }
   }
 
   // Bounded recently-acked ring absorbing read/ack races (the server's
@@ -669,25 +780,39 @@ export default function punkPiExtension(pi) {
   // stranded hidden until expiry. exhausted=true when the whole backlog
   // was scanned without a deliverable row.
   async function punkInboxFetchPass(ns, st) {
+    punkInboxPruneLeases(st);
     const allow = punkInboxAllowlist();
     const out = { deliver: [], reack: [], denied: [], deniedCount: 0, exhausted: false };
     const acquired = [];
     for (let round = 0; round < PUNK_INBOX_MAX_ROUNDS; round++) {
+      if (!punkInboxStAlive(st) || st.ns !== ns || st.bindingPending) {
+        if (acquired.length) await punkInboxReleaseIds(ns, st, acquired);
+        return null;
+      }
       const q =
         "?agent=" + encodeURIComponent(st.agent) +
         "&limit=" + PUNK_INBOX_FETCH_LIMIT +
         "&lease_seconds=" + Math.round(punkInboxLeaseMs() / 1000) +
         "&leased_by=" + encodeURIComponent(st.owner);
-      const data = await punkFetch(punkInboxMessagesBase(ns) + q);
+      const data = await punkFetch(punkInboxMessagesBase(ns) + q, { signal: st.abortController.signal });
       if (!data || !Array.isArray(data.messages)) {
         if (acquired.length) await punkInboxReleaseIds(ns, st, acquired);
         return null;
       }
-      st.inboxBackoff = 0; // a successful read resets the drain retry ladder
       const rows = data.messages;
       for (const m of rows) {
+        if (m && typeof m.id === "string" && m.id) {
+          acquired.push(m.id);
+          st.leased.set(m.id, Date.now() + punkInboxLeaseMs());
+        }
+      }
+      if (!punkInboxStAlive(st) || st.bindingPending) {
+        await punkInboxReleaseIds(ns, st, acquired);
+        return null;
+      }
+      st.inboxBackoff = 0; // a successful read resets the drain retry ladder
+      for (const m of rows) {
         if (!m || typeof m.id !== "string" || !m.id) continue;
-        acquired.push(m.id);
         if (m.recipient && m.recipient !== st.agent) {
           out.denied.push(m.id);
           continue;
@@ -735,13 +860,17 @@ export default function punkPiExtension(pi) {
     }
     let allOk = true;
     for (let i = 0; i < unique.length; i += PUNK_INBOX_MAX_IDS) {
+      if (!punkInboxStAlive(st) || st.ns !== ns) return false;
       const batch = unique.slice(i, i + PUNK_INBOX_MAX_IDS);
       const res = await punkFetch(punkInboxMessagesBase(ns) + "/ack", {
         method: "POST",
         body: JSON.stringify({ agent: st.agent, ids: batch, leased_by: st.owner }),
+        signal: st.abortController.signal,
       });
+      if (!punkInboxStAlive(st)) return false;
       if (res && typeof res.acked === "number" && res.acked >= batch.length) {
         for (const id of batch) {
+          st.leased.delete(id);
           st.delivered.delete(id);
           punkInboxRememberAck(st, id);
         }
@@ -756,7 +885,7 @@ export default function punkPiExtension(pi) {
   // id bound (a server without the route lets the lease expire instead).
   // Never rejects.
   async function punkInboxReleaseIds(ns, st, ids) {
-    if (!ids.length) return;
+    if (!ids.length || st.ns !== ns) return;
     const unique = [];
     const seen = new Set();
     for (const id of ids) {
@@ -767,11 +896,22 @@ export default function punkPiExtension(pi) {
     }
     for (let i = 0; i < unique.length; i += PUNK_INBOX_MAX_IDS) {
       const batch = unique.slice(i, i + PUNK_INBOX_MAX_IDS);
-      await punkFetch(punkInboxMessagesBase(ns) + "/release", {
+      const res = await punkFetch(punkInboxMessagesBase(ns) + "/release", {
         method: "POST",
         body: JSON.stringify({ agent: st.agent, ids: batch, leased_by: st.owner }),
       });
+      if (res && typeof res.released === "number") {
+        for (const id of batch) st.leased.delete(id);
+      }
     }
+  }
+
+  // A host event can start resolution between a completed fetch pass and
+  // its consumer's continuation. Return that pass's leases rather than
+  // hiding undelivered rows until expiry, even if the namespace stays put.
+  function punkInboxReleasePass(ns, st, pass) {
+    if (!pass) return Promise.resolve();
+    return punkInboxReleaseIds(ns, st, pass.deliver.map((m) => m.id).concat(pass.reack, pass.denied));
   }
 
   // Standalone re-ack pass: fetch (which re-leases any expired
@@ -789,13 +929,15 @@ export default function punkPiExtension(pi) {
   async function punkInboxReackPass(ns, st) {
     try {
       const pass = await punkInboxFetchPass(ns, st);
-      if (!pass || !punkInboxStAlive(st)) {
+      if (!pass || !punkInboxStAlive(st) || st.bindingPending) {
+        await punkInboxReleasePass(ns, st, pass);
         if (punkInboxStAlive(st) && st.delivered.size > 0) punkInboxScheduleReackRetry(ns, st);
         return;
       }
       const ackedSet = new Set();
       if (pass.reack.length) {
         const ok = await punkInboxAckIds(ns, st, pass.reack);
+        if (!punkInboxStAlive(st)) return;
         if (ok) {
           for (const id of pass.reack) ackedSet.add(id);
         }
@@ -892,16 +1034,19 @@ export default function punkPiExtension(pi) {
     if (!sessionID || punkDeletedSessions.has(sessionID)) return null
     let st = punkSessions.get(sessionID)
     if (st) return st
-    st = punkInboxState(sessionID, "pi")
-    st.busy = null
+    st = punkNewSessionState(sessionID, "", null)
+    punkSessions.set(sessionID, st)
+    return st
+  }
+
+  function punkNewSessionState(sessionID, ns, previous) {
+    const st = punkInboxState(sessionID, "pi", ns)
+    st.busy = previous ? previous.busy : null
     st.delivering = false
     st.drainQueued = false
     st.registered = false
-    st.registering = false
     st.listening = false
-    st.ns = ""
     st.backoff = punkBackoffBase
-    punkSessions.set(sessionID, st)
     return st
   }
 
@@ -916,30 +1061,6 @@ export default function punkPiExtension(pi) {
     )
   }
 
-  // Namespace for messaging: PUNK_NAMESPACE env, the baked --project
-  // override, else the server's cwd lookup. Only successes cache (a
-  // failure retries on the next trigger); unlike the punkNamespace()
-  // helper below there is no "agent-default" fallback, because a wrong
-  // namespace would silently orphan the session's inbox.
-  let punkMsgNamespaceCache = ""
-  async function punkMessagingResolveNamespace(ctx) {
-    if (punkMsgNamespaceCache) return punkMsgNamespaceCache
-    const env = process.env && process.env.PUNK_NAMESPACE
-    if (env) {
-      punkMsgNamespaceCache = env
-      return env
-    }
-    if (PUNK_NAMESPACE_OVERRIDE) {
-      punkMsgNamespaceCache = PUNK_NAMESPACE_OVERRIDE
-      return PUNK_NAMESPACE_OVERRIDE
-    }
-    const data = await punkFetch("/v1/agent/namespace?cwd=" + encodeURIComponent((ctx && ctx.cwd) || ""))
-    if (data && typeof data.namespace === "string" && data.namespace) {
-      punkMsgNamespaceCache = data.namespace
-    }
-    return punkMsgNamespaceCache
-  }
-
   function punkMarkBusy(sessionID) {
     const st = punkSessions.get(sessionID)
     if (st) st.busy = true
@@ -948,11 +1069,11 @@ export default function punkPiExtension(pi) {
   // Authoritative idle: agent_settled (or an observed ctx.isIdle() true
   // at bind time). Marks idle and flushes anything deferred while busy
   // or unknown.
-  function punkMarkIdle(sessionID) {
+  function punkMarkIdle(sessionID, ctx) {
     const st = punkSessions.get(sessionID)
     if (!st) return
     st.busy = false
-    punkRequestDrain(sessionID)
+    punkRefreshSession(sessionID, ctx)
   }
 
   function punkUnbindSession(sessionID) {
@@ -960,13 +1081,7 @@ export default function punkPiExtension(pi) {
     punkDeletedSessions.add(sessionID)
     const st = punkSessions.get(sessionID)
     punkSessions.delete(sessionID)
-    if (st) {
-      try {
-        st.abortController.abort()
-      } catch (err) {
-        // abort() on an already-aborted controller is a no-op.
-      }
-    }
+    punkInboxRetire(st)
   }
 
   // Bind: resolve the tri-state busy from ctx.isIdle() when the host
@@ -993,58 +1108,35 @@ export default function punkPiExtension(pi) {
         // Leave the state as-is; unknown defers.
       }
     }
-    if (st.registered || st.registering) return
-    st.registering = true
-    punkRegisterSession(sessionID, st, ctx)
+    return punkRefreshSession(sessionID, ctx)
   }
 
-  // Registration is confirmed, not assumed: namespace resolution and the
-  // member POST retry on bounded exponential backoff until the server
-  // answers {status:"registered"}. Only a CONFIRMED registration starts
-  // the SSE listener and the first drain. Cancelled instantly by unbind.
-  async function punkRegisterSession(sessionID, st, ctx) {
-    try {
-      let attempt = 0
-      while (punkAlive(st, sessionID) && !st.registered) {
-        const ns = await punkMessagingResolveNamespace(ctx)
-        if (!punkAlive(st, sessionID) || st.registered) return
-        if (ns) {
-          const res = await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/members", {
-            method: "POST",
-            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
-          })
-          if (!punkAlive(st, sessionID) || st.registered) return
-          if (res && res.status === "registered") {
-            st.registered = true
-            st.registering = false
-            st.ns = ns
-            if (!st.listening) {
-              st.listening = true
-              punkListenSSE(sessionID, st, ns)
-            }
-            punkRequestDrain(sessionID)
-            return
-          }
-          console.error("punk connect pi: messaging registration not confirmed for " + st.agent + ", retrying")
-        } else {
-          console.error("punk connect pi: messaging namespace resolution failed for " + st.agent + ", retrying")
+  // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=TestPluginBindingAddressNamespaces,TestPluginBindingPiProjectMemoryPin
+  // Use the shared per-address lifecycle; only Pi's busy/SSE/enqueue
+  // callbacks live here. Project memory's baked pin is independent of a
+  // coordination binding and remains the same pin the native tools use.
+  function punkRefreshSession(sessionID, ctx) {
+    const st = punkSessions.get(sessionID)
+    if (!st) return Promise.resolve(null)
+    const cwd = (ctx && ctx.cwd) || st.inboxCwd || ""
+    return punkInboxRefreshBinding(punkSessions, st, cwd, PUNK_NAMESPACE_OVERRIDE,
+      (ns, previous) => punkNewSessionState(sessionID, ns, previous),
+      (bound) => {
+        if (!punkAlive(bound, sessionID) || bound.bindingPending) return
+        if (!bound.listening) {
+          bound.listening = true
+          punkListenSSE(sessionID, bound, bound.ns)
         }
-        await punkInboxCancellableSleep(st, Math.min(punkBackoffBase * Math.pow(2, attempt), punkBackoffMax))
-        attempt++
-      }
-    } catch (err) {
-      console.error("punk connect pi: messaging registration loop failed:", err && err.message ? err.message : err)
-    } finally {
-      if (!st.registered) st.registering = false
-    }
+        punkRequestDrain(sessionID, bound)
+      })
   }
 
   // Drain scheduling: a trigger mid-drain queues exactly one follow-up
   // drain (never lost, never stacked); busy or unknown sessions defer -
   // their messages stay unread server-side until an authoritative idle.
-  function punkRequestDrain(sessionID) {
+  function punkRequestDrain(sessionID, expected) {
     const st = punkSessions.get(sessionID)
-    if (!st || !st.registered) return
+    if (!st || !st.registered || st.bindingPending || (expected && expected !== st)) return
     if (st.delivering) {
       st.drainQueued = true
       return
@@ -1073,7 +1165,7 @@ export default function punkPiExtension(pi) {
     })
   }
 
-  function punkHandleSSEBlock(sessionID, block) {
+  function punkHandleSSEBlock(sessionID, st, block) {
     let name = ""
     const lines = block.split("\n")
     for (let i = 0; i < lines.length; i++) {
@@ -1084,8 +1176,8 @@ export default function punkPiExtension(pi) {
       }
     }
     if (name !== "inbox") return
-    if (!punkSessions.has(sessionID)) return
-    punkRequestDrain(sessionID)
+    if (!punkAlive(st, sessionID)) return
+    punkRequestDrain(sessionID, st)
   }
 
   // One SSE connection per registered session, reconnecting until
@@ -1097,7 +1189,17 @@ export default function punkPiExtension(pi) {
   // Never rejects.
   async function punkListenSSE(sessionID, st, ns) {
     const path = punkInboxMessagesBase(ns) + "/events?agent=" + encodeURIComponent(st.agent)
+    let reconnect = false
     while (punkAlive(st, sessionID)) {
+      if (reconnect) {
+        const bound = await punkRefreshSession(sessionID, null)
+        if (!punkAlive(st, sessionID)) return
+        if (!bound) {
+          await punkInboxCancellableSleep(st, st.backoff)
+          continue
+        }
+      }
+      reconnect = true
       const conn = new AbortController()
       const onSessionAbort = () => {
         try {
@@ -1159,7 +1261,7 @@ export default function punkPiExtension(pi) {
             } catch (err2) {}
             break
           }
-          if (!chunk || chunk.done) break
+          if (!chunk || chunk.done || !punkAlive(st, sessionID)) break
           if (!gotBytes) {
             gotBytes = true
             st.backoff = punkBackoffBase
@@ -1169,7 +1271,7 @@ export default function punkPiExtension(pi) {
           while (sep >= 0) {
             const block = buf.slice(0, sep)
             buf = buf.slice(sep + 2)
-            punkHandleSSEBlock(sessionID, block)
+            punkHandleSSEBlock(sessionID, st, block)
             sep = buf.indexOf("\n\n")
           }
         }
@@ -1203,12 +1305,16 @@ export default function punkPiExtension(pi) {
   // rejects.
   async function punkDeliverSession(sessionID) {
     const st = punkSessions.get(sessionID)
-    if (!st || !st.registered || st.busy !== false || st.delivering) return
+    if (!st || !st.registered || st.bindingPending || st.busy !== false || st.delivering) return
     st.delivering = true
     try {
-      const ns = st.ns || (await punkMessagingResolveNamespace(null))
+      const ns = st.ns
       if (!ns || !punkAlive(st, sessionID) || st.busy !== false) return
       const pass = await punkInboxFetchPass(ns, st)
+      if (!punkAlive(st, sessionID) || st.bindingPending) {
+        await punkInboxReleasePass(ns, st, pass)
+        return
+      }
       if (!pass) {
         // Non-OK or dead fetch: one bounded retry instead of waiting for
         // the next external hint.
@@ -1218,6 +1324,7 @@ export default function punkPiExtension(pi) {
       if (!punkAlive(st, sessionID)) return
       if (pass.reack.length) {
         const ok = await punkInboxAckIds(ns, st, pass.reack)
+        if (!punkAlive(st, sessionID)) return
         if (!ok) punkInboxScheduleReackRetry(ns, st)
       }
       if (pass.deniedCount > 0) {
@@ -1225,7 +1332,7 @@ export default function punkPiExtension(pi) {
       }
       const toAck = []
       for (const m of pass.deliver) {
-        if (st.busy !== false || !punkAlive(st, sessionID)) break
+        if (st.busy !== false || st.bindingPending || !punkAlive(st, sessionID)) break
         if (!punkInboxWakeAllowed(st)) break
         const rend = punkRenderInbox(ns, st.agent, [m])
         if (!rend.text) continue
@@ -1257,6 +1364,7 @@ export default function punkPiExtension(pi) {
       }
       if (toAck.length && punkAlive(st, sessionID)) {
         const ok = await punkInboxAckIds(ns, st, toAck)
+        if (!punkAlive(st, sessionID)) return
         if (!ok) {
           // Pending ACK kept; the recurrent pass reacquires it after
           // lease expiry.
@@ -1309,13 +1417,19 @@ export default function punkPiExtension(pi) {
   // whenever there is nothing to inject (fail-open). Never rejects.
   async function punkInboxInjection(sessionID, ctx) {
     if (!punkMessagingEnabled) return undefined
-    const st = punkSessions.get(sessionID)
+    const previous = punkSessions.get(sessionID)
+    if (!previous || !previous.registered) return undefined
+    const st = await punkRefreshSession(sessionID, ctx)
     if (!st || !st.registered) return undefined
     try {
-      const ns = st.ns || (await punkMessagingResolveNamespace(ctx))
+      const ns = st.ns
       if (!ns || !punkAlive(st, sessionID)) return undefined
       const pass = await punkInboxFetchPass(ns, st)
-      if (!pass || !punkAlive(st, sessionID)) return undefined
+      if (!pass) return undefined
+      if (!punkAlive(st, sessionID) || st.bindingPending) {
+        punkInboxReleasePass(ns, st, pass)
+        return undefined
+      }
       if (pass.reack.length) {
         punkInboxAckIds(ns, st, pass.reack).then((ok) => {
           if (!ok && punkInboxStAlive(st)) punkInboxScheduleReackRetry(ns, st)
@@ -1369,8 +1483,8 @@ export default function punkPiExtension(pi) {
       })
       // Messaging bind: resolves the initial busy state from ctx.isIdle()
       // and starts the (fire-and-forget) registration retry loop, which
-      // is the only place long-lived work (SSE listener, retry sleeps)
-      // starts - per pi's runtime-lifecycle rule, never in the factory.
+      // starts long-lived work (SSE listener, retry sleeps). Rebinding
+      // refreshes it on later session events, never in the factory.
       punkBindSession(sessionIdOf(ctx), ctx)
     } catch (err) {
       console.error("punk connect pi: session_start hook failed:", err && err.message ? err.message : err)
@@ -1470,7 +1584,8 @@ export default function punkPiExtension(pi) {
   // quit|reload|new|resume|fork before the runtime is replaced or the
   // process exits; the unbind is idempotent and aborts every timer,
   // sleep and SSE connection the bridge owns for this session, and the
-  // id is never rebound in this runtime. No network call at all.
+  // id is never rebound in this runtime. Known leases are released best
+  // effort in the old namespace without awaiting a network round trip.
   pi.on("session_shutdown", (event, ctx) => {
     try {
       punkUnbindSession(sessionIdOf(ctx))
@@ -1502,7 +1617,7 @@ export default function punkPiExtension(pi) {
       // which may re-fire via auto-retry, compaction or queued
       // follow-ups. Marks idle and flushes anything that deferred while
       // busy or unknown (fire-and-forget, like the capture above).
-      punkMarkIdle(sessionIdOf(ctx))
+      punkMarkIdle(sessionIdOf(ctx), ctx)
     } catch (err) {
       console.error("punk connect pi: agent_settled hook failed:", err && err.message ? err.message : err)
     }
@@ -1538,7 +1653,8 @@ export default function punkPiExtension(pi) {
         // transient failure never causes the 2-second stall to repeat on
         // every subsequent turn.
         injectedSessions.add(sessionID)
-        const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(cwdOf(ctx)))
+        const query = PUNK_NAMESPACE_OVERRIDE ? "&ns=" + encodeURIComponent(PUNK_NAMESPACE_OVERRIDE) : ""
+        const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(cwdOf(ctx)) + query)
         if (data && typeof data.context === "string" && data.context.length > 0) {
           const base = event && event.systemPrompt
           if (typeof base === "string" && base.length > 0) {

@@ -455,7 +455,7 @@ func TestClaudePostWriteTimeout(t *testing.T) {
 // TestClaudeTransportInterface guards the compile-time contract the runner
 // and hookcli rely on.
 func TestClaudeTransportInterface(t *testing.T) {
-	var tr Transport = NewClaudeTransport("/nonexistent", "tok")
+	tr := NewClaudeTransport("/nonexistent", "tok")
 	if _, ok := tr.(*ClaudeTransport); !ok {
 		t.Fatalf("NewClaudeTransport returned %T, want *ClaudeTransport", tr)
 	}

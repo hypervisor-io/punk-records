@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,6 +265,17 @@ func loadSettings(path string) (settings map[string]any, existing []byte, err er
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return nil, nil, fmt.Errorf("parse settings %s: %w", path, err)
+	}
+	// A decoder accepts the first JSON value and otherwise leaves trailing
+	// input unread. Reject anything after that value so a connect cannot
+	// silently discard a second value or malformed tail when it rewrites the
+	// file.
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return nil, nil, fmt.Errorf("parse settings %s: trailing content: %w", path, err)
 	}
 	if m == nil {
 		m = map[string]any{}
@@ -587,6 +599,18 @@ func isPunkManagedFromAgent(cmd, punkPath, agent string) bool {
 // isn't silently widened. The actual write goes through writeAtomic (temp
 // file + rename) so a crash never leaves a torn file.
 func writePreservingSymlinkAndMode(path string, data []byte, defaultMode os.FileMode) error {
+	return writePreservingSymlinkAndModeWithPrivacy(path, data, defaultMode, false)
+}
+
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestMCPConfigLiteralTokenTightensExistingFile
+// writePrivatePreservingSymlinkAndMode gives secret-bearing config the same
+// symlink and atomic-write guarantees as the ordinary writer, but the temp
+// file and final target remain owner-only throughout the write.
+func writePrivatePreservingSymlinkAndMode(path string, data []byte) error {
+	return writePreservingSymlinkAndModeWithPrivacy(path, data, 0o600, true)
+}
+
+func writePreservingSymlinkAndModeWithPrivacy(path string, data []byte, defaultMode os.FileMode, private bool) error {
 	writePath := path
 	if resolved, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
 		writePath = resolved
@@ -595,7 +619,15 @@ func writePreservingSymlinkAndMode(path string, data []byte, defaultMode os.File
 	if fi, statErr := os.Stat(path); statErr == nil {
 		mode = fi.Mode().Perm()
 	}
+	if private {
+		mode = 0o600
+	}
 	return writeAtomic(writePath, data, mode)
+}
+
+func privateModeNeedsRepair(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().Perm()&0o077 != 0
 }
 
 // writeAtomic writes data to path via a temp file in the same directory

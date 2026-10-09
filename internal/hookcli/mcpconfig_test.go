@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -119,6 +120,44 @@ func TestConnectOpenCodeMCP(t *testing.T) {
 	}
 	if _, err := ConnectOpenCodeMCP(p, MCPEntryOpts{ServerURL: "http://localhost:9090"}, false); err == nil {
 		t.Fatal("foreign entry must be refused without force")
+	}
+}
+
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectOpenCodeMCPUsesOpenCodeEnvSyntax
+func TestConnectOpenCodeMCPUsesOpenCodeEnvSyntax(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "opencode.json")
+	if _, err := ConnectOpenCodeMCP(p, MCPEntryOpts{
+		ServerURL: "https://punk.example.test",
+		APIKeyEnv: "PUNK_TEST_API_KEY",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	punk := readSettings(t, p)["mcp"].(map[string]any)["punk"].(map[string]any)
+	auth := punk["headers"].(map[string]any)["Authorization"]
+	if auth != "Bearer {env:PUNK_TEST_API_KEY}" {
+		t.Fatalf("OpenCode Authorization = %q, want its documented {env:NAME} form", auth)
+	}
+	if strings.Contains(auth.(string), "${") {
+		t.Fatalf("OpenCode must not receive the generic shell-style env reference: %q", auth)
+	}
+}
+
+// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectOpenCodeMCPRefusesTrailingJSON
+func TestConnectOpenCodeMCPRefusesTrailingJSON(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "opencode.json")
+	original := []byte(`{"theme":"dark"} {"trailing":true}`)
+	if err := os.WriteFile(p, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConnectOpenCodeMCP(p, MCPEntryOpts{ServerURL: "https://punk.example.test"}, false); err == nil {
+		t.Fatal("multiple JSON values must be rejected rather than truncating trailing content")
+	}
+	after, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("invalid config must remain byte-identical: got %q", after)
 	}
 }
 

@@ -728,23 +728,23 @@ func wakeRunFixture(t *testing.T, ns string, diagHits *atomic.Int32) *httptest.S
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := "/v1/namespaces/" + ns
-		switch {
-		case r.URL.Path == base+"/members":
+		switch r.URL.Path {
+		case base + "/members":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
-		case r.URL.Path == base+"/messages/events":
+		case base + "/messages/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			<-r.Context().Done() // hold the stream until the run cancels
-		case r.URL.Path == base+"/messages":
+		case base + "/messages":
 			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]string{
 				{"id": "m1", "sender": "peer:alpha", "created_at": "2026-09-28T00:00:00Z"},
 			}})
-		case r.URL.Path == base+"/messages/count":
+		case base + "/messages/count":
 			_ = json.NewEncoder(w).Encode(map[string]int{"unread": 1})
-		case r.URL.Path == base+"/messages/diagnostics":
+		case base + "/messages/diagnostics":
 			if diagHits != nil {
 				diagHits.Add(1)
 			}

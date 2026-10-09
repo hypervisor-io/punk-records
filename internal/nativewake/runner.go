@@ -242,11 +242,14 @@ func (m messageMeta) leaseActive(now time.Time) bool {
 func fingerprint(msgs []messageMeta) string {
 	h := fnv.New64a()
 	for _, m := range msgs {
-		io.WriteString(h, m.ID)
+		// hash.Hash.Write is documented to never return an error; the
+		// explicit discards keep errcheck quiet without broadening its
+		// config exclusions.
+		_, _ = io.WriteString(h, m.ID)
 		h.Write([]byte{0})
-		io.WriteString(h, m.Sender)
+		_, _ = io.WriteString(h, m.Sender)
 		h.Write([]byte{0})
-		io.WriteString(h, m.CreatedAt)
+		_, _ = io.WriteString(h, m.CreatedAt)
 		h.Write([]byte{'\n'})
 	}
 	return strconv.FormatUint(h.Sum64(), 16)

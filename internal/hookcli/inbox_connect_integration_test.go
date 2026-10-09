@@ -61,6 +61,11 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 					}
 				}
 			}
+			// The installed hook's local pin may poll team, but plain
+			// registration must preserve this explicit server-side binding.
+			if err := reg.SetInboxBinding(ctx, "decoy", addr); err != nil {
+				t.Fatal(err)
+			}
 			send := func(ns, body string) *region.Message {
 				t.Helper()
 				m, e := reg.SendMessage(ctx, region.MessageInput{Namespace: ns, Sender: "lead", Recipient: addr, Body: body})
@@ -156,6 +161,34 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 			empty := nativeExpectedEmptyReply(client, addr)
 			if got := run(command, false); got != empty {
 				t.Fatalf("empty installed=%q want=%q", got, empty)
+			}
+			// A resumed native hook has the same persisted state after server
+			// member removal. Its next eligible poll must recreate membership.
+			statePath, stateBefore := registeredInboxSnapshot(t, filepath.Join(home, "state"), client, "team", addr)
+			if removed, err := reg.RemoveMember(ctx, "team", addr); err != nil || !removed {
+				t.Fatalf("remove installed hook member: removed=%v err=%v", removed, err)
+			}
+			if got, err := os.ReadFile(statePath); err != nil || !bytes.Equal(got, stateBefore) {
+				t.Fatalf("member removal must retain the local registration cache: %v", err)
+			}
+			if got := run(command, false); got != empty {
+				t.Fatalf("resumed installed=%q want=%q", got, empty)
+			}
+			members, err := reg.Members(ctx, "team")
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored := false
+			for _, member := range members {
+				if member.Agent == addr {
+					restored = true
+				}
+			}
+			if !restored {
+				t.Fatalf("resumed installed hook did not recreate membership for %s", addr)
+			}
+			if ns, ok, err := reg.InboxBinding(ctx, addr); err != nil || !ok || ns != "decoy" {
+				t.Fatalf("plain hook registration moved the explicit binding: namespace=%q bound=%v err=%v", ns, ok, err)
 			}
 			m := send("team", "installed hook delivery")
 			if got, want := run(command, false), nativeExpectedReply(client, nativeExpectedEnvelope(addr, m), false); got != want {

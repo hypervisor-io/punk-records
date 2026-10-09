@@ -134,6 +134,12 @@ function punkHeaders() {
 
 async function punkFetch(path, init) {
   const controller = new AbortController();
+  const parent = init && init.signal;
+  const abort = () => controller.abort();
+  if (parent) {
+    if (parent.aborted) abort();
+    else parent.addEventListener("abort", abort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), PUNK_TIMEOUT_MS);
   try {
     const res = await fetch(punkURL() + path, {
@@ -155,6 +161,7 @@ async function punkFetch(path, init) {
     return null;
   } finally {
     clearTimeout(timer);
+    if (parent) parent.removeEventListener("abort", abort);
   }
 }
 
@@ -373,7 +380,8 @@ const punkOpenClawPlugin = {
 
     // MESSAGING TEARDOWN (no capture). Gateway shutdown aborts every
     // registration retry the bridge still has pending; the docs list
-    // gateway_stop as the lifecycle flush point. Idempotent, no network.
+    // gateway_stop as the lifecycle flush point. Known leases are released
+    // best effort, without awaiting a network round trip. Idempotent.
     api.on("gateway_stop", async (event, ctx) => {
       try {
         punkTeardownAll();
@@ -493,34 +501,15 @@ const openClawBridgeCoreJS = `
   const punkMessagingEnabled =
     typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1";
   const punkSessions = new Map();
+  let punkDisposed = false;
 
   function punkSessionState(sessionID) {
+    if (!sessionID || punkDisposed) return null;
     let st = punkSessions.get(sessionID);
     if (st) return st;
-    st = punkInboxState(sessionID, "openclaw");
-    st.registered = false;
-    st.registering = false;
-    st.ns = "";
+    st = punkInboxState(sessionID, "openclaw", "");
     punkSessions.set(sessionID, st);
     return st;
-  }
-
-  // Namespace: PUNK_NAMESPACE env, else the server's cwd lookup. Only
-  // successes cache; there is no "agent-default" fallback because a wrong
-  // namespace would silently orphan the session's inbox.
-  let punkMsgNamespaceCache = "";
-  async function punkMessagingResolveNamespace() {
-    if (punkMsgNamespaceCache) return punkMsgNamespaceCache;
-    const env = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE;
-    if (env) {
-      punkMsgNamespaceCache = env;
-      return env;
-    }
-    const data = await punkFetch("/v1/agent/namespace?cwd=" + encodeURIComponent(punkCwd()));
-    if (data && typeof data.namespace === "string" && data.namespace) {
-      punkMsgNamespaceCache = data.namespace;
-    }
-    return punkMsgNamespaceCache;
   }
 
   // Bind: start the registration flow for this session's address. Inert
@@ -529,56 +518,24 @@ const openClawBridgeCoreJS = `
     if (!punkMessagingEnabled) return;
     const sid = punkSessionID(event, ctx);
     if (!sid) return;
-    const st = punkSessionState(sid);
-    if (st.registered || st.registering) return;
-    st.registering = true;
-    punkRegisterSession(st);
+    return punkRefreshSession(sid);
   }
 
-  // Registration is confirmed, not assumed: the member POST retries on
-  // bounded exponential backoff until the server answers
-  // {status:"registered"}; no inbox read happens before that. Cancelled
-  // instantly by teardown. Never rejects.
-  async function punkRegisterSession(st) {
-    try {
-      let attempt = 0;
-      while (punkInboxStAlive(st) && !st.registered) {
-        const ns = await punkMessagingResolveNamespace();
-        if (!punkInboxStAlive(st) || st.registered) return;
-        if (ns) {
-          const res = await punkFetch("/v1/namespaces/" + encodeURIComponent(ns) + "/members", {
-            method: "POST",
-            body: JSON.stringify({ agent: st.agent, role: "satellite" }),
-          });
-          if (!punkInboxStAlive(st) || st.registered) return;
-          if (res && res.status === "registered") {
-            st.registered = true;
-            st.registering = false;
-            st.ns = ns;
-            return;
-          }
-          console.error("[punk] messaging registration not confirmed for " + st.agent + ", retrying");
-        } else {
-          console.error("[punk] messaging namespace resolution failed for " + st.agent + ", retrying");
-        }
-        await punkInboxCancellableSleep(st, Math.min(punkInboxEnvInt("PUNK_MESSAGING_BACKOFF_MS", 500) * Math.pow(2, attempt), 30000));
-        attempt++;
-      }
-    } catch (err) {
-      console.error("[punk] messaging registration loop failed:", err && err.message ? err.message : err);
-    } finally {
-      if (!st.registered) st.registering = false;
-    }
+  // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=TestPluginBindingAddressNamespaces,TestPluginBindingStaleAck
+  // Shared per-address resolution/retirement; OpenClaw remains catch-up
+  // only. Session start and each prompt build refresh the binding.
+  function punkRefreshSession(sid) {
+    const st = punkSessionState(sid);
+    if (!st) return Promise.resolve(null);
+    return punkInboxRefreshBinding(punkSessions, st, punkCwd(), "",
+      (ns) => punkInboxState(sid, "openclaw", ns), () => {});
   }
 
   // Teardown for gateway_stop: abort every pending retry. Idempotent.
   function punkTeardownAll() {
+    punkDisposed = true;
     for (const st of punkSessions.values()) {
-      try {
-        st.abortController.abort();
-      } catch (err) {
-        // abort() on an already-aborted controller is a no-op.
-      }
+      punkInboxRetire(st);
     }
     punkSessions.clear();
   }
@@ -606,12 +563,20 @@ const openClawBridgeCoreJS = `
     if (!punkMessagingEnabled) return "";
     const sid = envelope.session_id;
     if (!sid) return "";
-    const st = punkSessions.get(sid);
+    // Initial registration retries stay observational; a prompt must not
+    // bypass their backoff or wait for an unregistered session to recover.
+    const previous = punkSessions.get(sid);
+    if (!previous || !previous.registered) return "";
+    const st = await punkRefreshSession(sid);
     if (!st || !st.registered) return "";
     try {
       const ns = st.ns;
       const pass = await punkInboxFetchPass(ns, st);
-      if (!pass || !punkInboxStAlive(st)) return "";
+      if (!pass) return "";
+      if (!punkInboxStAlive(st) || st.bindingPending) {
+        punkInboxReleasePass(ns, st, pass);
+        return "";
+      }
       if (pass.reack.length) {
         punkInboxAckIds(ns, st, pass.reack).then((ok) => {
           if (!ok && punkInboxStAlive(st)) {

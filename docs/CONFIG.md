@@ -48,6 +48,32 @@ defaults. Validation runs at load: bad values refuse to boot.
 Secrets are never placed in the file: `*_env` keys name the environment
 variable that holds the value.
 
+## Client authentication and verification
+
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=internal/hookcli/mcpconfig_permissions_test.go,cmd/punk/connect_auth_test.go doc=docs/CONFIG.md -->
+
+Server configuration above is separate from generated client configuration.
+`punk login` saves the CLI credential in a private file. Without
+`--api-key-env`, MCP connectors that support literal keys can copy it into
+client configuration; literal-token MCP writers enforce owner-only file permissions
+when writing a literal token, including existing files and symlink targets.
+Environment references avoid embedding the token; keep generated config out
+of shared repositories whenever it contains credentials.
+
+For OpenCode, `--api-key-env NAME` writes `Bearer {env:NAME}` (OpenCode's
+[config substitution syntax](https://opencode.ai/docs/config/#variables)),
+not the shell-style `${NAME}` accepted by some other clients. `--verify`
+uses the named variable when one is selected and fails if it is unset or empty,
+rather than probing with a different CLI credential. The probe proves server
+connectivity/tool discovery; it does not prove the host loaded its plugin or
+delivered a message.
+
+The named variable selects MCP authentication only. Generated plugin capture,
+context and inbox requests still read `PUNK_API_KEY`; subprocess hooks can also
+use the saved credential. Export the same intended credential as `PUNK_API_KEY`
+in the agent process, even if its MCP entry refers to a different variable.
+An exported value reaches newly launched processes, not already-running ones.
+
 ## Operational commands
 
 ```sh

@@ -112,8 +112,8 @@ capability by choosing `--mode wait`.
   nor seen in the last 10 minutes. A `<client>:<session>` address is an
   inbox some hook or bridge reads; a plain name registered by hand is a
   coordination identity with no reader unless that session polls it.
-  Members are never deleted, so a long-lived namespace lists many
-  finished sessions: choose by liveness, not by name.
+  Memberships remain until explicit removal or the configured expiry sweep,
+  so a namespace can still list finished sessions: choose by liveness, not by name.
 - **Member expiry.** The hourly server maintenance tick also removes
   members whose `last_seen_at` (or `joined_at` if never touched) is
   older than `messaging.member_expiry_days` (default 7; 0 disables). A
@@ -290,6 +290,8 @@ bridges do not report yet.
 
 ## Dynamic inbox binding
 
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=plugin-namespace test=internal/hookcli/plugin_binding_test.go doc=docs/agent-messaging.md -->
+
 `punk hook inbox` and `punk hook wake --action ensure` both need to know
 which namespace a session's inbox lives in. One invocation resolves it as:
 
@@ -316,6 +318,14 @@ bind time. A plain register never binds or rebinds - registration
 auto-binding is deliberately absent, so cwd hops cannot silently rewire
 delivery; only an explicit `inbox: true` creates or replaces a binding.
 
+Under enforced HTTP authorization, registration needs a write grant for that
+namespace before it creates the region and membership. A role or address is
+not a credential. Bind only your own actual session address; this operation
+does not change MCP defaults for omitted namespace, sender, agent or holder.
+The own-address rule is cooperative client etiquette, not server-attested
+address ownership: peers with namespace write access share the trust domain
+described below. This patch adds no per-address authorization model.
+
 **Fresh resolution, no restarts.** The binding is looked up fresh on
 every hook invocation and every wake ensure, so switching sessions,
 resuming one, or re-registering to a different namespace rewires both
@@ -323,6 +333,21 @@ delivery and wake on the next hook event - any prompt or turn end -
 without a client restart. Inbox state files are keyed by
 server+namespace+address, so a rebound session gets a fresh registration
 and cap ledger in the new namespace and leaves the old ones untouched.
+
+**Generated plugins.** OpenCode, Pi and OpenClaw also resolve bindings per
+session address. Their shared resolver refreshes on supported host events;
+OpenCode and Pi additionally refresh on SSE reconnects. A healthy, always-idle
+stream is not an instantaneous binding-change notification. `PUNK_NAMESPACE`
+and Pi's baked project pin remain local overrides. A lookup failure pauses
+delivery rather than silently selecting the cwd namespace.
+
+A namespace change replaces the session's coordination state: pending ACKs,
+lease ownership, wake budget and recovery IDs are not reused in the destination.
+Old asynchronous work is invalidated, streams are aborted, and known leases
+are released best-effort in their original namespace, never ACKed in the new
+one. Operations already accepted by a host or server cannot be retracted;
+unknown or unreleased leases expire normally. This changes inbox routing,
+not the namespace used for automatic memory capture or the MCP tool defaults.
 
 **Agent-switch flow.** When a session is handed to a different agent, or
 resumed under a new address, the new agent registers itself with
@@ -409,9 +434,12 @@ minimum reply.
    when the payload says `stop_hook_active: true`, or when the continuation
    cap is exhausted. An adapter can also declare that an event cannot carry
    content. Then nothing is fetched or leased.
-4. Register the address as a namespace member (`POST /members`, role
-   `<client> session <cwd>`), once per state file. A failed registration
-   is not recorded, so the next hook tries again.
+4. Confirm the address as a namespace member (`POST /members`, role
+   `<client> session <cwd>`) before each eligible poll. A saved registration
+   timestamp cannot prove membership still exists after expiry or removal.
+   This is idempotent plain registration, not `inbox: true`, so it does not
+   move an explicit binding. Failed confirmation skips delivery and leasing;
+   the next hook tries again.
 5. Lease up to 50 unread messages for 15 s with an owner token that is
     unique to this invocation (`inbox-<32 hex>`). While the lease is live,
     competing hooks cannot claim the same row; expiry permits redelivery.
@@ -1152,7 +1180,8 @@ orchestrator's final gate.
   timestamps persist in the bridge's local state file, so a restart
   re-ACKs without re-prompting and keeps the wake budget. Only a crash
   between host handoff and the state save remains ambiguous; that message
-  can be re-prompted once.
+  can be re-prompted. Repeated crashes in that window can repeat delivery;
+  there is no exactly-once or single-redelivery guarantee.
 - The bridge relies on OpenCode's current SDK surface (`client` in the
   plugin context; `session.prompt/list/status`; the
   `session.created/idle/deleted/status/error` events; the `synthetic` part
@@ -1164,10 +1193,10 @@ orchestrator's final gate.
   correctness break, and busy-marking would defer rather than corrupt).
 - Delivered-while-idle messages consume a model turn each; a burst to an
   idle session is delivered one prompt per message, in order.
-- `session.deleted` unbinds locally but there is no member
-  deregistration in the HTTP contract: the address remains a namespace
-  member server-side, and any of its unacked messages stay unread
-  forever (session ids are unique, so nothing else will ever read them).
+- `session.deleted` unbinds locally without deleting server membership.
+  The member remains until explicit removal or the configured expiry sweep;
+  unread messages are not deleted by that sweep. Removing a member does not
+  remove its messages or its inbox binding.
 - Busy detection for restored sessions depends on the `session.status`
   snapshot; if that call fails, the session defers (unknown) until the
   next authoritative busy/idle event rather than guessing.
