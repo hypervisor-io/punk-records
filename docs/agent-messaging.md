@@ -388,6 +388,18 @@ untrusted-data framed, `PUNK_MESSAGING_FROM` still filters senders, and
 `--ns` and `PUNK_NAMESPACE` remain local overrides that win over any
 binding and skip the binding query entirely.
 
+**Content policy.** The server additionally rejects `send_message`
+bodies that match a dangerous-intent registry (destructive commands,
+exfiltration phrasing, reverse shells, persistence, instruction
+override, encoding evasion, replication) before they are stored or
+delivered - default `messaging.content_filter.mode: block`, with a
+namespace skip list and an off switch; see the "Message content
+policy" section in CONFIG.md. This is a server-side layer underneath
+the framing, not a replacement for it: a regex cannot distinguish an
+attack from a security discussion that quotes the same words, so
+benign lookalikes are occasionally rejected with a named category the
+sender can rephrase around.
+
 ## Inbox hook
 
 `punk hook inbox --client <name> --mode context|continue|wait

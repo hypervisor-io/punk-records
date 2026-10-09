@@ -27,6 +27,9 @@ type Store struct {
 	// nonpositive retention disables deletion, never unread delivery.
 	MaxUnreadPerRecipient int
 	MessageRetention      time.Duration
+	// ContentPolicy, when non-nil, rejects SendMessage bodies that match
+	// the dangerous-intent registry (see contentpolicy.go). nil = off.
+	ContentPolicy *ContentPolicy
 }
 
 func New(db *store.DB, now func() time.Time) *Store {
