@@ -194,7 +194,11 @@ func doctorHermes(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 			return DoctorReport{}, fmt.Errorf("resolve working directory: %w", err)
 		}
 	}
-	serverURL, apiKey := ResolveServer(o.URLFlag)
+	// ResolveServer can now fail (a malformed saved-credentials file fails
+	// closed). Doctor never aborts on broken wiring, so the error is
+	// carried into the credentials check below rather than returned.
+	resolved, resolveErr := ResolveServer(o.URLFlag)
+	serverURL, apiKey := resolved.URL, resolved.APIKey
 
 	// config: present and parseable. loadHermesConfig treats a missing
 	// file as an empty document, so existence is checked first - doctor
@@ -248,7 +252,7 @@ func doctorHermes(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 
 	// credentials: the server URL and API key punk resolves, where they
 	// came from, and the agent identity the connection pins.
-	urlOK := doctorCredentialsCheck(add, o.URLFlag, serverURL, apiKey, doctorHermesAgent(root), "mcp_servers.punk X-Punk-Agent")
+	urlOK := doctorCredentialsCheck(add, o.URLFlag, resolved, resolveErr, doctorHermesAgent(root), "mcp_servers.punk X-Punk-Agent")
 
 	// server: a cheap reachability probe against the resolved URL only.
 	doctorServerCheck(ctx, add, serverURL, apiKey, urlOK)
@@ -446,12 +450,25 @@ func doctorServerSource(flagURL string) string {
 // the native payload, and there is nothing pinned to report). It returns
 // whether the resolved URL is usable, the gate the server, messaging and
 // diagnostic checks apply before probing.
-func doctorCredentialsCheck(add func(status, name, format string, args ...any), urlFlag, serverURL, apiKey, agent, agentSource string) bool {
+//
+// resolved/resolveErr are what ResolveServer returned: resolveErr is
+// non-nil when the saved credentials are malformed (ResolveServer fails
+// closed on those) and is reported as a FAIL line here rather than
+// aborting the report, matching Doctor's contract that broken wiring is
+// never an error. resolved.Diagnostic - a saved key deliberately dropped
+// because it belongs to a different server - is surfaced as a WARN so the
+// downgrade is never silent.
+func doctorCredentialsCheck(add func(status, name, format string, args ...any), urlFlag string, resolved ServerResolution, resolveErr error, agent, agentSource string) bool {
 	credsPath := CredentialsPath()
+	if resolveErr != nil {
+		add(DoctorFail, "credentials", "credentials unusable: %v", resolveErr)
+		return false
+	}
 	if _, _, credErr := LoadCredentials(credsPath); credErr != nil {
 		add(DoctorFail, "credentials", "credentials file %s is unreadable: %v", credsPath, credErr)
 		return false
 	}
+	serverURL, apiKey := resolved.URL, resolved.APIKey
 	if u, urlErr := url.Parse(serverURL); urlErr != nil || u.Scheme == "" || u.Host == "" {
 		add(DoctorFail, "credentials", "server URL %q (from %s) is not a valid URL", serverURL, doctorServerSource(urlFlag))
 		return false
@@ -465,6 +482,9 @@ func doctorCredentialsCheck(add func(status, name, format string, args ...any), 
 		who = fmt.Sprintf("agent %s (%s)", agent, agentSource)
 	}
 	add(DoctorPass, "credentials", "server %s resolved from %s, %s, %s", serverURL, doctorServerSource(urlFlag), key, who)
+	if resolved.Diagnostic != "" {
+		add(DoctorWarn, "credentials", "%s", resolved.Diagnostic)
+	}
 	return true
 }
 

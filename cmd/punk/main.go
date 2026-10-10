@@ -101,7 +101,7 @@ Usage:
   punk      seed      seed memory from a code-knowledge tool (seed rinnegan [--ns NS] [--dir DIR] < map.json)
   punk      skills    propose SKILL.md drafts mined from completed task ledgers (propose --min-count N --out DIR); distill a namespace's memory into proposed CLAUDE.md additions (insights --ns NS --out DIR)
   punk      hook      run as an agent hook: forward stdin payload, inject context on SessionStart (--url URL, --from AGENT)
-                      env PUNK_URL (default http://localhost:9090), PUNK_API_KEY
+                      URL: --url, PUNK_URL, saved credentials, localhost; key: PUNK_API_KEY or matching saved credentials
                       --from defaults to Claude Code passthrough; --from cursor translates Cursor's native hook payload
                       --from antigravity requires --event PostToolUse|PreInvocation|Stop (Antigravity's own hook payloads carry no event name)
                       --from copilot translates GitHub Copilot CLI's native hook payload (self-identifies its event; SessionStart injects via Copilot's own additionalContext shape)
@@ -2924,8 +2924,9 @@ func answerRate(v *float64) string {
 // payload (e.g. "cursor"); non-Claude agents get their native payload
 // translated by hookcli.Normalize before forwarding and never receive
 // stdout injection - see hookcli.RunFrom. The server URL comes from
-// --url, then PUNK_URL, defaulting to http://localhost:9090; the API key
-// comes from PUNK_API_KEY (empty is valid - an unauthenticated server).
+// --url, then PUNK_URL, saved credentials, then http://localhost:9090. The
+// API key comes from PUNK_API_KEY or matching saved credentials (empty is
+// valid for an unauthenticated server).
 // See hookcli.RunFrom for the fail-open contract: this always exits 0,
 // since a dead memory server or unrecognized --from must never break the
 // user's coding session.
@@ -2937,7 +2938,7 @@ func cmdHook(args []string) error {
 		return cmdHookWake(args[1:])
 	}
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
-	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
+	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL, saved credentials, or http://localhost:9090)")
 	from := fs.String("from", "", "source agent the stdin payload is native to (default empty = Claude Code passthrough; e.g. \"cursor\")")
 	event := fs.String("event", "", "hook event name, required for agents whose native payload doesn't self-identify it (currently only antigravity: PostToolUse, PreInvocation, or Stop - see hookcli.ConnectAntigravity)")
 	nsFlag := fs.String("ns", "", "namespace override (written by punk connect --project)")
@@ -2948,7 +2949,11 @@ func cmdHook(args []string) error {
 	if *nsFlag != "" {
 		hookcli.SetNamespaceOverride(*nsFlag)
 	}
-	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	baseURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "punk hook:", err)
+		return nil
+	}
 	// Antigravity CLI's hook payloads carry no field identifying which
 	// event fired (see hookcli.RunFromAntigravity's doc comment), so
 	// ConnectAntigravity wires a distinct "punk hook --from antigravity
@@ -2991,7 +2996,7 @@ func cmdHook(args []string) error {
 // resolution are shared with cmdHook (--url, --ns).
 func cmdHookInbox(args []string) error {
 	fs := flag.NewFlagSet("hook inbox", flag.ContinueOnError)
-	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
+	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL, saved credentials, or http://localhost:9090)")
 	client := fs.String("client", "", "client whose native hook payload is on stdin (claude-code, codex, cursor, copilot, antigravity, cline, hermes)")
 	mode := fs.String("mode", "context", "context | continue | wait")
 	wait := fs.Int("wait-seconds", 60, "wait mode bound in seconds (max 300)")
@@ -3007,7 +3012,11 @@ func cmdHookInbox(args []string) error {
 	if *nsFlag != "" {
 		hookcli.SetNamespaceOverride(*nsFlag)
 	}
-	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	baseURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "punk hook inbox:", err)
+		return nil
+	}
 	return hookcli.Inbox(hookcli.InboxOpts{
 		Client: *client, Mode: *mode, WaitSeconds: *wait, BaseURL: baseURL, APIKey: apiKey,
 		Namespace: *nsFlag, Event: *event, Enabled: *messaging,
@@ -3101,7 +3110,10 @@ func cmdConnectVerify(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 	sides := verifySides{
 		hook: verifySide{ns: *hookNSFlag, known: *hookNSFlag != "", assumed: true, from: "--hook-ns"},
 		mcp:  verifySide{ns: *nsFlag, known: true, assumed: true, from: "--ns"},
@@ -3456,7 +3468,10 @@ func cmdConnectClaudeCode(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	var projNS string
 	if *project {
@@ -3649,7 +3664,10 @@ func cmdConnectCursor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	var projNS string
 	if *project {
@@ -3770,7 +3788,8 @@ punk: once an API key exists (punk apikey create --name ...), add a "headers": {
 // runtime (see hookcli.ConnectOpenCode) - unlike claude-code/cursor,
 // OpenCode has no punk-binary-invoking hook config to merge and no
 // separate MCP-registration step: the plugin file IS the whole
-// integration, self-contained, reading its own env at runtime.
+// integration, self-contained, resolving PUNK_URL/PUNK_API_KEY overrides or
+// matching saved credentials once at plugin startup.
 //
 // Plugin directories - project-local .opencode/plugins/ or global
 // ~/.config/opencode/plugins/, switched by --project exactly like
@@ -3817,8 +3836,19 @@ func cmdConnectOpenCode(args []string) error {
 		return fmt.Errorf("resolve home directory: %w", err)
 	}
 	pluginPath, configPath := openCodePaths(*project, os.Getenv("XDG_CONFIG_HOME"), home)
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=cmd/punk/connect_opencode_native_test.go
+	configPath, err = hookcli.ResolveOpenCodeConfigPath(configPath)
+	if err != nil {
+		return fmt.Errorf("connect opencode: %w", err)
+	}
+	if err := hookcli.PreflightOpenCodeMCP(configPath, *force); err != nil {
+		return fmt.Errorf("connect opencode: %w", err)
+	}
 
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	changed, err := hookcli.ConnectOpenCode(pluginPath, serverURL)
 	if err != nil {
@@ -3847,7 +3877,7 @@ func cmdConnectOpenCode(args []string) error {
 			return err
 		}
 	}
-	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
+	fmt.Printf("punk: note - the plugin resolves PUNK_URL/PUNK_API_KEY overrides or matching saved credentials at startup (installed URL fallback %s); restart OpenCode or reload plugins after reconnecting\n", serverURL)
 	if !*noSkill {
 		installSkillFor("opencode", *project, serverURL, "")
 		// P2-C: the five punk commands as native OpenCode command files,
@@ -3889,7 +3919,8 @@ func installOpenCodeCommands(project bool) {
 // extension file that talks to the punk-records server directly over HTTP
 // at runtime (see hookcli.ConnectPi) - like OpenCode, there is no punk
 // binary in the runtime path here: the extension file IS the whole
-// integration, self-contained, reading its own env at runtime.
+// integration, self-contained, resolving PUNK_URL/PUNK_API_KEY overrides or
+// matching saved credentials once at extension startup.
 //
 // Extension locations - project-local .pi/extensions/ or global
 // ~/.pi/agent/extensions/, switched by --project exactly like
@@ -3921,7 +3952,10 @@ func cmdConnectPi(args []string) error {
 		extensionPath = filepath.Join(home, ".pi", "agent", "extensions", "punk-memory.ts")
 	}
 
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	var piOpts hookcli.PiOpts
 	var piNS string
@@ -3952,7 +3986,7 @@ func cmdConnectPi(args []string) error {
 		}
 		fmt.Printf("punk: verified: HTTP API reachable, namespace %s\n", ns)
 	}
-	fmt.Printf("punk: note - the extension reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart pi or run /reload to pick up this file\n", serverURL)
+	fmt.Printf("punk: note - the extension resolves PUNK_URL/PUNK_API_KEY overrides or matching saved credentials at startup (installed URL fallback %s); restart pi or run /reload after reconnecting\n", serverURL)
 	if !*noSkill {
 		installSkillFor("pi", *project, serverURL, piNS)
 	}
@@ -4024,7 +4058,10 @@ func cmdConnectAntigravity(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	var projNS string
 	if *project {
@@ -4168,7 +4205,10 @@ func cmdConnectCopilot(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(hooksPath)
 	existedBefore := statErr == nil
@@ -4288,7 +4328,10 @@ func cmdConnectHermes(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
@@ -4467,7 +4510,10 @@ func cmdConnectOpenClaw(args []string) error {
 	}
 	pluginDir := filepath.Join(root, "plugins", hookcli.OpenClawPluginID)
 	configPath := filepath.Join(root, "config.json")
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 
 	pluginChanged, err := hookcli.WriteOpenClawPlugin(pluginDir, serverURL)
 	if err != nil {
@@ -4548,7 +4594,10 @@ func cmdConnectCodex(args []string) error {
 	if *wake && *noHooks {
 		return fmt.Errorf("connect codex: --wake needs hooks; drop --no-hooks")
 	}
-	serverURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	serverURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 	punkPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve punk executable path: %w", err)
@@ -4672,7 +4721,10 @@ func cmdSkill(args []string) error {
 	if err != nil {
 		return err
 	}
-	serverURL, _ := hookcli.ResolveServer(*urlFlag)
+	serverURL, _, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 	for _, tg := range targets {
 		if *nameFlag != "" && tg.Name != *nameFlag {
 			continue
@@ -4704,6 +4756,18 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/credentials_test.go
+func resolveServerForCommand(flagURL string) (string, string, error) {
+	resolved, err := hookcli.ResolveServer(flagURL)
+	if err != nil {
+		return "", "", err
+	}
+	if resolved.Diagnostic != "" {
+		fmt.Fprintln(os.Stderr, "punk: warning -", resolved.Diagnostic)
+	}
+	return resolved.URL, resolved.APIKey, nil
 }
 
 func cmdLogin(args []string) error {

@@ -290,7 +290,7 @@ func TestConnectOpenCodeEscapesHostileServerURL(t *testing.T) {
 	// The fallback expression must still open with exactly one unescaped
 	// quote before the hostile payload - i.e. the payload landed INSIDE
 	// the string literal, not appended after it as extra JS tokens.
-	if !strings.Contains(s, `(fromEnv || "http://evil\"`) {
+	if !strings.Contains(s, `punkResolveConnection("http://evil\"`) {
 		t.Fatalf("hostile URL did not stay inside the intended string literal: %s", s)
 	}
 	runJSSyntaxCheck(t, path, got)
@@ -327,7 +327,9 @@ func runJSSyntaxCheck(t *testing.T, path string, content []byte) {
 		if err := os.WriteFile(mjs, content, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, err := exec.Command(nodePath, "--check", mjs).CombinedOutput()
+		cmd := exec.Command(nodePath, "--check", mjs)
+		cmd.Env = pluginNodeEnv(t.TempDir(), nil)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("node --check %s failed: %v\n%s", mjs, err, out)
 		}
@@ -335,7 +337,9 @@ func runJSSyntaxCheck(t *testing.T, path string, content []byte) {
 	}
 	if bunPath, err := exec.LookPath("bun"); err == nil {
 		outDir := path + ".syntax-check-out"
-		out, err := exec.Command(bunPath, "build", path, "--outdir", outDir).CombinedOutput()
+		cmd := exec.Command(bunPath, "build", path, "--outdir", outDir)
+		cmd.Env = pluginNodeEnv(t.TempDir(), nil)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bun build %s failed: %v\n%s", path, err, out)
 		}
@@ -460,7 +464,9 @@ main().catch((err) => {
 	defer cancel()
 
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, nodePath, harnessPath).CombinedOutput()
+	cmd := exec.CommandContext(ctx, nodePath, harnessPath)
+	cmd.Env = pluginNodeEnv(dir, nil)
+	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {

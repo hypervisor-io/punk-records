@@ -62,6 +62,9 @@ func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging, wak
 	} else {
 		hooksAny = map[string]any{}
 	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	messaging = messaging || hasClaudeShapedInbox(hooksAny, punkPath, "codex")
+	wake = wake || hasClaudeShapedWake(hooksAny, punkPath, "codex")
 	command := punkHookCommandFrom(punkPath, serverURL, ns, "codex")
 	for _, ev := range codexHookEvents {
 		if raw, ok := hooksAny[ev]; ok && raw != nil {
