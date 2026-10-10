@@ -18,7 +18,7 @@ import (
 // must never break or hang the host session.
 func cmdHookWake(args []string) error {
 	fs := flag.NewFlagSet("hook wake", flag.ContinueOnError)
-	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL or http://localhost:9090)")
+	urlFlag := fs.String("url", "", "punk-records base URL (default $PUNK_URL, saved credentials, or http://localhost:9090)")
 	client := fs.String("client", "", "client whose native hook payload is on stdin (claude-code, codex)")
 	action := fs.String("action", "", "ensure | stop | run")
 	nsFlag := fs.String("ns", "", "namespace override (else $PUNK_NAMESPACE, else derived from the payload cwd)")
@@ -32,7 +32,11 @@ func cmdHookWake(args []string) error {
 	if *nsFlag != "" {
 		hookcli.SetNamespaceOverride(*nsFlag)
 	}
-	baseURL, apiKey := hookcli.ResolveServer(*urlFlag)
+	baseURL, apiKey, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "punk hook wake:", err)
+		return nil
+	}
 	return hookcli.Wake(hookcli.WakeOpts{
 		Client: *client, Action: *action, BaseURL: baseURL, APIKey: apiKey,
 		Namespace: *nsFlag, Enabled: *messaging,

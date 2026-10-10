@@ -430,10 +430,7 @@ func runOpenCodeMessagingHarness(t *testing.T, env map[string]string, driver str
 	for k, v := range env {
 		defaults[k] = v
 	}
-	cmdEnv := os.Environ()
-	for k, v := range defaults {
-		cmdEnv = append(cmdEnv, k+"="+v)
-	}
+	cmdEnv := pluginNodeEnv(dir, defaults)
 
 	pluginPath := filepath.Join(dir, "punk-memory.js")
 	if _, err := ConnectOpenCode(pluginPath, "http://punk.test"); err != nil {
