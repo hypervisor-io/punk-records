@@ -33,13 +33,18 @@ func ConnectCline(hooksDir string, o ClineConnectOpts) (bool, error) {
 	if o.GOOS == "" {
 		o.GOOS = runtime.GOOS
 	}
-	body := []byte(clineHookScript(o))
 	type pending struct {
 		path string
 		mode os.FileMode
 		data []byte
 	}
-	var writes []pending
+	type existingHook struct {
+		path string
+		mode os.FileMode
+		data []byte
+	}
+	var existingHooks []existingHook
+	preserveMessaging := o.Messaging
 	for _, ev := range clineHookEvents {
 		name := ev
 		if o.GOOS == "windows" {
@@ -71,9 +76,19 @@ func ConnectCline(hooksDir string, o ClineConnectOpts) (bool, error) {
 				return false, fmt.Errorf("cline: refusing to overwrite user hook %s; compose manually or choose another hook scope", path)
 			}
 			mode = info.Mode().Perm()
+			if strings.Contains(string(existing), " --messaging") {
+				preserveMessaging = true
+			}
 		}
-		if !bytes.Equal(existing, body) {
-			writes = append(writes, pending{path, mode, body})
+		existingHooks = append(existingHooks, existingHook{path: path, mode: mode, data: existing})
+	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	o.Messaging = preserveMessaging
+	body := []byte(clineHookScript(o))
+	var writes []pending
+	for _, h := range existingHooks {
+		if !bytes.Equal(h.data, body) {
+			writes = append(writes, pending{h.path, h.mode, body})
 		}
 	}
 	for _, w := range writes {

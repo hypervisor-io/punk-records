@@ -100,6 +100,9 @@ func connectCopilot(hooksPath, punkPath, serverURL string, messaging bool) (chan
 	} else {
 		hooksAny = map[string]any{}
 	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	messaging = messaging || hasPunkManagedInboxFlatEntry(hooksAny["SessionStart"], punkPath, "copilot") ||
+		hasPunkManagedInboxFlatEntry(hooksAny["Stop"], punkPath, "copilot")
 
 	command := punkCopilotHookCommand(punkPath, serverURL)
 	for _, ev := range copilotHookEvents {

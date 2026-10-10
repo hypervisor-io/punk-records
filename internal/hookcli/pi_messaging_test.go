@@ -383,12 +383,8 @@ func runPiMessagingHarness(t *testing.T, env map[string]string, driver string) s
 	for k, v := range env {
 		defaults[k] = v
 	}
-	cmdEnv := os.Environ()
-	for k, v := range defaults {
-		cmdEnv = append(cmdEnv, k+"="+v)
-	}
-
 	dir := t.TempDir()
+	cmdEnv := pluginNodeEnv(dir, defaults)
 	extPath := filepath.Join(dir, "punk-memory.ts")
 	if _, err := ConnectPi(extPath, "http://punk.test", PiOpts{}); err != nil {
 		t.Fatal(err)

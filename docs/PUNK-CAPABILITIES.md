@@ -55,7 +55,9 @@ Semantic search needs embeddings. Keyword recall and the deterministic memory/co
 - Install the `punk-memory` and `punk-plan` skills to teach agents the memory and coordination workflows.
 - Verify a configured connection through a real MCP round trip.
 
-Connection targets in the current source include Claude Code, Cursor, OpenCode, GitHub Copilot CLI, Codex CLI, pi, Antigravity, Hermes, and OpenClaw. Capture, injection, and tool availability vary by client and version.
+Connection targets in the current source include Claude Code, Cursor, OpenCode, GitHub Copilot CLI, Codex CLI, pi, Antigravity, Hermes, OpenClaw, and Cline. Capture, injection, and tool availability vary by client and version.
+
+<!-- codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-2/task-2-1 test=cmd/punk/connect_saved_credentials_test.go doc=docs/PUNK-CAPABILITIES.md -->
 
 **Integrated:** Codex hook normalization, managed-integration reconciliation, namespace diagnostics, bounded guidance, safer default task waits, deduplicated context delivery, and the complete Codex 0.153.4 acceptance gate (native run evidence and the user-confirmed `terminal_title` mitigation are recorded in `docs/investigations/codex-0.153.4-terminal-spam.md`; the exact original renderer was not identified).
 

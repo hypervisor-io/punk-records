@@ -12,10 +12,9 @@ const piExtensionMarker = "// managed by punk connect pi"
 
 // piExtensionTemplate is the full source ConnectPi writes for the pi
 // coding agent (github.com/earendil-works/pi, package
-// @mariozechner/pi-coding-agent, pi.dev), with four substitution points,
-// in order of appearance: the PUNK_URL fallback default (see punkServerURL
-// below), the NUL escape for the fallback prompt id, the agent-messaging
-// bridge (piMessagingBridgeJS), and the optional baked namespace override.
+// @mariozechner/pi-coding-agent, pi.dev), with substitution points for the
+// shared credential resolver, installation URL, agent-messaging bridge,
+// fallback prompt-id NUL escape, and optional baked namespace override.
 // Every string is rendered via jsStringLiteral (opencode_plugin.go) or is
 // generated code that contains no unescaped verbs, so a serverURL
 // containing a quote or backslash can never break out of the string
@@ -40,8 +39,8 @@ const piExtensionMarker = "// managed by punk connect pi"
 //     handler, not during registration, so there's nothing to await at
 //     startup. Extensions are loaded via jiti, so TypeScript works
 //     without compilation - this template deliberately uses NO
-//     TypeScript-only syntax (no type annotations, no imports at all, not
-//     even "import type"), so despite the .ts extension it is also valid
+//     TypeScript-only syntax (no type annotations or type imports), so
+//     despite the .ts extension it is also valid
 //     plain JavaScript/ESM. That keeps it fully self-contained: no
 //     package.json, no "npm install" in the extension directory, and no
 //     dependency on the @earendil-works/pi-coding-agent package actually
@@ -288,7 +287,7 @@ const piExtensionTemplate = piExtensionMarker + `
 //
 // This file has a .ts extension (pi's auto-discovery only looks for
 // "*.ts"/"* /index.ts"), but deliberately contains no TypeScript-only
-// syntax (no type annotations, no imports) so it is also valid plain
+// syntax (only standard ESM imports) so it is also valid plain
 // JavaScript/ESM - self-contained, no package.json, no "npm install"
 // needed in the extension directory. Every network call - including
 // reading the response body, not just waiting for headers - is bounded by
@@ -302,18 +301,20 @@ const piExtensionTemplate = piExtensionMarker + `
 // case the docs don't promise anything about - a handler that never
 // resolves, since no async-handler timeout contract is documented.
 
+%s
+
 export default function punkPiExtension(pi) {
+  const punkConnection = punkResolveConnection(%s)
   const injectedSessions = new Set()
   let lastAssistantText = ""
   let warnedEmptySessionID = false
 
   function punkServerURL() {
-    const fromEnv = process.env && process.env.PUNK_URL
-    return (fromEnv || %s).replace(/\/+$/, "")
+    return punkConnection.url
   }
 
   function punkAPIKey() {
-    return (process.env && process.env.PUNK_API_KEY) || ""
+    return punkConnection.apiKey
   }
 
   // punkFetch performs one request against the punk-records server with a
@@ -328,6 +329,7 @@ export default function punkPiExtension(pi) {
   // so every call site can invoke it bare: no surrounding try/catch and,
   // for the observational handlers below, no await needed.
   async function punkFetch(path, init) {
+    if (!punkConnection.enabled) return null
     const controller = new AbortController()
     const parent = init && init.signal
     const abort = () => controller.abort()
@@ -665,23 +667,10 @@ export default function punkPiExtension(pi) {
 
   const PUNK_NAMESPACE_OVERRIDE = %s; // "" unless punk connect pi --project baked one
   let punkNamespaceCache = ""
-  function punkCredentialsKey() {
-    const fromEnv = process.env && process.env.PUNK_API_KEY
-    if (fromEnv) return fromEnv
-    try {
-      const fs = require("node:fs")
-      const os = require("node:os")
-      const path = require("node:path")
-      const p = (process.env && process.env.PUNK_CREDENTIALS) || path.join(os.homedir(), ".punk", "credentials.json")
-      const c = JSON.parse(fs.readFileSync(p, "utf8"))
-      return (c && c.api_key) || ""
-    } catch (_) {
-      return ""
-    }
-  }
   async function punkAPICall(path, init) {
+    if (!punkConnection.enabled) throw new Error("punk: network disabled by invalid connection credentials")
     const headers = Object.assign({ "Content-Type": "application/json" }, (init && init.headers) || {})
-    const key = punkCredentialsKey()
+    const key = punkAPIKey()
     if (key) headers["Authorization"] = "Bearer " + key
     const res = await fetch(punkServerURL() + path, Object.assign({}, init, { headers }))
     const text = await res.text()
@@ -689,6 +678,7 @@ export default function punkPiExtension(pi) {
     return text ? JSON.parse(text) : null
   }
   async function punkNamespace(ctx) {
+    if (!punkConnection.enabled) throw new Error("punk: network disabled by invalid connection credentials")
     if (PUNK_NAMESPACE_OVERRIDE) return PUNK_NAMESPACE_OVERRIDE
     if (punkNamespaceCache) return punkNamespaceCache
     const out = await punkAPICall("/v1/agent/namespace?cwd=" + encodeURIComponent(ctx.cwd || process.cwd()))
@@ -771,10 +761,10 @@ var nulJSStringLiteral = func() string {
 // piExtensionContentNS renders the extension with the server URL fallback,
 // the full agent-messaging bridge, the NUL escape for prompt identity, and
 // the optional project namespace baked in. An empty namespace lets the
-// extension derive it per session. Verb order in the template is serverURL,
+// extension derive it per session. Verb order is credentials, serverURL,
 // bridge, NUL escape, namespace, and the arguments follow it.
 func piExtensionContentNS(serverURL, namespace string) string {
-	return fmt.Sprintf(piExtensionTemplate, jsStringLiteral(serverURL), piMessagingBridgeJS(),
+	return fmt.Sprintf(piExtensionTemplate, credentialsJS, jsStringLiteral(serverURL), piMessagingBridgeJS(),
 		nulJSStringLiteral, jsStringLiteral(namespace))
 }
 
@@ -807,7 +797,7 @@ const piBridgeCoreJS = `
   // stays here is pi-specific: binding, the confirmed-registration loop,
   // the SSE listener, the tri-state busy machine, the sendMessage wake,
   // and the before_agent_start injection.
-  const punkMessagingEnabled = !!(process.env && process.env.PUNK_MESSAGING === "1")
+  const punkMessagingEnabled = punkConnection.enabled && !!(process.env && process.env.PUNK_MESSAGING === "1")
   const punkSessions = new Map()
   const punkDeletedSessions = new Set()
   // SSE watchdogs and backoff mirror the reviewed OpenCode bridge; the
@@ -976,6 +966,7 @@ const piBridgeCoreJS = `
   // backoff as drops, which resets only after bytes actually arrived.
   // Never rejects.
   async function punkListenSSE(sessionID, st, ns) {
+    if (!punkConnection.enabled) return
     const path = punkInboxMessagesBase(ns) + "/events?agent=" + encodeURIComponent(st.agent)
     let reconnect = false
     while (punkAlive(st, sessionID)) {

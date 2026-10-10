@@ -250,16 +250,7 @@ main().catch((err) => { console.error(err.stack || err); process.exit(1); });
 	for k, v := range env {
 		defaults[k] = v
 	}
-	cmdEnv := []string{}
-	for _, value := range os.Environ() {
-		key, _, _ := strings.Cut(value, "=")
-		if _, override := defaults[key]; !override && !strings.HasPrefix(key, "PUNK_") {
-			cmdEnv = append(cmdEnv, value)
-		}
-	}
-	for k, v := range defaults {
-		cmdEnv = append(cmdEnv, k+"="+v)
-	}
+	cmdEnv := pluginNodeEnv(dir, defaults)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, path)
