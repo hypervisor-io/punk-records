@@ -243,6 +243,32 @@ func TestAgentGuidanceMessaging(t *testing.T) {
 	})
 }
 
+// Test rendered skills, including the planner, rather than the helper's source.
+// codeops:trace repo=punk-records work_item=punk-sse-skill-guidance-20261011 spec=docs/agent-messaging.md#opencode-quickstart-enable-bind-verify plan=sse-skill-guidance impl=internal/hookcli/skill.go test=TestAgentGuidanceInboxBindingAndSSE
+func TestAgentGuidanceInboxBindingAndSSE(t *testing.T) {
+	forAgentGuidance(t, func(t *testing.T, opts SkillOpts) {
+		for _, render := range []func(SkillOpts) string{RenderSkill, RenderPlanSkill} {
+			text := render(opts)
+			if !opts.Messaging {
+				forbidGuidance(t, text, "listening:true", "does not enable SSE")
+				continue
+			}
+			if opts.Pi {
+				// Pi has HTTP messaging, not the MCP register/discovery tools.
+				forbidGuidance(t, text, ToolName(opts.ToolPrefix, "register"), ToolName(opts.ToolPrefix, "list_region_members"))
+				continue
+			}
+			requireGuidance(t, text,
+				"Enable client hooks/bridge too", "runtime PUNK_MESSAGING=1", "installed bridge", "SSE idle wake",
+				"OpenClaw", "next-prompt catch-up, not SSE",
+				"inbox:true", "does not enable SSE", "only your own session address",
+				"authorized namespace", "PUNK_NAMESPACE is optional", "overrides bindings",
+				"on refresh", "Roles are metadata",
+				"listening:true", "open SSE stream", "not a register input", "Resolve roles to <client>:<session>")
+		}
+	})
+}
+
 // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=agent-guidance test=TestAgentGuidanceBudgets
 func TestAgentGuidanceBudgets(t *testing.T) {
 	forAgentGuidance(t, func(t *testing.T, opts SkillOpts) {
