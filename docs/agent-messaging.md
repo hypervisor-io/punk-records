@@ -400,6 +400,68 @@ attack from a security discussion that quotes the same words, so
 benign lookalikes are occasionally rejected with a named category the
 sender can rephrase around.
 
+### OpenCode quickstart: enable, bind, verify
+
+<!-- codeops:trace repo=punk-records work_item=punk-sse-skill-guidance-20261011 spec=docs/agent-messaging.md#opencode-quickstart-enable-bind-verify plan=sse-skill-guidance impl=internal/hookcli/skill.go test=TestAgentGuidanceInboxBindingAndSSE doc=docs/agent-messaging.md -->
+
+Registration, inbox binding, and SSE listening are different states.
+`inbox:true` binds an inbox; it does **not** enable messaging or start a
+listener. `listening:true` is an observed server response, not a value you
+pass to registration.
+
+1. **Enable the client bridge.** Install the plugin with `punk connect
+   opencode`, configure its Punk server URL and authentication, then start
+   or restart OpenCode with `PUNK_MESSAGING=1` in the OpenCode process's
+   environment. Enabling only the server's MCP message tools is not enough.
+   Keep OpenCode running; an exited process cannot be woken. Leave
+   `PUNK_NAMESPACE` unset for dynamic switching. If set, that local pin
+   overrides the server's inbox binding.
+2. **Bind your session.** Copy your actual `opencode:<sessionID>` address
+   from the bridge's injected guidance, not the host identity from
+   `punk_whoami` or an invented friendly name. Call `punk_register` with:
+
+   ```json
+   {"namespace":"team-work","agent":"opencode:<sessionID>","role":"sse-client","inbox":true}
+   ```
+
+   Replace the namespace and session placeholder with your authorized
+   destination and actual address. The `role` is metadata only; naming it
+   `sse-client` does not enable SSE. A successful `status:"registered"`
+   response confirms registration, not an open listener. Plain registration
+   without `inbox:true` does not move the inbox.
+3. **Let the enabled bridge refresh.** It follows the binding on a supported
+   host event or SSE reconnect, closes the previous stream, and subscribes
+   in the new namespace on the same server. A healthy, permanently idle
+   stream does not receive an immediate binding-change signal. Each session
+   follows one binding at a time; this does not subscribe to every namespace
+   where the address is registered or change MCP defaults.
+4. **Verify the listener.** Call `punk_list_region_members` with
+   `namespace:"team-work", active_only:true` and inspect your exact address.
+   A member response can contain this excerpt:
+
+   ```json
+   {"agent":"opencode:<sessionID>","listening":true}
+   ```
+
+   Punk computes that field from an open
+   `GET /v1/namespaces/<ns>/messages/events?agent=<address>` stream on the
+   responding server process. Do not pass `listening` to `punk_register`.
+   `active_only:true` can also return recently seen members with
+   `listening:false`; registration or recency alone does not prove SSE.
+
+When sending to a role, select its matching live member and pass that
+member's `agent` value as `recipient`. A role label is not an inbox address;
+if several members match, resolve which session is intended before sending.
+
+If registration succeeds but no listener appears, check the running
+process's messaging flag, server URL/authentication, namespace pin, and
+whether a refresh has occurred. If a listener exists but no turn starts,
+check the session's busy state and delivery diagnostics/wake budget.
+An open stream proves neither message handoff nor task completion; test
+idle wake with a controlled message separately. Other clients have different
+delivery contracts: OpenClaw catches up on its next prompt, not through SSE
+idle wake. See the [client delivery matrix](#client-delivery-matrix).
+
 ## Inbox hook
 
 `punk hook inbox --client <name> --mode context|continue|wait
