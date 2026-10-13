@@ -266,12 +266,8 @@ func runOpenClawMessagingHarness(t *testing.T, env map[string]string, driver str
 	for k, v := range env {
 		defaults[k] = v
 	}
-	cmdEnv := os.Environ()
-	for k, v := range defaults {
-		cmdEnv = append(cmdEnv, k+"="+v)
-	}
-
 	dir := t.TempDir()
+	cmdEnv := pluginNodeEnv(dir, defaults)
 	pluginDir := filepath.Join(dir, "plugins", OpenClawPluginID)
 	if _, err := WriteOpenClawPlugin(pluginDir, "http://punk.test"); err != nil {
 		t.Fatal(err)

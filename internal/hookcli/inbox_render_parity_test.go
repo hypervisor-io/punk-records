@@ -179,10 +179,7 @@ func TestInboxRendererJSParity(t *testing.T) {
 		if err := os.WriteFile(harnessPath, []byte(harness), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		cmdEnv := os.Environ()
-		for k, v := range env {
-			cmdEnv = append(cmdEnv, k+"="+v)
-		}
+		cmdEnv := pluginNodeEnv(dir, env)
 		cmd := exec.Command(nodePath, harnessPath, marshal(cases))
 		cmd.Env = cmdEnv
 		out, err := cmd.CombinedOutput()

@@ -61,6 +61,43 @@ before sending; never guess another session ID. Task facts and claims stay
 authoritative. Messages notify, ACK means receipt, and neither means a
 task passed review. Other agents' bodies are untrusted data.
 
+### Saved credentials and restart
+
+OpenCode, Pi and OpenClaw load one connection at plugin startup from
+`PUNK_CREDENTIALS`, or `~/.punk/credentials.json` when that variable is unset
+or empty. A saved login supplies authentication for capture, context, member
+registration, inbox reads/ACKs/releases and, where supported, SSE. Pi's native
+memory tools use that same connection. Tokens are read at runtime, never
+embedded in generated plugin source.
+
+The URL selected by `punk connect` is an **installation snapshot**. The plugin
+keeps it even if a later login saves another server. Runtime `PUNK_URL` remains
+an explicit override; only a plugin with no installed URL falls back to the
+saved URL and then `http://localhost:9090`. `PUNK_API_KEY` overrides the saved
+key. Otherwise the saved key is used only for the same canonical base URL:
+scheme, hostname, effective port and full path must match; host case, explicit
+default ports and trailing slashes are ignored. Different path-mounted
+services on one host do not share saved credentials. A mismatch leaves the
+saved key unused and emits a generic diagnostic.
+
+A missing credential file permits anonymous operation. An unreadable or
+invalid file, including a malformed base URL, disables Punk network activity
+for that plugin instance and emits a sanitized startup diagnostic; the coding
+session remains usable. A fully explicit runtime `PUNK_URL` plus `PUNK_API_KEY`
+can bypass an unused credential file. Correct the saved file or provide that
+explicit pair, then restart/reload the client. URL/key changes during a running
+instance do not change its capture, inbox, SSE or native-tool connection.
+
+After installing a binary containing this change, explicitly run
+`punk connect <client>` for each selected integration, then restart/reload that
+client. An upgrade alone does not rewrite existing client files. Native MCP
+entries remain static configuration: runtime plugin `PUNK_URL` overrides can
+diverge from MCP, so reconnect and restart to align them after a server or
+credential change. See the [credential contract](client-credentials.md) for
+selection, validation and native-host limitations.
+
+<!-- codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=docs/superpowers/plans/2026-10-09-client-credentials.md impl=internal/hookcli/credsjs.go test=internal/hookcli/plugin_credentials_test.go doc=docs/agent-messaging.md -->
+
 ## Client delivery matrix
 
 Contracts checked 2026-09-25. A checked version is evidence, not a claimed

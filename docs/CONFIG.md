@@ -40,7 +40,7 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `mcp.toolset` | `PUNK_MCP_TOOLSET` | `full` | stdio server toolset: `agent` (lean session set) or `full` |
 | credentials | `PUNK_CREDENTIALS` | `~/.punk/credentials.json` | file `punk login` writes (mode 0600); override the path, not the file's role |
 | server URL | `PUNK_URL` | - | server base URL; flag > this env > credentials file > `http://localhost:9090` |
-| API key | `PUNK_API_KEY` | - | bearer token; flag/env wins over the credentials file |
+| API key | `PUNK_API_KEY` | - | explicit bearer-token environment override; otherwise the matching saved credential is used |
 | PDF extractor adapter | `PUNK_INGEST_PDF_ADAPTER` | empty | command `punk ingest` runs for `application/pdf` (flag `--pdf-adapter` wins); empty = PDF unsupported, all other loaders work |
 | request headers | - | - | the MCP server reads `X-Punk-Namespace` and `X-Punk-Agent` from clients; `X-Punk-Subject` is set by the auth middleware from the verified API key and any client-supplied value is deleted |
 | `ai.embeddings.max_input_tokens` | - | `0` | model input window in tokens; 0 = unknown (diagnose skips oversize accounting) |
@@ -53,7 +53,7 @@ variable that holds the value.
 
 ## Client authentication and verification
 
-<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=internal/hookcli/mcpconfig_permissions_test.go,cmd/punk/connect_auth_test.go doc=docs/CONFIG.md -->
+<!-- codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-2/task-2-1 test=cmd/punk/connect_saved_credentials_test.go,internal/hookcli/client_credentials_reconnect_test.go,internal/hookcli/mcpconfig_opencode_native_test.go,cmd/punk/connect_opencode_native_test.go evidence=docs/superpowers/reports/2026-10-09-client-credentials/builder-a.md -->
 
 Server configuration above is separate from generated client configuration.
 `punk login` saves the CLI credential in a private file. Without
@@ -63,6 +63,31 @@ when writing a literal token, including existing files and symlink targets.
 Environment references avoid embedding the token; keep generated config out
 of shared repositories whenever it contains credentials.
 
+Connection selection is one checked operation: explicit `--url`, then
+`PUNK_URL`, then the selected credential file's URL, then
+`http://localhost:9090`. `PUNK_CREDENTIALS` selects that file instead of the
+default; a missing file permits anonymous use, while a present unreadable or
+malformed file fails before a dependent request or config write. A fully
+explicit URL plus `PUNK_API_KEY` does not need the otherwise-unused file.
+
+`PUNK_API_KEY` is an explicit override. A saved key is used only when the
+selected URL and saved URL identify the same canonical base, including path.
+Scheme/hostname case, default ports and trailing slashes are normalized; a
+different scheme, host, effective port or path suppresses the saved key and
+prints a sanitized warning. Base URLs containing userinfo, query parameters or
+fragments are rejected. Diagnostics never print token or credential-file
+content.
+
+Generated hooks and native MCP entries are snapshots. Run `punk connect` again
+after changing login/server credentials, then restart or reload the client.
+Reconnect refreshes all already-enabled Punk capture, inbox and wake entries
+without enabling a missing opt-in or removing an existing one. OpenCode adopts
+the existing `opencode.jsonc` or `opencode.json`; if both exist it refuses the
+ambiguous scope before changing its plugin. JSONC comments, trailing commas,
+foreign settings, symlinks and file modes are preserved. Native MCP remains
+static even when a long-lived generated plugin uses an explicit runtime
+`PUNK_URL` override.
+
 For OpenCode, `--api-key-env NAME` writes `Bearer {env:NAME}` (OpenCode's
 [config substitution syntax](https://opencode.ai/docs/config/#variables)),
 not the shell-style `${NAME}` accepted by some other clients. `--verify`
@@ -70,6 +95,12 @@ uses the named variable when one is selected and fails if it is unset or empty,
 rather than probing with a different CLI credential. The probe proves server
 connectivity/tool discovery; it does not prove the host loaded its plugin or
 delivered a message.
+
+Codex native MCP authentication is environment-only. When a key is selected,
+its config names `PUNK_API_KEY` (or `--api-key-env NAME`) rather than embedding
+the key; that variable must be present in the process that starts Codex. A
+missing named variable is reported as unverified and is never substituted with
+an unrelated saved key.
 
 The named variable selects MCP authentication only. Generated plugin capture,
 context and inbox requests still read `PUNK_API_KEY`; subprocess hooks can also

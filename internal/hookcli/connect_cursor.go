@@ -79,6 +79,9 @@ func connectCursor(hooksPath, punkPath, serverURL, ns string, messaging bool) (c
 	} else {
 		hooksAny = map[string]any{}
 	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	messaging = messaging || hasPunkManagedInboxFlatEntry(hooksAny["sessionStart"], punkPath, "cursor") ||
+		hasPunkManagedInboxFlatEntry(hooksAny["stop"], punkPath, "cursor")
 
 	command := punkCursorHookCommand(punkPath, serverURL, ns)
 	for _, ev := range cursorHookEvents {

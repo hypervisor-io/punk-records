@@ -46,7 +46,10 @@ func cmdConnectCline(args []string) error {
 	if err != nil {
 		return err
 	}
-	server, key := hookcli.ResolveServer(*urlFlag)
+	server, key, err := resolveServerForCommand(*urlFlag)
+	if err != nil {
+		return err
+	}
 	changed, err := hookcli.ConnectCline(dir, hookcli.ClineConnectOpts{PunkPath: exe, ServerURL: server, Namespace: pin, Messaging: *messaging})
 	if err != nil {
 		return fmt.Errorf("connect cline: %w", err)
