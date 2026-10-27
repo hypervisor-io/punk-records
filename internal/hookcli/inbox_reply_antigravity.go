@@ -13,7 +13,8 @@ import "encoding/json"
 //     path's invocationNum==0 gate (translateAntigravity, normalize.go)
 //     the inbox injects on every invocation while unread messages
 //     exist - the messages disappear once acked, so a quiet inbox
-//     prints nothing. injectSteps is Optional; silence is valid.
+//     carries only the routing identity block. injectSteps is Optional;
+//     silence is valid on every other event.
 //   - Stop output decision is REQUIRED: "continue" prevents the stop
 //     and re-enters the execution loop, any other value allows it
 //     (docs' own wording). reason is the ONLY message carrier: "if
@@ -38,10 +39,11 @@ import "encoding/json"
 
 func init() {
 	RegisterInboxClient(InboxClient{
-		Name:          "antigravity",
-		AllowContinue: true,
-		CanCarry:      antigravityInboxCanCarry,
-		Reply:         replyAntigravityInbox,
+		Name:           "antigravity",
+		AllowContinue:  true,
+		CanCarry:       antigravityInboxCanCarry,
+		GuidanceEvents: []string{"PreInvocation"},
+		Reply:          replyAntigravityInbox,
 	})
 }
 
@@ -60,6 +62,12 @@ func antigravityInboxCanCarry(p InboxPayload, cont bool) bool {
 	return false
 }
 
+// replyAntigravityInbox writes Antigravity's reply. PreInvocation carries
+// the routing guidance (Delivery.Guidance) ahead of any rendered
+// envelope; on an empty inbox the guidance alone is a valid injectSteps
+// object (Antigravity has no wake transport, so no wake wording). Stop
+// requires a decision on every path, and reason is the only message
+// carrier.
 func replyAntigravityInbox(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
 	switch req.Payload.Event {
@@ -73,12 +81,13 @@ func replyAntigravityInbox(req InboxReplyRequest) InboxReply {
 		}
 		return InboxReply{Out: antigravityJSONLine(map[string]any{"decision": "allow"})}
 	case "PreInvocation":
-		if d.Rendered == "" {
+		text := d.Guidance + d.Rendered
+		if text == "" {
 			return InboxReply{}
 		}
 		return InboxReply{Out: antigravityJSONLine(map[string]any{
-			"injectSteps": []map[string]string{{"ephemeralMessage": d.Rendered}},
-		}), Delivered: true}
+			"injectSteps": []map[string]string{{"ephemeralMessage": text}},
+		}), Delivered: d.Rendered != ""}
 	}
 	return InboxReply{}
 }

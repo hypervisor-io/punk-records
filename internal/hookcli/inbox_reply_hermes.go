@@ -14,7 +14,7 @@ import "encoding/json"
 //     call regardless of when they were sent. (RunFromHermes' memory
 //     injection gates the session block to extra.is_first_turn; the
 //     inbox needs no such gate - acked messages stop appearing, so a
-//     quiet inbox prints nothing.)
+//     quiet inbox carries only the routing identity block.)
 //   - Hermes has no stop hook that can continue and no wake mechanism:
 //     AllowContinue is false, so --mode continue/wait downgrade to
 //     context in inbox.go before anything is leased. Catch-up only.
@@ -25,9 +25,10 @@ import "encoding/json"
 
 func init() {
 	RegisterInboxClient(InboxClient{
-		Name:     "hermes",
-		CanCarry: hermesInboxCanCarry,
-		Reply:    replyHermesInbox,
+		Name:           "hermes",
+		CanCarry:       hermesInboxCanCarry,
+		GuidanceEvents: []string{"pre_llm_call"},
+		Reply:          replyHermesInbox,
 	})
 }
 
@@ -37,14 +38,23 @@ func hermesInboxCanCarry(p InboxPayload, cont bool) bool {
 	return p.Event == "pre_llm_call"
 }
 
+// replyHermesInbox writes the flat {"context": <text>} pre_llm_call
+// reply. The routing guidance (Delivery.Guidance) is prepended to any
+// rendered envelope, and on an empty inbox the guidance alone is still a
+// valid single JSON object (Hermes has no wake transport, so the block
+// carries no wake wording).
 func replyHermesInbox(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
-	if d.Rendered == "" || req.Payload.Event != "pre_llm_call" {
+	if req.Payload.Event != "pre_llm_call" {
 		return InboxReply{}
 	}
-	b, err := json.Marshal(map[string]any{"context": d.Rendered})
+	text := d.Guidance + d.Rendered
+	if text == "" {
+		return InboxReply{}
+	}
+	b, err := json.Marshal(map[string]any{"context": text})
 	if err != nil {
 		return InboxReply{}
 	}
-	return InboxReply{Out: append(b, '\n'), Delivered: true}
+	return InboxReply{Out: append(b, '\n'), Delivered: d.Rendered != ""}
 }

@@ -34,14 +34,17 @@ import "encoding/json"
 //     concatenate into invalid JSON and are ignored. Every reply here
 //     is exactly one JSON line. No event punk wires REQUIRES a reply,
 //     so the fail-open answer is empty stdout (docs: empty/unparseable
-//     output falls through to default behavior).
+//     output falls through to default behavior). SessionStart's routing
+//     identity block on an empty inbox (P1-A) is the one non-fail-open
+//     reply that carries no messages.
 
 func init() {
 	RegisterInboxClient(InboxClient{
-		Name:          "copilot",
-		AllowContinue: true,
-		CanCarry:      copilotInboxCanCarry,
-		Reply:         replyCopilotInbox,
+		Name:           "copilot",
+		AllowContinue:  true,
+		CanCarry:       copilotInboxCanCarry,
+		GuidanceEvents: []string{"SessionStart"},
+		Reply:          replyCopilotInbox,
 	})
 }
 
@@ -59,16 +62,23 @@ func copilotInboxCanCarry(p InboxPayload, cont bool) bool {
 	return false
 }
 
+// replyCopilotInbox writes Copilot's reply. SessionStart carries the
+// routing guidance (Delivery.Guidance) ahead of any rendered envelope;
+// on an empty inbox the guidance alone is a valid flat additionalContext
+// object (Copilot has no wake transport, so no wake wording). Stop
+// carries content only as a block continuation. Every reply is exactly
+// one JSON line.
 func replyCopilotInbox(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
-	if d.Rendered == "" {
-		return InboxReply{}
-	}
 	switch req.Payload.Event {
 	case "SessionStart":
-		return InboxReply{Out: copilotJSONLine(map[string]any{"additionalContext": d.Rendered}), Delivered: true}
+		text := d.Guidance + d.Rendered
+		if text == "" {
+			return InboxReply{}
+		}
+		return InboxReply{Out: copilotJSONLine(map[string]any{"additionalContext": text}), Delivered: d.Rendered != ""}
 	case "Stop":
-		if !d.Continue {
+		if d.Rendered == "" || !d.Continue {
 			return InboxReply{}
 		}
 		return InboxReply{Out: copilotJSONLine(map[string]any{"decision": "block", "reason": d.Rendered}), Delivered: true}

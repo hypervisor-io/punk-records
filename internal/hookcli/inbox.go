@@ -127,11 +127,11 @@ type InboxPayload struct {
 // non-empty Rendered the writer may still place Rendered in a context
 // field, or decline (Delivered=false) if its event cannot carry context.
 // Guidance is hook-authored routing identity text (never peer content):
-// the Claude Code writer prints it as additionalContext on
-// SessionStart/UserPromptSubmit even when Rendered is empty, so the
-// model always knows its real session address and namespace. It is set
-// only after confirmed registration, carries no messages, and is never
-// ACKed, leased or continuation-budgeted.
+// a client's writer prints it as context on the events listed in
+// InboxClient.GuidanceEvents even when Rendered is empty, so the model
+// always knows its real session address and namespace. It is set only
+// after confirmed registration, carries no messages, and is never ACKed,
+// leased or continuation-budgeted.
 type Delivery struct {
 	Namespace string
 	Address   string
@@ -180,6 +180,11 @@ type InboxClient struct {
 	// content given the continuation decision. false skips the fetch
 	// entirely (nothing leased, nothing to release).
 	CanCarry func(p InboxPayload, cont bool) bool
+	// GuidanceEvents are the events whose reply can carry context and so
+	// get the routing identity block on an empty inbox (Delivery.Guidance
+	// is set only for these; a Stop that carries only a continuation is
+	// deliberately absent). Empty: the client never gets guidance.
+	GuidanceEvents []string
 	// MaxRenderBytes further caps the per-delivery render budget.
 	MaxRenderBytes int
 	// Reply writes the client's stdout reply. nil: the client has no
@@ -233,6 +238,9 @@ func mergeInboxClient(base, over InboxClient) InboxClient {
 	}
 	if over.CanCarry != nil {
 		out.CanCarry = over.CanCarry
+	}
+	if len(over.GuidanceEvents) > 0 {
+		out.GuidanceEvents = append([]string(nil), over.GuidanceEvents...)
 	}
 	if over.MaxRenderBytes > 0 {
 		out.MaxRenderBytes = over.MaxRenderBytes
@@ -587,8 +595,8 @@ func renderHeader(ns, address string, n int) string {
 
 const inboxFooterAck = "The hook acknowledges these messages once this text is delivered; do not ack them yourself. A repeated message id is a redelivery."
 
-// inboxRoutingGuidance is the compact routing identity block the Claude
-// Code hook shows on every SessionStart/UserPromptSubmit that would
+// inboxRoutingIdentity is the compact routing identity block every
+// context-capable client shows on a context-carrying event that would
 // otherwise print nothing (empty inbox), so the model always knows its
 // real session address and namespace and never invents aliases or
 // coordination namespaces (observed failure mode: agents addressing a
@@ -596,10 +604,20 @@ const inboxFooterAck = "The hook acknowledges these messages once this text is d
 // delivers on the real session_id/cwd-derived pair). Hook-authored, not
 // peer content; a delivered envelope already names address and namespace
 // in its header and reply line, so guidance is never stacked on top of
-// it. One line per fact, headerField-safe inputs only. The wake line is
-// honest about capability: without a requested listener it states there
-// is no idle wake; with one it says the listener was requested and
-// whether the native endpoint is available, never that it is live.
+// it. One line per fact, headerField-safe inputs only.
+func inboxRoutingIdentity(ns, address string) string {
+	return "[PUNK ROUTING] Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
+		"Send: send_message(namespace=" + quoteArg(ns) + ", sender=" + quoteArg(address) + ", recipient=\"<their address>\", body=\"...\"). " +
+		"Read/ack: read_messages/ack_messages(namespace=" + quoteArg(ns) + ", agent=" + quoteArg(address) + ").\n" +
+		"Use exactly this address and namespace; never invent aliases or namespaces. "
+}
+
+// inboxRoutingGuidance is the routing identity plus the wake capability
+// sentence, for the clients that have a native wake transport
+// (claude-code, codex; see wake.go). The wake line is honest about
+// capability: without a requested listener it states there is no idle
+// wake; with one it says the listener was requested and whether the
+// native endpoint is available, never that it is live.
 func inboxRoutingGuidance(ns, address string, wakeRequested, wakeCapable bool) string {
 	wakeLine := "There is no idle wake: an idle session picks up messages on its next prompt.\n"
 	switch {
@@ -608,11 +626,36 @@ func inboxRoutingGuidance(ns, address string, wakeRequested, wakeCapable bool) s
 	case wakeRequested:
 		wakeLine = "A native wake listener was configured for this session, but its native endpoint is currently unavailable; an idle session picks up messages on its next prompt.\n"
 	}
-	return "[PUNK ROUTING] Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
-		"Send: send_message(namespace=" + quoteArg(ns) + ", sender=" + quoteArg(address) + ", recipient=\"<their address>\", body=\"...\"). " +
-		"Read/ack: read_messages/ack_messages(namespace=" + quoteArg(ns) + ", agent=" + quoteArg(address) + ").\n" +
-		"Use exactly this address and namespace; never invent aliases or namespaces. " +
-		wakeLine
+	return inboxRoutingIdentity(ns, address) + wakeLine
+}
+
+// inboxWakeClients are the clients with a native wake transport (the
+// claude-code and codex branches in wake.go's Wake and wakeNewTransport).
+// Only they see wake wording in the routing guidance; every other client
+// is told nothing about wake, which does not exist for it.
+var inboxWakeClients = map[string]bool{"claude-code": true, "codex": true}
+
+// inboxGuidanceEvent reports whether event is one of the client's
+// context-carrying events (InboxClient.GuidanceEvents).
+func inboxGuidanceEvent(c InboxClient, event string) bool {
+	for _, e := range c.GuidanceEvents {
+		if e == event {
+			return true
+		}
+	}
+	return false
+}
+
+// guidanceWithinBudget clips the routing block to the client's render
+// budget (the same Total the message renderer honors) so an empty-inbox
+// reply can never exceed the per-client cap. The block is ~400 bytes, far
+// under every built-in budget, so the cut only bites when
+// PUNK_MESSAGING_RENDER_BYTES is deliberately tiny.
+func guidanceWithinBudget(c InboxClient, g string) string {
+	if total := inboxBudget(c).Total; total > 0 && len(g) > total {
+		return clipBytes(g, total)
+	}
+	return g
 }
 
 func renderFooter(deferred int) string {
@@ -1139,16 +1182,21 @@ func (r *inboxRun) deliver() error {
 			r.diagOutcome("sender_filtered", "", 0)
 		}
 		d := Delivery{Namespace: ns, Address: addr, HeldBack: batch.held}
-		// Claude Code gets its routing identity on every context-carrying
-		// event, even with an empty inbox: compaction or a fresh context
-		// must never leave the model guessing its address. Registration
-		// is confirmed above, and nothing here leases, ACKs or spends a
-		// continuation slot (the batch is empty; Stop never reaches this
-		// branch as context). Other clients keep their silent minimum
-		// reply.
-		if r.c.Name == "claude-code" && (r.payload.Event == "SessionStart" || r.payload.Event == "UserPromptSubmit") {
-			wakeRequested, wakeCapable := WakeListenerStatus(r.c.Name, r.payload.SessionID)
-			d.Guidance = inboxRoutingGuidance(ns, addr, wakeRequested, wakeCapable)
+		// Every context-capable client gets its routing identity on every
+		// event whose reply can carry context, even with an empty inbox:
+		// compaction or a fresh context must never leave the model
+		// guessing its address. Registration is confirmed above, and
+		// nothing here leases, ACKs or spends a continuation slot (the
+		// batch is empty; Stop never reaches this branch as context).
+		// Clients with a native wake transport also get the honest wake
+		// sentence; the rest are told nothing about wake.
+		if inboxGuidanceEvent(r.c, r.payload.Event) {
+			g := inboxRoutingIdentity(ns, addr)
+			if inboxWakeClients[r.c.Name] {
+				wakeRequested, wakeCapable := WakeListenerStatus(r.c.Name, r.payload.SessionID)
+				g = inboxRoutingGuidance(ns, addr, wakeRequested, wakeCapable)
+			}
+			d.Guidance = guidanceWithinBudget(r.c, g)
 		}
 		return r.reply(d, nil)
 	}

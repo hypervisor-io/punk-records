@@ -23,7 +23,9 @@ import "encoding/json"
 //     inbox.go) rides underneath that client cap.
 //   - Neither event REQUIRES a reply, so the fail-open and
 //     nothing-to-deliver answer for both is an empty stdout - exactly
-//     like Cursor's five non-blocking capture events behave today.
+//     like Cursor's five non-blocking capture events behave today. The
+//     one exception is sessionStart's routing identity block on an empty
+//     inbox (P1-A), which is context, not a delivery.
 //
 // session_id exists only on sessionStart/sessionEnd and equals
 // conversation_id; the built-in parser (parseCursorInboxPayload,
@@ -31,10 +33,11 @@ import "encoding/json"
 
 func init() {
 	RegisterInboxClient(InboxClient{
-		Name:          "cursor",
-		AllowContinue: true,
-		CanCarry:      cursorInboxCanCarry,
-		Reply:         replyCursorInbox,
+		Name:           "cursor",
+		AllowContinue:  true,
+		CanCarry:       cursorInboxCanCarry,
+		GuidanceEvents: []string{"sessionStart"},
+		Reply:          replyCursorInbox,
 	})
 }
 
@@ -53,19 +56,25 @@ func cursorInboxCanCarry(p InboxPayload, cont bool) bool {
 	return false
 }
 
+// replyCursorInbox writes Cursor's reply. sessionStart carries the
+// routing guidance (Delivery.Guidance) ahead of any rendered envelope;
+// on an empty inbox the guidance alone is a valid additional_context
+// object (Cursor has no wake transport, so no wake wording). stop carries
+// content only as a continuation.
 func replyCursorInbox(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
-	if d.Rendered == "" {
-		return InboxReply{}
-	}
 	switch req.Payload.Event {
 	case "sessionStart":
-		return InboxReply{Out: cursorJSONLine(map[string]any{"additional_context": d.Rendered}), Delivered: true}
+		text := d.Guidance + d.Rendered
+		if text == "" {
+			return InboxReply{}
+		}
+		return InboxReply{Out: cursorJSONLine(map[string]any{"additional_context": text}), Delivered: d.Rendered != ""}
 	case "stop":
 		// Rendered without a granted continuation cannot be placed:
 		// followup_message is the only content field stop has, and
 		// printing it without a reserved slot would defeat the cap.
-		if !d.Continue {
+		if d.Rendered == "" || !d.Continue {
 			return InboxReply{}
 		}
 		return InboxReply{Out: cursorJSONLine(map[string]any{"followup_message": d.Rendered}), Delivered: true}

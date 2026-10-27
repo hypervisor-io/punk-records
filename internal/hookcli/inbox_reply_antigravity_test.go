@@ -148,11 +148,19 @@ func TestInboxAntigravityStopCapHitAllowsAndAcksNothing(t *testing.T) {
 	}
 }
 
-func TestInboxAntigravityPreInvocationSilentWhenEmpty(t *testing.T) {
+func TestInboxAntigravityPreInvocationEmptyInboxCarriesRouting(t *testing.T) {
 	inboxTestEnv(t)
 	_, srv := newFakeInbox(t)
 	out, _ := runInbox(t, InboxOpts{Client: "antigravity", Mode: "context", Event: "PreInvocation", BaseURL: srv.URL, Namespace: "ns1"}, antigravityPreInvocationPayload)
-	if out != "" {
-		t.Fatalf("injectSteps is optional; an empty inbox stays silent, got %q", out)
+	var reply struct {
+		InjectSteps []map[string]string `json:"injectSteps"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &reply); err != nil || len(reply.InjectSteps) != 1 {
+		t.Fatalf("empty PreInvocation must carry one injectSteps entry with the routing identity: %q (%v)", out, err)
+	}
+	// Antigravity has no wake transport, so the identity block carries no
+	// wake wording (P1-A).
+	if g := reply.InjectSteps[0]["ephemeralMessage"]; !strings.Contains(g, "[PUNK ROUTING]") || strings.Contains(g, "wake") {
+		t.Fatalf("routing identity wrong on empty PreInvocation: %q", g)
 	}
 }

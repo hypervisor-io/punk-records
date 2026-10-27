@@ -56,6 +56,7 @@ func init() {
 			AllowContinue:  true,
 			ContinueEvent:  claudeContinueEvent,
 			CanCarry:       claudeCanCarry,
+			GuidanceEvents: []string{"SessionStart", "UserPromptSubmit"},
 			MaxRenderBytes: c.max,
 			Reply:          claudeInboxReply,
 		})
@@ -80,10 +81,10 @@ func claudeCanCarry(p InboxPayload, cont bool) bool {
 
 // claudeInboxReply writes the Claude-shaped reply. Every path without
 // deliverable text prints nothing, which both clients treat as "no
-// decision" on every wired event. The exception is Claude Code routing
-// guidance (Delivery.Guidance): on SessionStart/UserPromptSubmit it is
-// printed as additionalContext even with an empty inbox, ahead of any
-// rendered envelope; it never appears on Stop, where it would read as a
+// decision" on every wired event. The exception is the routing guidance
+// (Delivery.Guidance): on SessionStart/UserPromptSubmit it is printed as
+// additionalContext even with an empty inbox, ahead of any rendered
+// envelope; it never appears on Stop, where it would read as a
 // continuation.
 func claudeInboxReply(req InboxReplyRequest) InboxReply {
 	d := req.Delivery
