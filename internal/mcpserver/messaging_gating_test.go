@@ -64,8 +64,15 @@ func TestMessagingEnabledPreservesDefaultToolSchemas(t *testing.T) {
 	for _, set := range []string{"agent", "full"} {
 		off := probeSession(t, func(d *Deps) { d.Toolset = set })
 		on := probeSession(t, func(d *Deps) { d.Toolset = set; d.MessagingEnabled = true })
-		if off.instructions != on.instructions {
-			t.Fatal("default instructions grew with message switch")
+		// P1-B: the enabled instructions gain the messaging lead (pinned
+		// in instructions_test.go); the disabled string stays
+		// byte-identical to Instructions, and everything in it survives
+		// verbatim inside the enabled text.
+		if off.instructions != Instructions {
+			t.Fatal("disabled instructions drifted from Instructions")
+		}
+		if !strings.Contains(on.instructions, off.instructions) {
+			t.Fatal("enabled instructions dropped default guidance")
 		}
 		byName := map[string]*mcp.Tool{}
 		for _, tool := range on.tools {

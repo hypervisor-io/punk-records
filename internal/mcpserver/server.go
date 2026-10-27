@@ -311,7 +311,7 @@ func New(d Deps) *mcp.Server {
 	if opts == nil {
 		opts = &mcp.ServerOptions{}
 	}
-	opts.Instructions = Instructions
+	opts.Instructions = instructionsFor(d.MessagingEnabled)
 	s := mcp.NewServer(&mcp.Implementation{Name: "punk-records", Version: "0.1.0"}, opts)
 	s.AddReceivingMiddleware(traceMiddleware)
 	nsr := newNSResolver(d.NamespaceFor, d.DefaultNamespace)
