@@ -46,7 +46,7 @@ func (c *TaskStateCounts) add(state string) {
 // whose task fact is gone is not counted, so Total per namespace matches
 // NamespaceSummary.Tasks. Namespaces without tasks are absent.
 func (s *Store) NamespaceTaskStates(ctx context.Context) (map[string]TaskStateCounts, error) {
-	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
+	rows, err := s.db.Reader().QueryContext(ctx, s.db.Rebind(`
 		SELECT n.name, m.key,
 		       CASE WHEN m.key LIKE '%/status' THEN substr(m.body, 1, 200) ELSE '' END,
 		       CASE WHEN m.key LIKE '%/status' THEN m.attributes ELSE '{}' END
@@ -134,13 +134,18 @@ const sessionKeyPrefix = "/agent-sessions/"
 // RecentFacts returns the newest revision of each live key in a
 // namespace, most recently written first. Tombstoned and expired keys
 // are skipped. Keys under /agent-sessions/ are excluded unless
-// includeSessions. limit defaults to 50 and is capped at 200.
-func (s *Store) RecentFacts(ctx context.Context, ns string, limit int, includeSessions bool) ([]RecentFact, error) {
+// includeSessions. limit defaults to 50 and is capped at 200; offset
+// skips that many rows of the same order, for the console's "load more"
+// (negative counts as zero).
+func (s *Store) RecentFacts(ctx context.Context, ns string, limit, offset int, includeSessions bool) ([]RecentFact, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	out := []RecentFact{}
 	nsID, ok, err := s.namespaceID(ctx, ns)
@@ -157,9 +162,9 @@ func (s *Store) RecentFacts(ctx context.Context, ns string, limit int, includeSe
 		      SELECT MAX(m2.created_at) FROM memories m2
 		      WHERE m2.namespace_id = m.namespace_id AND m2.key = m.key)
 		ORDER BY m.created_at DESC, m.key
-		LIMIT $6`),
+		LIMIT $6 OFFSET $7`),
 		nsID, store.TimeToDB(s.now()), boolInt(includeSessions), likePrefix(sessionKeyPrefix),
-		RecentBodyChars, limit)
+		RecentBodyChars, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("recent facts: %w", err)
 	}

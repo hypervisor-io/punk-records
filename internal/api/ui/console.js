@@ -43,13 +43,15 @@ async function api(path, opts) {
 let authed = false;
 
 // probeAuth reports the HTTP status an authenticated route answers with
-// for the given key (empty key = no Authorization header). /v1/overview
-// is the cheap cached route; servers that predate it answer 404 there,
-// so /v1/namespaces is the fallback.
+// for the given key (empty key = no Authorization header). /v1/session
+// reads no store, so signing in never waits on a read model; servers
+// that predate it answer 404 there, and each older route is tried in
+// turn (/v1/overview, then /v1/namespaces).
 async function probeAuth(key) {
   const h = key ? { Authorization: 'Bearer ' + key } : {};
   try {
-    let r = await fetch('/v1/overview', { headers: h });
+    let r = await fetch('/v1/session', { headers: h });
+    if (r.status === 404) r = await fetch('/v1/overview', { headers: h });
     if (r.status === 404) r = await fetch('/v1/namespaces', { headers: h });
     return r.status;
   } catch (e) {
@@ -158,9 +160,38 @@ const pill = state => `<span class="pill ${stateClass(state)}">${esc(state)}</sp
 let ns = localStorage.getItem('ns') || '';
 let namespaces = null; // cache; null forces a reload
 
+// Paging. The board pages on the server (?limit/?offset); the overview
+// table and the rail page the cached /v1/overview rows in the browser,
+// since their filter and sort span every namespace. pageOffset holds the
+// first row shown per pager; filters and namespace switches reset it.
+const PAGE_SIZE = 50;
+const RAIL_PAGE = 40;
+const pageOffset = { board: 0, overview: 0 };
+let railShown = RAIL_PAGE;
+
+// pagerHTML renders "first-last of total" with prev/next buttons for
+// the named pager, or nothing when everything fits on one page.
+function pagerHTML(kind, offset, size, total) {
+  if (total <= size && offset === 0) return '';
+  const last = Math.min(offset + size, total);
+  return `<div class="mt-3 flex items-center gap-2 text-xs text-dim">
+    <button type="button" class="btn disabled:opacity-60" data-page="${kind}" data-dir="-1"${offset <= 0 ? ' disabled' : ''}>prev</button>
+    <span class="font-mono">${total ? offset + 1 : 0}-${last} of ${total}</span>
+    <button type="button" class="btn disabled:opacity-60" data-page="${kind}" data-dir="1"${last >= total ? ' disabled' : ''}>next</button>
+  </div>`;
+}
+
+// pageStep moves a pager one page and clamps it to the row count.
+function pageStep(kind, dir, total) {
+  const max = Math.max(0, Math.floor(Math.max(0, total - 1) / PAGE_SIZE) * PAGE_SIZE);
+  pageOffset[kind] = Math.min(max, Math.max(0, pageOffset[kind] + dir * PAGE_SIZE));
+}
+
 function setNS(name) {
   ns = name;
   localStorage.setItem('ns', name);
+  pageOffset.board = 0;
+  memWanted = MEM_PAGE;
   diagUnsupported = false; // probe the diagnostics route once for the newly selected namespace
   renderNamespaces();
   closeRail();
@@ -247,9 +278,15 @@ function renderNamespaces() {
   const all = namespaces || [];
   const list = all.filter(n => (!q || n.name.toLowerCase().includes(q)) && (!hideIdle || q || !nsIsIdle(n) || n.name === ns));
   const hidden = all.length - list.length;
+  // Render one page of rows (plus the selected namespace wherever it
+  // sorts), so a server with hundreds of namespaces stays a short list.
+  const shown = list.slice(0, railShown);
+  const sel0 = list.find(n => n.name === ns);
+  if (sel0 && !shown.includes(sel0)) shown.push(sel0);
+  const more = list.length - shown.length;
 
-  $('#nsList').innerHTML = (list.length
-    ? list.map(n => {
+  $('#nsList').innerHTML = (shown.length
+    ? shown.map(n => {
         const live = (n.members_live || 0) > 0, recent = (n.members_recent || 0) > 0;
         const dot = live ? '<span class="dot live-dot bg-live" title="agent listening"></span>'
           : recent ? '<span class="dot bg-live" title="agent seen in the last 10 minutes"></span>'
@@ -266,6 +303,7 @@ function renderNamespaces() {
         </button>`;
       }).join('')
     : '<div class="empty-state">no namespaces</div>') +
+    (more > 0 ? `<button type="button" class="btn mx-2 my-2" data-rail-more>show ${Math.min(more, RAIL_PAGE)} more of ${more}</button>` : '') +
     (hidden && !q ? `<div class="px-2 py-2 text-xs text-dim">${hidden} idle namespace${hidden === 1 ? '' : 's'} hidden</div>` : '');
 
   const sel = $('#nsSelect');
@@ -274,9 +312,10 @@ function renderNamespaces() {
   $('#nsLabelName').textContent = ns || 'none';
 }
 
-$('#nsFilter').addEventListener('input', renderNamespaces);
-$('#nsHideIdle').addEventListener('change', renderNamespaces);
+$('#nsFilter').addEventListener('input', () => { railShown = RAIL_PAGE; renderNamespaces(); });
+$('#nsHideIdle').addEventListener('change', () => { railShown = RAIL_PAGE; renderNamespaces(); });
 $('#nsList').addEventListener('click', e => {
+  if (e.target.closest('[data-rail-more]')) { railShown += RAIL_PAGE; renderNamespaces(); return; }
   const row = e.target.closest('[data-ns]');
   if (row) setNS(row.dataset.ns);
 });
@@ -363,8 +402,8 @@ function mountOverview(el) {
       <span id="ovCount" class="text-xs text-dim"></span>
     </div>
     <div id="ovTable"></div>`;
-  $('#ovFilter', el).addEventListener('input', renderOverview);
-  $('#ovActiveOnly', el).addEventListener('change', renderOverview);
+  $('#ovFilter', el).addEventListener('input', () => { pageOffset.overview = 0; renderOverview(); });
+  $('#ovActiveOnly', el).addEventListener('change', () => { pageOffset.overview = 0; renderOverview(); });
 }
 
 async function loadOverviewView() {
@@ -408,12 +447,15 @@ function renderOverview() {
   const activeOnly = $('#ovActiveOnly').checked;
   const rows = (overview.namespaces || []).filter(n => (!q || n.name.toLowerCase().includes(q)) && (!activeOnly || q || !nsIsIdle(n)));
   $('#ovCount').textContent = rows.length + ' of ' + (overview.namespaces || []).length;
+  ovRows = rows.length;
+  if (pageOffset.overview >= rows.length) pageOffset.overview = 0;
+  const page = rows.slice(pageOffset.overview, pageOffset.overview + PAGE_SIZE);
 
   $('#ovTable').innerHTML = rows.length
     ? `<div class="table-wrap"><table class="data-table">
         <colgroup><col style="width:28%"><col style="width:14%"><col style="width:16%"><col style="width:18%"><col style="width:12%"><col style="width:12%"></colgroup>
         <thead><tr><th>Namespace</th><th>Last activity</th><th>Agents</th><th>Tasks</th><th class="num">Unread / 24h</th><th class="num">Facts</th></tr></thead>
-        <tbody>${rows.map(n => {
+        <tbody>${page.map(n => {
           const live = n.members_live || 0, recent = n.members_recent || 0;
           const agents = n.members
             ? `<span class="${live ? 'text-live' : recent ? 'text-ink' : 'text-dim'}">${live ? '<span class="dot live-dot mr-1.5 bg-live"></span>' + live + ' live' : recent ? recent + ' recent' : 'idle'}</span> <span class="text-dim">/ ${n.members}</span>`
@@ -427,9 +469,20 @@ function renderOverview() {
             <td class="num mono" data-label="Facts">${fmtNum(n.facts)}</td>
           </tr>`;
         }).join('')}</tbody>
-      </table></div>`
+      </table></div>` + pagerHTML('overview', pageOffset.overview, PAGE_SIZE, rows.length)
     : '<div class="empty-state">No namespaces match. Agents create one when they connect or register.</div>';
 }
+
+let ovRows = 0;    // filtered overview rows, for the pager's clamp
+let boardRows = 0; // filtered board rows (server total), likewise
+
+$('#view').addEventListener('click', e => {
+  const b = e.target.closest('[data-page]');
+  if (!b || b.disabled) return;
+  const kind = b.dataset.page, dir = Number(b.dataset.dir);
+  if (kind === 'overview') { pageStep('overview', dir, ovRows); renderOverview(); }
+  if (kind === 'board') { pageStep('board', dir, boardRows); loadBoardTable(); }
+});
 
 $('#view').addEventListener('click', e => {
   const row = e.target.closest('[data-open-ns]');
@@ -473,10 +526,30 @@ function mountMemory(el) {
     </form>
     <div id="memList"></div>`;
   $('#memSearchForm', el).addEventListener('submit', e => { e.preventDefault(); loadMemory(); });
-  $('#memSessions', el).addEventListener('change', loadMemory);
+  $('#memSessions', el).addEventListener('change', () => { memWanted = MEM_PAGE; loadMemory(); });
 }
 
 let memExpanded = new Set();
+
+// The recent feed loads MEM_PAGE rows at a time; "load more" raises
+// memWanted and the 5s poll re-reads the same depth, a page per request
+// (the server caps a page at 200).
+const MEM_PAGE = 60;
+let memWanted = MEM_PAGE;
+let memHasMore = false;
+
+async function loadRecent(name, sessions) {
+  const out = [];
+  while (out.length < memWanted) {
+    const want = Math.min(200, memWanted - out.length);
+    const d = await api('/v1/namespaces/' + encodeURIComponent(name) + '/recent?limit=' + want + '&offset=' + out.length + (sessions ? '&sessions=1' : ''));
+    const page = d.facts || [];
+    out.push(...page);
+    if (page.length < want) { memHasMore = false; return out; }
+  }
+  memHasMore = true;
+  return out;
+}
 
 async function loadMemory() {
   if (!$('#memList')) return;
@@ -492,8 +565,7 @@ async function loadMemory() {
       if (!sessions) facts = facts.filter(f => !String(f.key).startsWith('/agent-sessions/'));
       heading = facts.length + ' match' + (facts.length === 1 ? '' : 'es') + ' for "' + esc(q) + '"';
     } else {
-      const d = await api('/v1/namespaces/' + encodeURIComponent(ns) + '/recent?limit=60' + (sessions ? '&sessions=1' : ''));
-      facts = d.facts || [];
+      facts = await loadRecent(ns, sessions);
       heading = 'Latest writes';
     }
     $('#memList').innerHTML = `<div class="mb-2 text-xs text-dim">${heading}</div>` + (facts.length
@@ -512,13 +584,15 @@ async function loadMemory() {
             ${long ? `<button type="button" class="mt-1 text-xs text-dim hover:text-brand" data-mem-toggle="${esc(id)}">${open ? 'show less' : 'show more'}</button>` : ''}
           </div>`;
         }).join('')}</div>`
-      : `<div class="empty-state">${q ? 'Nothing matches.' : 'No writes yet' + (sessions ? '' : ' (outside captured sessions)') + '.'}</div>`);
+      : `<div class="empty-state">${q ? 'Nothing matches.' : 'No writes yet' + (sessions ? '' : ' (outside captured sessions)') + '.'}</div>`) +
+      (!q && memHasMore ? '<button type="button" class="btn mt-3" data-mem-more>load more</button>' : '');
   } catch (e) {
     $('#memList').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
   }
 }
 
 $('#view').addEventListener('click', e => {
+  if (e.target.closest('[data-mem-more]')) { memWanted += MEM_PAGE; loadMemory(); return; }
   const t = e.target.closest('[data-mem-toggle]');
   if (!t) return;
   const id = t.dataset.memToggle;
@@ -534,6 +608,7 @@ function mountBoard(el) {
   el.innerHTML = `
     <div class="mb-3 flex flex-wrap items-center gap-2">
       <select id="boardState" class="field font-mono text-xs">
+        <option value="open">open (not done)</option>
         <option value="">all states</option>
         <option value="pending">pending</option>
         <option value="in_progress">in progress</option>
@@ -544,7 +619,7 @@ function mountBoard(el) {
     </div>
     <div id="boardSummary" class="mb-3"></div>
     <div id="boardTable"></div>`;
-  $('#boardState', el).addEventListener('change', loadBoard);
+  $('#boardState', el).addEventListener('change', () => { pageOffset.board = 0; loadBoard(); });
 }
 
 async function loadBoard() {
@@ -556,11 +631,25 @@ async function loadBoard() {
   }
 }
 
+// boardURL is one page of the board, filtered by state ('' = all).
+function boardURL(name, st, offset) {
+  return '/v1/namespaces/' + encodeURIComponent(name) + '/tasks?limit=' + PAGE_SIZE + '&offset=' + offset + (st ? '&state=' + encodeURIComponent(st) : '');
+}
+
 async function loadBoardTable() {
   if (!ns) { $('#boardSummary').innerHTML = ''; $('#boardTable').innerHTML = '<div class="empty-state">no namespace selected</div>'; return; }
   try {
     const st = $('#boardState').value;
-    const b = await api('/v1/namespaces/' + encodeURIComponent(ns) + '/tasks' + (st ? '?state=' + st : ''));
+    const reqNS = ns;
+    let b = await api(boardURL(reqNS, st, pageOffset.board));
+    // The board shrank under the current page (tasks finished or were
+    // filtered away): fall back to the last page that still has rows.
+    if (b.total !== undefined && pageOffset.board > 0 && pageOffset.board >= b.total) {
+      pageOffset.board = Math.max(0, Math.floor(Math.max(0, b.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+      b = await api(boardURL(reqNS, st, pageOffset.board));
+    }
+    if (reqNS !== ns) return; // a namespace switch landed mid-flight
+    boardRows = b.total !== undefined ? b.total : (b.tasks || []).length;
     const c = b.counts || {};
     const names = (b.members || []).map(m => m.agent || m.name || '').filter(Boolean);
     const shown = names.slice(0, 10).map(esc).join(', ') + (names.length > 10 ? ' +' + (names.length - 10) + ' more' : '');
@@ -590,8 +679,8 @@ async function loadBoardTable() {
             <td class="mono" data-label="Status">${esc(t.status || '')}</td>
             <td class="mono" data-label="Updated">${esc((t.updated_at || '').slice(0, 16))}<div>${esc(t.by || '')}</div></td>
           </tr>`).join('')}</tbody>
-        </table></div>`
-      : '<div class="empty-state">no tasks match</div>';
+        </table></div>` + pagerHTML('board', pageOffset.board, PAGE_SIZE, boardRows)
+      : '<div class="empty-state">' + (st === 'open' && c.total ? 'every task is done' : 'no tasks match') + '</div>';
   } catch (e) {
     $('#boardTable').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
   }
@@ -1689,7 +1778,8 @@ setInterval(pollCurrent, 5000);
 if (typeof module === 'object' && module && module.exports) {
   module.exports = {
     esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
-    stateClass, probeAuth, nsIsIdle, taskBar,
+    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL,
+    pageOffset, PAGE_SIZE,
     getDiagUnsupported: () => diagUnsupported,
     setDiagUnsupported: v => { diagUnsupported = v; },
     setNS: v => { ns = v; },

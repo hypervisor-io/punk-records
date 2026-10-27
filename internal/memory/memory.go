@@ -749,6 +749,74 @@ WHERE m.namespace_id = $1 AND m.action <> 'tombstone'
 ORDER BY m.key
 LIMIT $4`
 
+// latestLiveRangeSQL is latestLiveSQL plus a byte range on key
+// ($5 <= key < $6) beside the LIKE. SQLite's LIKE is ASCII
+// case-insensitive, so it cannot seek the (namespace_id, key,
+// created_at) index and walks every revision in the namespace (half a
+// second for a busy namespace's task board); the range lets the
+// latest-revision subquery and the outer join both seek the prefix.
+// SQLite only: the range is BINARY collation order, which a Postgres
+// column with a linguistic collation does not follow. It also makes the
+// match case-sensitive, so only callers whose keys follow a fixed
+// lowercase convention (the /tasks/ board) use it.
+const latestLiveRangeSQL = `
+SELECT ` + factCols + `
+FROM memories m
+JOIN (
+    SELECT key, MAX(created_at) AS mc
+    FROM memories
+    WHERE namespace_id = $1 AND key >= $5 AND key < $6 AND key LIKE $2 ESCAPE '\'
+    GROUP BY key
+) latest ON m.key = latest.key AND m.created_at = latest.mc
+WHERE m.namespace_id = $1 AND m.key >= $5 AND m.key < $6 AND m.action <> 'tombstone'
+  AND (m.expiration_date IS NULL OR m.expiration_date > $3)
+ORDER BY m.key
+LIMIT $4`
+
+// prefixUpper is the smallest string greater than every string that
+// starts with prefix, in byte order: the last byte below 0xff is
+// incremented and the rest dropped. ok is false when no such bound
+// exists (an empty or all-0xff prefix).
+func prefixUpper(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xff {
+			b[i]++
+			return string(b[:i+1]), true
+		}
+	}
+	return "", false
+}
+
+// recallPrefixRange is recallPrefix through latestLiveRangeSQL on SQLite;
+// other drivers, and prefixes with no byte-order bound, take the plain
+// query. See latestLiveRangeSQL for why only exact-case prefixes use it.
+func (s *Store) recallPrefixRange(ctx context.Context, ns, prefix string, limit int) ([]Fact, error) {
+	hi, ok := prefixUpper(prefix)
+	if s.db.Driver != "sqlite" || !ok {
+		return s.recallPrefix(ctx, ns, prefix, limit)
+	}
+	nsID, found, err := s.namespaceID(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return []Fact{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(latestLiveRangeSQL),
+		nsID, likePrefix(prefix), store.TimeToDB(s.now()), limit, prefix, hi)
+	if err != nil {
+		return nil, fmt.Errorf("recall query: %w", err)
+	}
+	defer rows.Close()
+	facts, err := s.scanFacts(ctx, ns, nsID, rows)
+	if err != nil {
+		return nil, err
+	}
+	s.decorateGeneratedStaleness(ctx, ns, facts)
+	return facts, nil
+}
+
 // Recall returns the latest live fact for every key under prefix.
 // Query errors are returned, never swallowed into an empty slice.
 func (s *Store) Recall(ctx context.Context, ns, prefix string, limit int) ([]Fact, error) {

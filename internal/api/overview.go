@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,20 +18,26 @@ import (
 )
 
 // overviewTTL is how long the cross-namespace read models (namespace
-// summaries, the overview) are reused. Both scan every namespace's
+// summaries, the overview) count as fresh. Both scan every namespace's
 // facts, which takes seconds on a large store, while the console polls
-// them every few seconds.
+// them every few seconds; past the TTL the last value is still served
+// while one background scan replaces it (see ttlCache).
 const overviewTTL = 20 * time.Second
 
 // overviewRecentWindow is the last_seen_at window that makes a member
 // "recent" in the overview.
 const overviewRecentWindow = 10 * time.Minute
 
-// ttlCache holds one computed value for ttl and collapses concurrent
-// misses into a single computation (single-flight). Errors are never
-// cached: the next caller retries. The computation runs detached from
-// the caller's context, so one client hanging up does not fail the
-// others waiting on the same result.
+// ttlCache holds one computed value and serves it stale-while-revalidate:
+// a value younger than ttl is returned as is; an older one is returned
+// at once while a single background computation refreshes it, so after
+// the first load no caller waits on the multi-second scan again. Only a
+// cache with no value yet makes callers wait, and concurrent misses
+// share one computation (single-flight). Errors are never cached: a
+// failed refresh keeps serving the last good value and the next caller
+// retries. The computation runs detached from the caller's context, so
+// one client hanging up does not fail the others waiting on the same
+// result.
 type ttlCache[T any] struct {
 	ttl time.Duration
 	now func() time.Time
@@ -52,32 +59,20 @@ func newTTLCache[T any](ttl time.Duration, now func() time.Time) *ttlCache[T] {
 	return &ttlCache[T]{ttl: ttl, now: now}
 }
 
-// get returns the cached value, or runs load once for all concurrent
-// callers when it is missing or older than the TTL.
+// get returns the cached value, refreshing it in the background when it
+// is older than the TTL, or runs load once for all concurrent callers
+// when there is no value yet.
 func (c *ttlCache[T]) get(ctx context.Context, load func(context.Context) (T, error)) (T, error) {
 	c.mu.Lock()
-	if c.ok && c.now().Sub(c.at) < c.ttl {
+	if c.ok {
 		v := c.val
+		if c.now().Sub(c.at) >= c.ttl {
+			c.startLocked(ctx, load)
+		}
 		c.mu.Unlock()
 		return v, nil
 	}
-	f := c.flight
-	if f == nil {
-		f = &cacheFlight[T]{done: make(chan struct{})}
-		c.flight = f
-		go func() {
-			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-			defer cancel()
-			f.val, f.err = load(lctx)
-			c.mu.Lock()
-			if f.err == nil {
-				c.val, c.at, c.ok = f.val, c.now(), true
-			}
-			c.flight = nil
-			c.mu.Unlock()
-			close(f.done)
-		}()
-	}
+	f := c.startLocked(ctx, load)
 	c.mu.Unlock()
 	select {
 	case <-f.done:
@@ -86,6 +81,65 @@ func (c *ttlCache[T]) get(ctx context.Context, load func(context.Context) (T, er
 		var zero T
 		return zero, ctx.Err()
 	}
+}
+
+// put stores a value computed elsewhere as fresh.
+func (c *ttlCache[T]) put(v T) {
+	c.mu.Lock()
+	c.val, c.at, c.ok = v, c.now(), true
+	c.mu.Unlock()
+}
+
+// warm starts a computation if none is running and returns without
+// waiting, so a server can fill its caches before the first request.
+func (c *ttlCache[T]) warm(ctx context.Context, load func(context.Context) (T, error)) {
+	c.mu.Lock()
+	c.startLocked(ctx, load)
+	c.mu.Unlock()
+}
+
+// settle waits for the in-flight computation, if any; tests use it to
+// observe a background refresh.
+func (c *ttlCache[T]) settle() {
+	c.mu.Lock()
+	f := c.flight
+	c.mu.Unlock()
+	if f != nil {
+		<-f.done
+	}
+}
+
+// startLocked joins the running computation or starts one. c.mu is held.
+func (c *ttlCache[T]) startLocked(ctx context.Context, load func(context.Context) (T, error)) *cacheFlight[T] {
+	if c.flight != nil {
+		return c.flight
+	}
+	f := &cacheFlight[T]{done: make(chan struct{})}
+	c.flight = f
+	go func() {
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		f.val, f.err = load(lctx)
+		c.mu.Lock()
+		if f.err == nil {
+			c.val, c.at, c.ok = f.val, c.now(), true
+		}
+		c.flight = nil
+		c.mu.Unlock()
+		close(f.done)
+	}()
+	return f
+}
+
+// WarmCaches starts computing the cross-namespace read models (namespace
+// summaries, then the overview built on them) in the background, so the
+// console's first load after a restart does not wait on a full scan of
+// the memory table. It returns at once; serve calls it after New.
+func (s *Server) WarmCaches(ctx context.Context) {
+	if s.mem == nil {
+		return
+	}
+	s.overview.warm(ctx, s.computeOverview)
 }
 
 // namespaceSummaries is memory.NamespaceSummaries behind the shared
@@ -176,10 +230,14 @@ func laterOf(ts ...time.Time) time.Time {
 // grouped queries (memory summaries, task states, members, messages,
 // claims), never one per namespace.
 func (s *Server) computeOverview(ctx context.Context) (*overviewData, error) {
-	sums, err := s.namespaceSummaries(ctx)
+	// Read the summaries directly, not through the stale-while-revalidate
+	// cache (a refresh built on a stale summary would lag a full extra
+	// cycle), and hand the fresh result to /v1/namespaces as well.
+	sums, err := s.mem.NamespaceSummaries(ctx)
 	if err != nil {
 		return nil, err
 	}
+	s.nsSums.put(sums)
 	states, err := s.mem.NamespaceTaskStates(ctx)
 	if err != nil {
 		return nil, err
@@ -309,11 +367,13 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 // handleRecent is GET /v1/namespaces/{ns}/recent: the newest live fact
 // per key, most recent first, for the console's activity feed. ?limit
-// defaults to 50 (max 200); ?sessions=1 includes /agent-sessions/ keys.
+// defaults to 50 (max 200), ?offset pages further back; ?sessions=1
+// includes /agent-sessions/ keys.
 // Authorization is the A01 path hook, as for /memories.
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	ns := chi.URLParam(r, "ns")
-	facts, err := s.mem.RecentFacts(r.Context(), ns, queryLimit(r), r.URL.Query().Get("sessions") == "1")
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	facts, err := s.mem.RecentFacts(r.Context(), ns, queryLimit(r), offset, r.URL.Query().Get("sessions") == "1")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

@@ -235,7 +235,9 @@ func TestOverviewSortOrder(t *testing.T) {
 }
 
 // TestOverviewCache: a second call inside the TTL is served from the
-// cache (new writes are not visible), and one past the TTL recomputes.
+// cache (new writes are not visible); one past the TTL still answers
+// from the cache at once and refreshes in the background, so the call
+// after that refresh sees the new write.
 func TestOverviewCache(t *testing.T) {
 	c := newClockedServer(t)
 	c.write(t, 0, "one", "/k", "v")
@@ -248,12 +250,17 @@ func TestOverviewCache(t *testing.T) {
 		t.Fatalf("within TTL facts = %d, want the cached 1", n)
 	}
 	c.cur = c.cur.Add(2 * time.Second)
+	if n := getOverview(t, c.Server).Totals.Facts; n != 1 {
+		t.Fatalf("past TTL facts = %d, want the stale 1 served while refreshing", n)
+	}
+	c.Server.overview.settle()
 	if n := getOverview(t, c.Server).Totals.Facts; n != 2 {
-		t.Fatalf("past TTL facts = %d, want recomputed 2", n)
+		t.Fatalf("after refresh facts = %d, want recomputed 2", n)
 	}
 }
 
-// TestNamespaceIndexCached: /v1/namespaces shares the 20s summaries cache.
+// TestNamespaceIndexCached: /v1/namespaces shares the 20s summaries
+// cache, served stale-while-revalidate like the overview.
 func TestNamespaceIndexCached(t *testing.T) {
 	c := newClockedServer(t)
 	c.write(t, 0, "one", "/k", "v")
@@ -273,8 +280,12 @@ func TestNamespaceIndexCached(t *testing.T) {
 		t.Fatalf("within TTL namespaces = %d, want the cached 1", n)
 	}
 	c.cur = c.cur.Add(overviewTTL + time.Second)
+	if n := count(); n != 1 {
+		t.Fatalf("past TTL namespaces = %d, want the stale 1 served while refreshing", n)
+	}
+	c.Server.nsSums.settle()
 	if n := count(); n != 2 {
-		t.Fatalf("past TTL namespaces = %d, want recomputed 2", n)
+		t.Fatalf("after refresh namespaces = %d, want recomputed 2", n)
 	}
 }
 
@@ -319,6 +330,62 @@ func TestTTLCacheSingleFlight(t *testing.T) {
 	}
 	if v, err := failing.get(context.Background(), func(context.Context) (int, error) { return 3, nil }); err != nil || v != 3 {
 		t.Fatalf("retry = %d %v, want 3 (errors are not cached)", v, err)
+	}
+}
+
+// TestTTLCacheStaleWhileRevalidate: past the TTL get returns the old
+// value without waiting, one background load replaces it, and a failed
+// refresh keeps the last good value.
+func TestTTLCacheStaleWhileRevalidate(t *testing.T) {
+	now := time.Now()
+	c := newTTLCache[int](time.Minute, func() time.Time { return now })
+	if v, err := c.get(context.Background(), func(context.Context) (int, error) { return 1, nil }); err != nil || v != 1 {
+		t.Fatalf("first = %d %v, want 1", v, err)
+	}
+	now = now.Add(2 * time.Minute)
+	release := make(chan struct{})
+	slow := func(context.Context) (int, error) { <-release; return 2, nil }
+	if v, err := c.get(context.Background(), slow); err != nil || v != 1 {
+		t.Fatalf("stale get = %d %v, want 1 without waiting on the refresh", v, err)
+	}
+	close(release)
+	c.settle()
+	if v, _ := c.get(context.Background(), slow); v != 2 {
+		t.Fatalf("after refresh = %d, want 2", v)
+	}
+	now = now.Add(2 * time.Minute)
+	boom := func(context.Context) (int, error) { return 0, context.DeadlineExceeded }
+	if v, err := c.get(context.Background(), boom); err != nil || v != 2 {
+		t.Fatalf("stale get before failed refresh = %d %v, want 2", v, err)
+	}
+	c.settle()
+	if v, err := c.get(context.Background(), boom); err != nil || v != 2 {
+		t.Fatalf("after failed refresh = %d %v, want the last good 2", v, err)
+	}
+	c.settle()
+}
+
+// TestWarmCachesFillsOverview: WarmCaches computes the overview (and the
+// summaries behind /v1/namespaces) before any request asks for it.
+func TestWarmCachesFillsOverview(t *testing.T) {
+	c := newClockedServer(t)
+	c.write(t, 0, "one", "/k", "v")
+	c.Server.WarmCaches(context.Background())
+	c.Server.overview.settle()
+	c.write(t, 0, "one", "/k2", "v") // after the warm-up: not visible yet
+	if n := getOverview(t, c.Server).Totals.Facts; n != 1 {
+		t.Fatalf("facts = %d, want the warmed 1", n)
+	}
+}
+
+// TestSessionProbe: /v1/session answers 200 for an accepted request and
+// reports the authz mode; it reads no store.
+func TestSessionProbe(t *testing.T) {
+	c := newClockedServer(t)
+	rr := do(t, c.Server, http.MethodGet, "/v1/session", "")
+	var out map[string]string
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &out) != nil || out["authz"] == "" {
+		t.Fatalf("session = %d %s", rr.Code, rr.Body.String())
 	}
 }
 

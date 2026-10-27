@@ -136,6 +136,7 @@ func New(log *slog.Logger, d Deps) *Server {
 	s.mux.Get("/readyz", s.handleReadyz)
 	s.mux.Route("/v1", func(v1 chi.Router) {
 		v1.Use(s.authMiddleware)
+		v1.Get("/session", s.handleSession)
 		if s.mem != nil {
 			v1.Get("/namespaces", s.handleNamespaceIndex)
 			v1.Get("/overview", s.handleOverview)
@@ -229,6 +230,17 @@ func (s *Server) Router() http.Handler { return s.mux }
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleSession is GET /v1/session: the console's sign-in probe. It sits
+// behind authMiddleware and touches no store, so it answers 401 for a
+// bad key and 200 otherwise without waiting on any read model.
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	authz := s.authzMode
+	if authz == "" {
+		authz = "off"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"subject": verifiedSubject(r), "authz": authz, "version": s.version})
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {

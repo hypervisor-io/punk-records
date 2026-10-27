@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +171,54 @@ func TestListTasksBeyondRecallPage(t *testing.T) {
 	for _, r := range rows {
 		if r.State != "done" || r.Title == "" {
 			t.Fatalf("row %s = state %q title %q; want done with a title", r.ID, r.State, r.Title)
+		}
+	}
+}
+
+// TestListTasksPrefixRange: the board's byte-range seek keeps exactly the
+// /tasks/ keys - neighbours that sort just outside the prefix
+// ("/tasks", "/tasks0", "/tasksx") and the differently cased "/TASKS/"
+// that SQLite's case-insensitive LIKE alone would admit are not rows, and
+// a superseded or tombstoned revision never shows.
+func TestListTasksPrefixRange(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, k := range []string{"/tasks", "/tasks0", "/tasksx/1", "/TASKS/up", "/tasks/A", "/tasks/B", "/tasks/B/status", "/tasks/gone"} {
+		if _, err := s.Remember(ctx, "rng", k, "v1 "+k, nil, "planner"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Remember(ctx, "rng", "/tasks/B/status", "done: shipped", nil, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Forget(ctx, "rng", "/tasks/gone", "planner"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListTasks(ctx, "rng")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		got = append(got, r.ID+"="+r.State)
+	}
+	if strings.Join(got, ",") != "A=pending,B=done" {
+		t.Fatalf("rows = %v, want A=pending,B=done", got)
+	}
+}
+
+func TestPrefixUpper(t *testing.T) {
+	for _, c := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{"/tasks/", "/tasks0", true},
+		{"a\xff", "b", true},
+		{"\xff\xff", "", false},
+		{"", "", false},
+	} {
+		if got, ok := prefixUpper(c.in); got != c.want || ok != c.ok {
+			t.Fatalf("prefixUpper(%q) = %q %v, want %q %v", c.in, got, ok, c.want, c.ok)
 		}
 	}
 }

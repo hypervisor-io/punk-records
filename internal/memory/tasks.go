@@ -162,7 +162,7 @@ const taskFactLimit = 20000
 // a namespace and returns one row per id, sorted by id. A status without
 // a task fact still yields a row (empty title) so nothing is hidden.
 func (s *Store) ListTasks(ctx context.Context, ns string) ([]TaskRow, error) {
-	facts, err := s.recallPrefix(ctx, ns, "/tasks/", taskFactLimit)
+	facts, err := s.recallPrefixRange(ctx, ns, "/tasks/", taskFactLimit)
 	if err != nil {
 		return nil, err
 	}

@@ -235,20 +235,55 @@ test('fetchDiagnostics is safe against prototype-polluting addresses', async () 
   assert.equal(c.diagFor(map, 'ns1', 'hasOwnProperty'), undefined, 'unknown special keys stay undefined');
 });
 
-test('probeAuth falls back to /v1/namespaces when /v1/overview is missing', async () => {
+test('probeAuth asks /v1/session first and falls back route by route on 404', async () => {
   const seen = [];
   sandbox.fetch = async (path, opts) => {
     seen.push([path, (opts && opts.headers && opts.headers.Authorization) || '']);
-    return path === '/v1/overview' ? { ok: false, status: 404 } : { ok: true, status: 200 };
+    return { ok: true, status: 200 };
   };
   assert.equal(await c.probeAuth('k1'), 200);
-  assert.deepEqual(seen, [['/v1/overview', 'Bearer k1'], ['/v1/namespaces', 'Bearer k1']]);
+  assert.deepEqual(seen, [['/v1/session', 'Bearer k1']], 'a current server answers on the store-free probe alone');
+  seen.length = 0;
+  sandbox.fetch = async (path, opts) => {
+    seen.push([path, (opts && opts.headers && opts.headers.Authorization) || '']);
+    return path === '/v1/namespaces' ? { ok: true, status: 200 } : { ok: false, status: 404 };
+  };
+  assert.equal(await c.probeAuth('k1'), 200);
+  assert.deepEqual(seen, [['/v1/session', 'Bearer k1'], ['/v1/overview', 'Bearer k1'], ['/v1/namespaces', 'Bearer k1']]);
   seen.length = 0;
   sandbox.fetch = async path => { seen.push([path, '']); return { ok: false, status: 401 }; };
   assert.equal(await c.probeAuth(''), 401, 'a rejected key is reported, not retried on the fallback');
-  assert.deepEqual(seen, [['/v1/overview', '']]);
+  assert.deepEqual(seen, [['/v1/session', '']]);
   sandbox.fetch = async () => { throw new Error('offline'); };
   assert.equal(await c.probeAuth('k1'), 0, 'network failure is 0');
+});
+
+test('pagerHTML shows the row window and disables the ends', () => {
+  assert.equal(c.pagerHTML('board', 0, 50, 30), '', 'one page needs no pager');
+  const first = c.pagerHTML('board', 0, 50, 120);
+  assert.ok(first.includes('1-50 of 120'));
+  assert.match(first, /data-dir="-1" disabled/);
+  assert.doesNotMatch(first, /data-dir="1" disabled/);
+  const last = c.pagerHTML('board', 100, 50, 120);
+  assert.ok(last.includes('101-120 of 120'));
+  assert.match(last, /data-dir="1" disabled/);
+});
+
+test('pageStep clamps to the first and last page', () => {
+  c.pageOffset.board = 0;
+  c.pageStep('board', -1, 120);
+  assert.equal(c.pageOffset.board, 0);
+  c.pageStep('board', 1, 120);
+  c.pageStep('board', 1, 120);
+  c.pageStep('board', 1, 120);
+  assert.equal(c.pageOffset.board, 100, 'never past the last page');
+  c.pageStep('board', 1, 0);
+  assert.equal(c.pageOffset.board, 0, 'an empty board pins to the start');
+});
+
+test('boardURL pages and encodes the state filter', () => {
+  assert.equal(c.boardURL('a b', 'open', 50), '/v1/namespaces/a%20b/tasks?limit=' + c.PAGE_SIZE + '&offset=50&state=open');
+  assert.equal(c.boardURL('x', '', 0), '/v1/namespaces/x/tasks?limit=' + c.PAGE_SIZE + '&offset=0');
 });
 
 test('nsIsIdle treats missing and old activity as idle', () => {

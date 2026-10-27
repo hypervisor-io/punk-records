@@ -164,3 +164,48 @@ func TestBackupSQLite(t *testing.T) {
 		t.Fatal("overwrite allowed")
 	}
 }
+
+// TestSQLiteReaderPool: a file-backed SQLite database gets a separate
+// query_only read pool that sees committed writes, refuses writes, and
+// can run while the single read-write connection is held; in-memory
+// SQLite (one database per connection) keeps reads on the main pool.
+func TestSQLiteReaderPool(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open("sqlite", filepath.Join(t.TempDir(), "reader.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if db.Reader() == db.DB {
+		t.Fatal("file-backed sqlite must get its own read pool")
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE t (v INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO t VALUES (7)`); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the only read-write connection in an open transaction: the
+	// read pool must still answer, and see the committed row.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var v int
+	if err := db.Reader().QueryRowContext(ctx, `SELECT v FROM t`).Scan(&v); err != nil || v != 7 {
+		t.Fatalf("reader = %d %v, want 7", v, err)
+	}
+	if _, err := db.Reader().ExecContext(ctx, `INSERT INTO t VALUES (8)`); err == nil {
+		t.Fatal("the read pool accepted a write")
+	}
+
+	mem, err := Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mem.Close() })
+	if mem.Reader() != mem.DB {
+		t.Fatal("in-memory sqlite must read on its main pool")
+	}
+}

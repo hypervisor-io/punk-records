@@ -15,7 +15,7 @@ test: test-ui
 
 test-ui:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test internal/api/ui/brain-core.test.mjs && node --check internal/api/ui/brain.js; \
+		node --test internal/api/ui/brain-core.test.mjs internal/api/ui/console.test.mjs && node --check internal/api/ui/brain.js && node --check internal/api/ui/console.js; \
 	else \
 		echo "node missing, skipping ui tests"; \
 	fi

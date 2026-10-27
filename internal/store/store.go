@@ -21,7 +21,37 @@ import (
 type DB struct {
 	*sql.DB
 	Driver string // "sqlite" | "postgres"
+
+	// read is the separate read-only pool behind Reader, or nil when the
+	// main pool serves reads too (Postgres, in-memory SQLite).
+	read *sql.DB
 }
+
+// Reader returns the pool for long read-only scans (the console's
+// cross-namespace read models). On a file-backed SQLite database the
+// main pool is a single connection, so a multi-second scan there would
+// queue every other request - hooks, MCP calls, messaging - behind it;
+// Reader is instead a separate query_only pool that WAL lets run beside
+// the writer. Everywhere else it is the main pool. Only statements that
+// read go through it.
+func (d *DB) Reader() *sql.DB {
+	if d.read != nil {
+		return d.read
+	}
+	return d.DB
+}
+
+// Close closes the read pool, if any, and the main pool.
+func (d *DB) Close() error {
+	if d.read != nil {
+		_ = d.read.Close()
+	}
+	return d.DB.Close()
+}
+
+// readPoolSize bounds the SQLite read pool: enough for the overview scan
+// and a concurrent namespace index, small enough to cap memory.
+const readPoolSize = 2
 
 // Open connects and pings. SQLite gets WAL + foreign keys + busy timeout;
 // these are correctness settings, not tuning.
@@ -62,7 +92,25 @@ func Open(driver, dsn string) (*DB, error) {
 		_ = d.Close()
 		return nil, fmt.Errorf("ping %s: %w", driver, err)
 	}
-	return &DB{DB: d, Driver: driver}, nil
+	out := &DB{DB: d, Driver: driver}
+	if driver == "sqlite" && !strings.Contains(dsn, ":memory:") && !strings.Contains(dsn, "mode=memory") {
+		// The main connection has already switched the file to WAL, which
+		// is what lets these readers run beside it. A read pool that
+		// fails to open costs only the separation: Reader falls back.
+		r, err := sql.Open("sqlite", dsn+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+		if err == nil {
+			r.SetMaxOpenConns(readPoolSize)
+			pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = r.PingContext(pctx)
+			pcancel()
+			if err != nil {
+				_ = r.Close()
+			} else {
+				out.read = r
+			}
+		}
+	}
+	return out, nil
 }
 
 // WithTx runs fn in a transaction: rollback on error, commit otherwise.

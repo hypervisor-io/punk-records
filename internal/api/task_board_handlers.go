@@ -18,14 +18,56 @@ const (
 	boardWaitMax = 300 * time.Second
 )
 
+// boardStateOpen is the board-only ?state filter for every task not yet
+// done; it is not a task state and set_task_status never accepts it.
+const boardStateOpen = "open"
+
+// boardPageMax caps one page of board rows.
+const boardPageMax = 500
+
+// boardPage is the paging block of a board reply: total is the row count
+// after the state filter and before paging.
+type boardPage struct {
+	Total  int `json:"total"`
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// boardPaging reads ?limit (0 = every row, capped at boardPageMax) and
+// ?offset (default 0); either one malformed or negative is an error.
+func boardPaging(r *http.Request) (limit, offset int, err error) {
+	q := r.URL.Query()
+	if raw := q.Get("limit"); raw != "" {
+		if limit, err = strconv.Atoi(raw); err != nil || limit < 0 {
+			return 0, 0, fmt.Errorf("limit must be a non-negative number")
+		}
+		if limit > boardPageMax {
+			limit = boardPageMax
+		}
+	}
+	if raw := q.Get("offset"); raw != "" {
+		if offset, err = strconv.Atoi(raw); err != nil || offset < 0 {
+			return 0, 0, fmt.Errorf("offset must be a non-negative number")
+		}
+	}
+	return limit, offset, nil
+}
+
 // handleTaskBoard is GET /v1/namespaces/{ns}/tasks: the joined task board.
-// ?state= filters rows; ?wait=<seconds> long-polls for a change first
-// (capped at boardWaitMax) and adds changed and changes to the reply.
+// ?state= filters rows (a task state, or open for every state but done);
+// ?limit and ?offset page them (total reports the
+// filtered count); ?wait=<seconds> long-polls for a change first (capped
+// at boardWaitMax) and adds changed and changes to the reply.
 func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 	ns := chi.URLParam(r, "ns")
 	state := r.URL.Query().Get("state")
-	if state != "" && !taskStateValid(state) {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("state must be one of %s", strings.Join(memory.TaskStates, ", ")))
+	if state != "" && state != boardStateOpen && !taskStateValid(state) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("state must be one of %s, %s", strings.Join(memory.TaskStates, ", "), boardStateOpen))
+		return
+	}
+	limit, offset, err := boardPaging(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	var keys []string
@@ -62,14 +104,27 @@ func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 	if state != "" {
 		kept := b.Tasks[:0:0]
 		for _, t := range b.Tasks {
-			if t.State == state {
+			if t.State == state || (state == boardStateOpen && t.State != "done") {
 				kept = append(kept, t)
 			}
 		}
 		b.Tasks = kept
 	}
+	// Paging applies after the state filter: total is the filtered row
+	// count, counts stay whole-board, and a page past the end is empty.
+	page := boardPage{Total: len(b.Tasks), Limit: limit, Offset: offset}
+	if offset > len(b.Tasks) {
+		offset = len(b.Tasks)
+	}
+	b.Tasks = b.Tasks[offset:]
+	if limit > 0 && limit < len(b.Tasks) {
+		b.Tasks = b.Tasks[:limit]
+	}
 	if !waited {
-		writeJSON(w, http.StatusOK, b)
+		writeJSON(w, http.StatusOK, struct {
+			taskboard.Board
+			boardPage
+		}{b, page})
 		return
 	}
 	if keys == nil {
@@ -77,9 +132,10 @@ func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, struct {
 		taskboard.Board
+		boardPage
 		Changed bool     `json:"changed"`
 		Changes []string `json:"changes"`
-	}{b, len(keys) > 0, keys})
+	}{b, page, len(keys) > 0, keys})
 }
 
 type taskStatusIn struct {

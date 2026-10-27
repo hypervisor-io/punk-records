@@ -891,6 +891,9 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Fill the overview caches now, so the console's first load after a
+	// restart does not wait on a full scan of the memory table.
+	srv.WarmCaches(ctx)
 
 	// hot-reload: file watcher + SIGHUP both funnel into the registry
 	reloadCh := make(chan struct{}, 1)
