@@ -1321,7 +1321,7 @@ func TestOpenCodeMessagingDeniedFirst50Allowed51(t *testing.T) {
   console.log("PASS denied-first50-allowed51")
   process.exit(0)
 `, jsStringLiteral(expectedOpenCodeEnvelope("opencode:s1", "m-allow", "planner-agent", "the one allowed message")))
-	out := runOpenCodeMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runOpenCodeMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS denied-first50-allowed51") {
 		t.Fatalf("driver did not report PASS denied-first50-allowed51:\n%s", out)
 	}

@@ -467,12 +467,16 @@ func TestInboxUndeliveredReplyAcksNothing(t *testing.T) {
 
 func TestInboxSenderAllowlistHoldsBackOthers(t *testing.T) {
 	inboxTestEnv(t)
-	t.Setenv("PUNK_MESSAGING_FROM", "messaging-, lead")
+	// Exact entries only (P3-C): "lead" covers sender "lead" but NOT
+	// "lead-1"; prefix matching now needs the explicit trailing '*'
+	// (see TestInboxAllowlistPrefixStarOptIn).
+	t.Setenv("PUNK_MESSAGING_FROM", "messaging-glm, lead")
 	f, srv := newFakeInbox(t)
 	fakeReplyClient(t, "fake", false, "")
 	f.add(msg("m1", "messaging-glm", "keep"))
 	f.add(msg("m2", "stranger", "drop"))
-	f.add(msg("m3", "lead-1", "keep too"))
+	f.add(msg("m3", "lead", "keep too"))
+	f.add(msg("m4", "lead-1", "drop: exact entry, not a prefix"))
 	out, errs := runInbox(t, InboxOpts{Client: "fake", Mode: "context", BaseURL: srv.URL, Namespace: "ns1"}, fakeStdin)
 	if strings.Contains(out, "drop") || !strings.Contains(out, "keep too") {
 		t.Fatalf("allowlist not applied: %s", out)
@@ -480,10 +484,10 @@ func TestInboxSenderAllowlistHoldsBackOthers(t *testing.T) {
 	if ids := strings.Join(f.ackedIDs(), ","); ids != "m1,m3" {
 		t.Fatalf("acked %s, want m1,m3 only", ids)
 	}
-	if ids := strings.Join(f.releasedIDs(), ","); ids != "m2" {
-		t.Fatalf("held-back lease not released: %s", ids)
+	if ids := strings.Join(f.releasedIDs(), ","); ids != "m2,m4" {
+		t.Fatalf("held-back leases not released: %s", ids)
 	}
-	if !strings.Contains(errs, "held back 1 message(s)") {
+	if !strings.Contains(errs, "held back 2 message(s)") {
 		t.Fatalf("no stderr note: %q", errs)
 	}
 	// Only held-back messages: nothing rendered, nothing acked.

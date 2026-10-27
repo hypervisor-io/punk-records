@@ -255,14 +255,30 @@ func fingerprint(msgs []messageMeta) string {
 	return strconv.FormatUint(h.Sum64(), 16)
 }
 
-// senderAllowed mirrors PUNK_MESSAGING_FROM: comma-separated prefixes,
-// an empty allowlist passes every sender.
-func senderAllowed(prefixes []string, sender string) bool {
-	if len(prefixes) == 0 {
+// SenderAllowed is the PUNK_MESSAGING_FROM matching rule, shared by
+// both Go consumption sites: this runner (fed by hookcli's
+// inboxAllowlist via Config.SenderPrefixes) and the hook inbox gate in
+// internal/hookcli (its senderAllowed delegates here). The embedded
+// client bridges mirror the same rule in punkInboxSenderAllowed
+// (internal/hookcli/inbox_renderjs.go).
+//
+// P3-C semantics: an entry matches a sender EXACTLY by default. An
+// entry ending in '*' opts into prefix matching on the entry minus the
+// trailing '*' - so a bare "*" allows every sender - and a '*' anywhere
+// else in an entry is a literal character. An empty or unset allowlist
+// passes every sender: today's behavior, deliberately unchanged.
+func SenderAllowed(allow []string, sender string) bool {
+	if len(allow) == 0 {
 		return true
 	}
-	for _, p := range prefixes {
-		if strings.HasPrefix(sender, p) {
+	for _, entry := range allow {
+		if prefix, ok := strings.CutSuffix(entry, "*"); ok {
+			if strings.HasPrefix(sender, prefix) {
+				return true
+			}
+			continue
+		}
+		if sender == entry {
 			return true
 		}
 	}
@@ -856,7 +872,7 @@ func (r *runner) fetchUnread(ctx context.Context) (inboxScan, error) {
 
 // classify routes one eligible row into allowed or denied.
 func (r *runner) classify(scan *inboxScan, m messageMeta) {
-	if senderAllowed(r.cfg.SenderPrefixes, m.Sender) {
+	if SenderAllowed(r.cfg.SenderPrefixes, m.Sender) {
 		scan.allowed = append(scan.allowed, m)
 	} else {
 		scan.denied++

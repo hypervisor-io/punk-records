@@ -518,8 +518,9 @@ minimum reply.
     unique to this invocation (`inbox-<32 hex>`). While the lease is live,
     competing hooks cannot claim the same row; expiry permits redelivery.
 6. Sort the batch. Senders outside `PUNK_MESSAGING_FROM` (comma-separated
-    sender prefixes) stay unread and unacked, and stderr notes how many
-    were held back. An id this address already printed but whose ACK was
+    senders; an entry matches exactly unless it ends in `*`, which opts
+    into prefix matching) stay unread and unacked, and stderr notes how
+    many were held back. An id this address already printed but whose ACK was
     lost is re-acked without being printed again. Held rows keep their
     leases during a bounded scan, so an allowed sender behind the first
     denied page can be reached; all held leases are released after the
@@ -843,7 +844,8 @@ like `--messaging`.
   waking entirely (the listener still monitors and reports) instead of
   resetting to the default. A cooldown (default 60 s) keeps reconnects
   and unchanged inboxes from re-nudging, and the sender allowlist is
-  the same `PUNK_MESSAGING_FROM` prefixes the inbox hook honors.
+  the same `PUNK_MESSAGING_FROM` allowlist the inbox hook honors
+  (exact match by default; a trailing `*` opts into prefix matching).
 - An inbox hook and a native listener may both report diagnostics for
   one address; the latest report wins. A `hook_continuation` observation
   therefore does not mean native wake was disabled. The listener and
@@ -925,7 +927,7 @@ Environment (read by the plugin at runtime, inside the OpenCode process):
 | `PUNK_MESSAGING_BACKOFF_MS` | retry/reconnect base delay (default 500 ms, doubling to a 30 s cap). Exists mainly so tests can exercise retries quickly |
 | `PUNK_MESSAGING_CONNECT_TIMEOUT_MS` | SSE connect watchdog (default 10 s: response headers must arrive) |
 | `PUNK_MESSAGING_IDLE_TIMEOUT_MS` | SSE idle heartbeat watchdog (default 45 s = three missed 15 s server pings) |
-| `PUNK_MESSAGING_RENDER_BYTES`, `PUNK_MESSAGING_FROM` | shared hard envelope budget and sender-prefix allowlist |
+| `PUNK_MESSAGING_RENDER_BYTES`, `PUNK_MESSAGING_FROM` | shared hard envelope budget and sender allowlist (exact match by default; a trailing `*` opts into prefix matching) |
 | `PUNK_MESSAGING_MAX_CONTINUE`, `PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS` | per-session in-process wake cap (default 5 per 600 s; 0 disables wake) |
 | `PUNK_MESSAGING_LEASE_SECONDS` | extension lease duration, default 15 s, clamped 1-300; mainly used by expiry tests |
 

@@ -165,7 +165,7 @@ does not automatically propagate to a remote client's hooks.
 |---|---|---|
 | `PUNK_MESSAGING` / subprocess hook `--messaging` | off | hook delivery opt-in; env 0 overrides flag; extensions require exact 1 |
 | `PUNK_NAMESPACE` / hook `--ns` | derive from payload cwd | explicit routing namespace, independent of MCP default |
-| `PUNK_MESSAGING_FROM` | empty | comma-separated allowed sender prefixes; held messages stay unread |
+| `PUNK_MESSAGING_FROM` | empty | comma-separated allowed senders, exact match by default (a trailing `*` opts into prefix matching); held messages stay unread |
 | `PUNK_MESSAGING_SCAN_LIMIT` | 200, clamp 50-1000 | subprocess unread scan bound; leases denied pages during the scan, then releases them to avoid first-page starvation |
 | `PUNK_MESSAGING_RENDER_BYTES` | 32768 | hard whole-envelope byte cap including header/footer/neutralisation/notes; adapter ceilings may lower it; below minimum safe envelope: no delivery/ACK, release leases |
 | `PUNK_MESSAGING_MAX_CONTINUE` | 5 | continuation/wake cap; 0 disables continuing, not context catch-up |
