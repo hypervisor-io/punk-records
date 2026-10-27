@@ -102,7 +102,7 @@ func (r DoctorReport) Render() string {
 // everything the way the connect commands do: the client's own default
 // config path, and the server from ResolveServer.
 type DoctorOptions struct {
-	ConfigPath    string // client config file; "" = the client's default (hermes: ~/.hermes/config.yaml)
+	ConfigPath    string // client config file; "" = the client's default (hermes: ~/.hermes/config.yaml; codex: $CODEX_HOME/hooks.json - a set path's DIRECTORY becomes the CODEX_HOME scope inspected for config.toml and the app-server socket)
 	AllowlistPath string // hermes only; "" = HermesAllowlistPath()
 	URLFlag       string // explicit server URL, same precedence as everywhere else in the CLI
 	Dir           string // working directory the namespace is resolved for; "" = os.Getwd()
@@ -111,7 +111,7 @@ type DoctorOptions struct {
 // doctorClients lists the clients Doctor supports, for the refusal
 // message. A new client adds its case to Doctor's switch and its name
 // here.
-var doctorClients = []string{"hermes"}
+var doctorClients = []string{"hermes", "codex"}
 
 // Doctor runs one client's health report. It returns an error only when
 // the report itself cannot run (unknown client, unresolvable punk path);
@@ -121,6 +121,8 @@ func Doctor(ctx context.Context, client string, o DoctorOptions) (DoctorReport, 
 	switch client {
 	case "hermes":
 		return doctorHermes(ctx, o)
+	case "codex":
+		return doctorCodex(ctx, o)
 	}
 	return DoctorReport{}, fmt.Errorf("unknown doctor client %q, only %s supported", client, strings.Join(quoteList(doctorClients), ", "))
 }
@@ -246,40 +248,10 @@ func doctorHermes(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 
 	// credentials: the server URL and API key punk resolves, where they
 	// came from, and the agent identity the connection pins.
-	urlOK := false
-	credsPath := CredentialsPath()
-	if _, _, credErr := LoadCredentials(credsPath); credErr != nil {
-		add(DoctorFail, "credentials", "credentials file %s is unreadable: %v", credsPath, credErr)
-	} else if u, urlErr := url.Parse(serverURL); urlErr != nil || u.Scheme == "" || u.Host == "" {
-		add(DoctorFail, "credentials", "server URL %q (from %s) is not a valid URL", serverURL, doctorServerSource(o.URLFlag))
-	} else {
-		urlOK = true
-		key := "no API key"
-		if apiKey != "" {
-			key = "API key resolved"
-		}
-		who := "agent identity not pinned (hook sessions self-register their address)"
-		if agent := doctorHermesAgent(root); agent != "" {
-			who = fmt.Sprintf("agent %s (mcp_servers.punk X-Punk-Agent)", agent)
-		}
-		add(DoctorPass, "credentials", "server %s resolved from %s, %s, %s", serverURL, doctorServerSource(o.URLFlag), key, who)
-	}
+	urlOK := doctorCredentialsCheck(add, o.URLFlag, serverURL, apiKey, doctorHermesAgent(root), "mcp_servers.punk X-Punk-Agent")
 
 	// server: a cheap reachability probe against the resolved URL only.
-	switch {
-	case !urlOK:
-		add(DoctorFail, "server", "check skipped: server URL %q is not usable", serverURL)
-	default:
-		status, probeErr := doctorProbeHealthz(ctx, serverURL, apiKey)
-		switch {
-		case probeErr != nil:
-			add(DoctorFail, "server", "%s unreachable: %v", serverURL, probeErr)
-		case status != http.StatusOK:
-			add(DoctorFail, "server", "%s answered GET /healthz with status %d", serverURL, status)
-		default:
-			add(DoctorPass, "server", "%s reachable (GET /healthz -> 200)", serverURL)
-		}
-	}
+	doctorServerCheck(ctx, add, serverURL, apiKey, urlOK)
 
 	// messaging: the inbox entry's server-side half. Only checked when
 	// --messaging is actually wired; a roots-less MCP session proves the
@@ -298,16 +270,7 @@ func doctorHermes(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		case toolsErr != nil:
 			add(DoctorFail, "messaging", "punk inbox entry is wired on pre_llm_call, but listing tools at %s failed: %v", endpoint, toolsErr)
 		default:
-			advertised := make(map[string]bool, len(tools))
-			for _, t := range tools {
-				advertised[t] = true
-			}
-			var missing []string
-			for _, t := range doctorMessagingTools {
-				if !advertised[t] {
-					missing = append(missing, t)
-				}
-			}
+			missing := doctorMissingMessagingTools(tools)
 			if len(missing) > 0 {
 				add(DoctorFail, "messaging", "punk inbox entry is wired on pre_llm_call, but the server does not advertise %s at %s - enable messaging server-side (docs/agent-messaging.md)",
 					strings.Join(missing, ", "), endpoint)
@@ -322,7 +285,7 @@ func doctorHermes(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	// for client hermes. Absence or staleness is a WARN - a snapshot is
 	// an observation, never delivery truth, and a fresh install honestly
 	// has none yet.
-	doctorHermesDiagnosticCheck(ctx, add, serverURL, apiKey, dir, urlOK)
+	doctorDiagnosticCheck(ctx, add, serverURL, apiKey, dir, urlOK, "hermes", "")
 
 	return rep, nil
 }
@@ -476,6 +439,70 @@ func doctorServerSource(flagURL string) string {
 	}
 }
 
+// doctorCredentialsCheck renders the credentials line shared by every
+// client: the resolved server URL and where it came from, whether an API
+// key resolved, and the agent identity the connection pins (agent ""
+// means unpinned - hook sessions then self-register their address from
+// the native payload, and there is nothing pinned to report). It returns
+// whether the resolved URL is usable, the gate the server, messaging and
+// diagnostic checks apply before probing.
+func doctorCredentialsCheck(add func(status, name, format string, args ...any), urlFlag, serverURL, apiKey, agent, agentSource string) bool {
+	credsPath := CredentialsPath()
+	if _, _, credErr := LoadCredentials(credsPath); credErr != nil {
+		add(DoctorFail, "credentials", "credentials file %s is unreadable: %v", credsPath, credErr)
+		return false
+	}
+	if u, urlErr := url.Parse(serverURL); urlErr != nil || u.Scheme == "" || u.Host == "" {
+		add(DoctorFail, "credentials", "server URL %q (from %s) is not a valid URL", serverURL, doctorServerSource(urlFlag))
+		return false
+	}
+	key := "no API key"
+	if apiKey != "" {
+		key = "API key resolved"
+	}
+	who := "agent identity not pinned (hook sessions self-register their address)"
+	if agent != "" {
+		who = fmt.Sprintf("agent %s (%s)", agent, agentSource)
+	}
+	add(DoctorPass, "credentials", "server %s resolved from %s, %s, %s", serverURL, doctorServerSource(urlFlag), key, who)
+	return true
+}
+
+// doctorServerCheck renders the server line shared by every client: a
+// cheap reachability probe against the resolved URL only.
+func doctorServerCheck(ctx context.Context, add func(status, name, format string, args ...any), serverURL, apiKey string, urlOK bool) {
+	switch {
+	case !urlOK:
+		add(DoctorFail, "server", "check skipped: server URL %q is not usable", serverURL)
+	default:
+		status, probeErr := doctorProbeHealthz(ctx, serverURL, apiKey)
+		switch {
+		case probeErr != nil:
+			add(DoctorFail, "server", "%s unreachable: %v", serverURL, probeErr)
+		case status != http.StatusOK:
+			add(DoctorFail, "server", "%s answered GET /healthz with status %d", serverURL, status)
+		default:
+			add(DoctorPass, "server", "%s reachable (GET /healthz -> 200)", serverURL)
+		}
+	}
+}
+
+// doctorMissingMessagingTools returns the delivery tools the advertised
+// set does not cover, in doctorMessagingTools order.
+func doctorMissingMessagingTools(tools []string) []string {
+	advertised := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		advertised[t] = true
+	}
+	var missing []string
+	for _, t := range doctorMessagingTools {
+		if !advertised[t] {
+			missing = append(missing, t)
+		}
+	}
+	return missing
+}
+
 // doctorProbeHealthz answers the reachability check: the HTTP status of
 // GET <server>/healthz, or an error when the server cannot be reached at
 // all. Bounded by httpClient's 2s timeout, so a hung server adds at most
@@ -497,20 +524,25 @@ func doctorProbeHealthz(ctx context.Context, serverURL, apiKey string) (int, err
 	return resp.StatusCode, nil
 }
 
-// doctorHermesDiagnosticCheck renders the hook-diagnostic line: the last
-// delivery snapshot the server recorded for client hermes in this
-// directory's namespace. The namespace resolves the way the hooks' own
-// delivery does: PUNK_NAMESPACE when set, else the server's own lookup
-// for the working directory (the same /v1/agent/namespace answer the
-// server derives a hook payload's cwd to).
-func doctorHermesDiagnosticCheck(ctx context.Context, add func(status, name, format string, args ...any), serverURL, apiKey, dir string, urlOK bool) {
+// doctorDiagnosticCheck renders the hook-diagnostic line for one client:
+// the last delivery snapshot the server recorded for it. The namespace
+// resolves the way the hooks' own delivery does: the hook command's --ns
+// pin when it carries one (punk connect --project), else PUNK_NAMESPACE
+// when set, else the server's own lookup for the working directory (the
+// same /v1/agent/namespace answer the server derives a hook payload's cwd
+// to).
+func doctorDiagnosticCheck(ctx context.Context, add func(status, name, format string, args ...any), serverURL, apiKey, dir string, urlOK bool, client, pinnedNS string) {
 	if !urlOK {
 		add(DoctorWarn, "hook-diagnostic", "skipped: server URL %q is not usable", serverURL)
 		return
 	}
-	ns := strings.TrimSpace(os.Getenv("PUNK_NAMESPACE"))
-	nsSource := "PUNK_NAMESPACE"
-	if ns == "" {
+	var ns, nsSource string
+	switch {
+	case pinnedNS != "":
+		ns, nsSource = pinnedNS, "the --ns hook flag"
+	case strings.TrimSpace(os.Getenv("PUNK_NAMESPACE")) != "":
+		ns, nsSource = strings.TrimSpace(os.Getenv("PUNK_NAMESPACE")), "PUNK_NAMESPACE"
+	default:
 		resolved, err := VerifyHTTP(ctx, serverURL, apiKey, dir)
 		if err != nil {
 			add(DoctorWarn, "hook-diagnostic", "namespace lookup for %s failed (%v) - cannot locate hook diagnostics", dir, err)
@@ -525,12 +557,12 @@ func doctorHermesDiagnosticCheck(ctx context.Context, add func(status, name, for
 	case status != http.StatusOK:
 		add(DoctorWarn, "hook-diagnostic", "server answered GET /v1/namespaces/%s/messages/diagnostics with status %d", ns, status)
 	default:
-		// The latest hermes snapshot: UpdatedAt uses the store's
+		// The latest snapshot for this client: UpdatedAt uses the store's
 		// fixed-width UTC encoding, so it orders lexicographically.
 		var best *doctorDiagnostic
 		for i := range diags {
 			d := &diags[i]
-			if d.Client != "hermes" {
+			if d.Client != client {
 				continue
 			}
 			if best == nil || d.UpdatedAt > best.UpdatedAt {
@@ -539,7 +571,7 @@ func doctorHermesDiagnosticCheck(ctx context.Context, add func(status, name, for
 		}
 		switch {
 		case best == nil:
-			add(DoctorWarn, "hook-diagnostic", "no diagnostic recorded for client hermes in namespace %s (%s) yet - hooks report one per inbox run (punk connect hermes --messaging)", ns, nsSource)
+			add(DoctorWarn, "hook-diagnostic", "no diagnostic recorded for client %s in namespace %s (%s) yet - hooks report one per inbox run (punk connect %s --messaging)", client, ns, nsSource, client)
 		case best.Stale:
 			add(DoctorWarn, "hook-diagnostic", "last report is stale: state %s at %s (agent %s, namespace %s, updated %s)",
 				best.State, doctorOrDash(best.LastAttemptAt), best.Agent, ns, best.UpdatedAt)
