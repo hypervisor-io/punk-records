@@ -22,16 +22,24 @@ import (
 //
 // Address resolution, in order:
 //
-//  1. The explicit address argument.
-//  2. The identity the connection pins (X-Punk-Agent, else X-Punk-Subject
-//     - the headers punk connect bakes into MCP entries and the hook
-//     [PUNK ROUTING] block reports): a hook-supplied address is the
-//     session's real address and is never replaced.
-//  3. No hook-supplied address: a minted "<clientInfo.name>:<random>"
+//  1. The explicit address argument. Hook-capable clients pass the
+//     address from their [PUNK ROUTING] block so the hook keeps reading
+//     its <client>:<session> inbox (the punk-join skill and prompt say
+//     so).
+//  2. No address argument: a minted "<clientInfo.name>:<random>"
 //     address, stable for the MCP session (repeat joins reuse it) and
 //     never shared across sessions. The mint lives in server memory only
 //     for the session's lifetime; what persists is the ordinary
 //     membership and inbox binding Register/SetInboxBinding record.
+//
+// The identity the connection pins (X-Punk-Agent, else X-Punk-Subject)
+// is NEVER an address candidate: punk connect writes X-Punk-Agent as one
+// user@host value for every client on the host, so treating it as an
+// address would join every HTTP MCP session on the machine as one
+// shared identity - one mailbox everyone reads, and whose binding the
+// last join moves. It survives as metadata only: appended to the
+// registered role as "(host identity <pinned>)" so an operator can see
+// which machine a session joined from.
 //
 // Delivery tiers per peer reuse the discovery facts list_region_members
 // already exposes: "live" for an open inbox stream right now, "catch_up"
@@ -42,7 +50,7 @@ import (
 type joinIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"defaults to workspace namespace (see whoami)"`
 	Role      string `json:"role,omitempty" jsonschema:"this session's role in the region; metadata"`
-	Address   string `json:"address,omitempty" jsonschema:"explicit punk address; defaults to this session's pinned identity, else a minted <client>:<random> address stable for this MCP session"`
+	Address   string `json:"address,omitempty" jsonschema:"explicit punk address; pass the [PUNK ROUTING] address when present, else a minted <client>:<random> address stable for this MCP session"`
 }
 
 type joinPeerOut struct {
@@ -59,7 +67,7 @@ type joinPeerOut struct {
 type joinOut struct {
 	Address   string        `json:"address"`
 	Namespace string        `json:"namespace"`
-	Minted    bool          `json:"minted,omitempty"` // true when join minted this session's address (no hook-supplied identity)
+	Minted    bool          `json:"minted,omitempty"` // true when join minted this session's address (no address argument)
 	Peers     []joinPeerOut `json:"peers"`
 	// PeersNote explains an empty peers list when the register+bind half
 	// succeeded but the peer listing was denied (a write-only grant):
@@ -68,6 +76,9 @@ type joinOut struct {
 	PeersNote string `json:"peers_note,omitempty"`
 	// Delivery states how messages reach THIS address.
 	Delivery string `json:"delivery"`
+	// MintedNote is the one-line receive hint for a minted address:
+	// set exactly when Minted, empty for every other address.
+	MintedNote string `json:"minted_note,omitempty"`
 }
 
 // joinDeliveryNote is the honest per-address delivery statement: the
@@ -75,11 +86,17 @@ type joinOut struct {
 // states both halves of the rule.
 const joinDeliveryNote = "Delivery to this address is live while its bridge stream listens; otherwise messages wait in the box until the client's next hook, read or await (catch-up)."
 
+// joinMintedHint is the one-line receive hint join returns with a
+// minted address (verdict-required text): no hook delivers to an
+// address nobody's bridge reads, so the model must receive on the MCP
+// tools itself.
+const joinMintedHint = "this address has no hook reader; use await_messages/read_messages to receive"
+
 // joinMinter mints and remembers the per-MCP-session address for
-// sessions with no hook-supplied identity. The cache is keyed by the
-// server session and bounded like the roots cache (reset wholesale past
-// the cap; a reset session that joins again simply mints a fresh
-// address, which is safe because joining is idempotent for the
+// sessions that call join without an explicit address. The cache is
+// keyed by the server session and bounded like the roots cache (reset
+// wholesale past the cap; a reset session that joins again simply mints
+// a fresh address, which is safe because joining is idempotent for the
 // membership and rebinds the inbox to the same namespace).
 type joinMinter struct {
 	mu        sync.Mutex
@@ -143,7 +160,7 @@ func joinClientName(ss *mcp.ServerSession) string {
 func registerJoinTool(s *mcp.Server, d Deps, nsr *nsResolver) {
 	minter := newJoinMinter()
 	mcp.AddTool(s, &mcp.Tool{Name: "join", OutputSchema: openOutputSchema[joinOut](),
-		Description: "Join a brain region in one call: register this session's address, bind its inbox, and report the address, namespace and active peers with each peer's delivery tier (live stream or catch-up). Without a pinned identity a stable <client>:<random> address is minted for this session and reused on repeat calls."},
+		Description: "Join a brain region in one call: register this session's address, bind its inbox, and report the address, namespace and active peers with delivery tiers (live stream or catch-up). Pass the [PUNK ROUTING] address when present; else a stable <client>:<random> address is minted for this MCP session and reused."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in joinIn) (*mcp.CallToolResult, joinOut, error) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
 			if err != nil {
@@ -151,17 +168,24 @@ func registerJoinTool(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}
 			address := strings.TrimSpace(in.Address)
 			minted := false
-			switch {
-			case address != "":
-			default:
-				if pinned := nsr.pinnedIdentity(req); pinned != "" {
-					address = pinned
-				} else {
-					address = minter.address(req.Session, joinClientName(req.Session))
-					minted = true
-				}
+			if address == "" {
+				address = minter.address(req.Session, joinClientName(req.Session))
+				minted = true
 			}
-			if err := d.Region.Register(ctx, ns, address, in.Role); err != nil {
+			// The pinned host identity (X-Punk-Agent, else the API-key
+			// subject) is metadata, never an address: punk connect
+			// writes it as one user@host value for every client on the
+			// host, so it would fuse every session's inbox into one.
+			// Keep it visible in the registered role instead.
+			role := in.Role
+			if pinned := nsr.pinnedIdentity(req); pinned != "" && pinned != address {
+				host := "(host identity " + pinned + ")"
+				if role != "" {
+					role += " "
+				}
+				role += host
+			}
+			if err := d.Region.Register(ctx, ns, address, role); err != nil {
 				return nil, joinOut{}, err
 			}
 			// Join always binds: unlike plain register (which never
@@ -173,6 +197,9 @@ func registerJoinTool(s *mcp.Server, d Deps, nsr *nsResolver) {
 			}
 			out := joinOut{Address: address, Namespace: ns, Minted: minted,
 				Peers: []joinPeerOut{}, Delivery: joinDeliveryNote}
+			if minted {
+				out.MintedNote = joinMintedHint
+			}
 			// The peer listing is read-classified: it rides the read
 			// grant, and a denial degrades to a note instead of failing
 			// the durable register+bind that already succeeded.

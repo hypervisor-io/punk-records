@@ -154,9 +154,11 @@ func (r *nsResolver) identity(req *mcp.CallToolRequest) string {
 // pinnedIdentity reports the identity the connection pins - the agent
 // name punk connect wrote into the MCP entry, else the API key subject
 // the auth middleware verified - or "" when the session carries neither.
-// The empty answer is the join tool's mint gate: no hook-supplied
-// address means join mints a per-session one instead of falling back to
-// the shared "mcp" name.
+// It is metadata, never an inbox address: punk connect writes
+// X-Punk-Agent as one user@host value for every client on the host, so
+// joining under it would fuse every HTTP MCP session on the machine
+// into one shared mailbox. whoami reports it as the claims default, and
+// join records it in the registered role as "(host identity <pinned>)".
 func (r *nsResolver) pinnedIdentity(req *mcp.CallToolRequest) string {
 	if req != nil && req.Extra != nil && req.Extra.Header != nil {
 		if a := strings.TrimSpace(req.Extra.Header.Get("X-Punk-Agent")); a != "" {

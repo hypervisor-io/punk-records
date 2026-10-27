@@ -34,8 +34,9 @@ type joinWire struct {
 		LastSeenAt string `json:"last_seen_at"`
 		Delivery   string `json:"delivery"`
 	} `json:"peers"`
-	PeersNote string `json:"peers_note"`
-	Delivery  string `json:"delivery"`
+	PeersNote  string `json:"peers_note"`
+	Delivery   string `json:"delivery"`
+	MintedNote string `json:"minted_note"`
 }
 
 // joinRig is the register_test-shaped minimal server: one sqlite db, a
@@ -108,6 +109,11 @@ func TestJoinExplicitAddressRegistersAndBinds(t *testing.T) {
 	if out.PeersNote != "" {
 		t.Fatalf("unexpected peers_note %q", out.PeersNote)
 	}
+	// An explicit address is never minted, so the no-hook-reader hint
+	// stays empty: this address may well have a hook reader.
+	if out.MintedNote != "" {
+		t.Fatalf("minted_note = %q, want it empty for an explicit address", out.MintedNote)
+	}
 }
 
 func TestJoinMintedAddressStableWithinSession(t *testing.T) {
@@ -120,9 +126,12 @@ func TestJoinMintedAddressStableWithinSession(t *testing.T) {
 	if !first.Minted || !mintedAddressRe.MatchString(first.Address) || !strings.HasPrefix(first.Address, "codex:") {
 		t.Fatalf("first join = %+v, want a minted codex:<16 hex> address", first)
 	}
+	if !strings.Contains(first.MintedNote, "no hook reader") || !strings.Contains(first.MintedNote, "await_messages/read_messages") {
+		t.Fatalf("minted_note = %q, want the no-hook-reader receive hint", first.MintedNote)
+	}
 	callJSON(t, cs, "join", map[string]any{"namespace": "ns-m"}, &second)
-	if second.Address != first.Address || !second.Minted {
-		t.Fatalf("repeat join = %+v, want the SAME minted address %q", second, first.Address)
+	if second.Address != first.Address || !second.Minted || second.MintedNote != first.MintedNote {
+		t.Fatalf("repeat join = %+v, want the SAME minted address %q and the same hint", second, first.Address)
 	}
 	// Bind recorded for the minted address.
 	if ns, ok, err := reg.InboxBinding(ctx, first.Address); err != nil || !ok || ns != "ns-m" {
@@ -139,27 +148,91 @@ func TestJoinMintedAddressStableWithinSession(t *testing.T) {
 	}
 }
 
-func TestJoinUsesHookSuppliedIdentity(t *testing.T) {
-	// The authz rig serves real HTTP, so the X-Punk-Agent /
-	// X-Punk-Namespace headers punk connect bakes into MCP entries ride
-	// every call: join must use them instead of minting.
+func TestJoinSameHostIdentityMintsDistinctAddresses(t *testing.T) {
+	// The verdict defect: punk connect writes X-Punk-Agent as one
+	// user@host value (e.g. ubuntu@SGITSERVER) for EVERY client on the
+	// host, so every HTTP MCP session on the machine rides the same
+	// header. Two sessions with that same header and no address must
+	// mint two distinct per-session addresses with two bindings - never
+	// join as, and bind the inbox of, one shared host identity that
+	// steals everyone's mail and whose inbox the last join moves.
+	g := mcpAuthzRigNew(t, true)
+	hdr := http.Header{"X-Punk-Agent": {"codex:hook-1"}, "X-Punk-Namespace": {"ns-a"}}
+	firstCS := g.connectOpts(t, hdr, nil, nil)
+	secondCS := g.connectOpts(t, hdr, nil, nil)
+	ctx := context.Background()
+
+	var a, b joinWire
+	callJSON(t, firstCS, "join", map[string]any{}, &a)
+	callJSON(t, secondCS, "join", map[string]any{}, &b)
+	for i, out := range []joinWire{a, b} {
+		if !out.Minted || !mintedAddressRe.MatchString(out.Address) || !strings.HasPrefix(out.Address, "a02:") {
+			t.Fatalf("session %d join = %+v, want a minted a02:<16 hex> address, never the host header", i+1, out)
+		}
+		if out.Address == "codex:hook-1" {
+			t.Fatal("the host-level X-Punk-Agent header must never become an inbox address")
+		}
+		if !strings.Contains(out.MintedNote, "no hook reader") || !strings.Contains(out.MintedNote, "await_messages/read_messages") {
+			t.Fatalf("session %d minted_note = %q, want the no-hook-reader receive hint", i+1, out.MintedNote)
+		}
+	}
+	if a.Address == b.Address {
+		t.Fatalf("both sessions minted the SAME address %q, want two distinct addresses", a.Address)
+	}
+	// Two bindings: one per minted address, both to the header
+	// namespace; the host identity itself never gets one.
+	for _, addr := range []string{a.Address, b.Address} {
+		if ns, ok, err := g.reg.InboxBinding(ctx, addr); err != nil || !ok || ns != "ns-a" {
+			t.Fatalf("binding for %s = (%q, %v, %v), want ns-a", addr, ns, ok, err)
+		}
+	}
+	if _, ok, err := g.reg.InboxBinding(ctx, "codex:hook-1"); err != nil || ok {
+		t.Fatalf("the host identity itself got a binding (%v, %v); it must never bind", ok, err)
+	}
+	// The pinned host identity survives as role metadata only.
+	members, err := g.reg.Members(ctx, "ns-a")
+	if err != nil || len(members) != 2 {
+		t.Fatalf("members = %+v (%v), want exactly the two minted addresses", members, err)
+	}
+	for _, m := range members {
+		if !strings.Contains(m.Role, "(host identity codex:hook-1)") {
+			t.Fatalf("member %s role = %q, want the host identity kept as metadata", m.Agent, m.Role)
+		}
+	}
+	// Minted stays stable across repeat calls in one session.
+	var again joinWire
+	callJSON(t, firstCS, "join", map[string]any{}, &again)
+	if again.Address != a.Address || !again.Minted {
+		t.Fatalf("repeat join = %+v, want the SAME minted address %q", again, a.Address)
+	}
+}
+
+func TestJoinExplicitAddressBeatsHostIdentity(t *testing.T) {
+	// An explicit address wins over everything, the host header
+	// included: the model passes the [PUNK ROUTING] block's address so
+	// the hook keeps reading its <client>:<session> inbox, and the
+	// pinned host identity rides along as role metadata.
 	g := mcpAuthzRigNew(t, true)
 	cs := g.connectOpts(t, http.Header{"X-Punk-Agent": {"codex:hook-1"}, "X-Punk-Namespace": {"ns-a"}}, nil, nil)
 	ctx := context.Background()
 
 	var out joinWire
-	callJSON(t, cs, "join", map[string]any{}, &out)
-	if out.Address != "codex:hook-1" || out.Namespace != "ns-a" || out.Minted {
-		t.Fatalf("join = %+v, want the hook-supplied address and header namespace, not minted", out)
+	callJSON(t, cs, "join", map[string]any{"address": "codex:routed-9", "role": "worker"}, &out)
+	if out.Address != "codex:routed-9" || out.Namespace != "ns-a" || out.Minted {
+		t.Fatalf("join = %+v, want the explicit address in ns-a, never minted", out)
 	}
-	if ns, ok, err := g.reg.InboxBinding(ctx, "codex:hook-1"); err != nil || !ok || ns != "ns-a" {
-		t.Fatalf("binding = (%q, %v, %v), want ns-a recorded", ns, ok, err)
+	if out.MintedNote != "" {
+		t.Fatalf("minted_note = %q, want it empty for an explicit address", out.MintedNote)
 	}
-	// Repeat call: the pinned identity is stable by definition.
-	var again joinWire
-	callJSON(t, cs, "join", map[string]any{}, &again)
-	if again.Address != "codex:hook-1" {
-		t.Fatalf("repeat join = %+v, want the same pinned address", again)
+	if ns, ok, err := g.reg.InboxBinding(ctx, "codex:routed-9"); err != nil || !ok || ns != "ns-a" {
+		t.Fatalf("binding = (%q, %v, %v), want ns-a recorded for the explicit address", ns, ok, err)
+	}
+	if _, ok, err := g.reg.InboxBinding(ctx, "codex:hook-1"); err != nil || ok {
+		t.Fatalf("the host identity got a binding (%v, %v); it must never bind", ok, err)
+	}
+	members, err := g.reg.Members(ctx, "ns-a")
+	if err != nil || len(members) != 1 || members[0].Agent != "codex:routed-9" || members[0].Role != "worker (host identity codex:hook-1)" {
+		t.Fatalf("members = %+v (%v), want the explicit address with the host identity as role metadata", members, err)
 	}
 }
 
