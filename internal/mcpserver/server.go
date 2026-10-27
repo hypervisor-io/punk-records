@@ -323,6 +323,9 @@ func New(d Deps) *mcp.Server {
 		s.AddReceivingMiddleware(newUnreadTrailer(d.Region.CountUnreadMessages, nsr).middleware())
 	}
 	registerWhoami(s, nsr)
+	// P2-B: the five punk command workflows as prompts; the text comes
+	// from the shared hookcli source, identical for every toolset.
+	registerCommandPrompts(s)
 
 	if d.Bus != nil {
 		s.AddResourceTemplate(&mcp.ResourceTemplate{
