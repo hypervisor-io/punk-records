@@ -71,7 +71,11 @@ func doctorCodex(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 			return DoctorReport{}, fmt.Errorf("resolve working directory: %w", err)
 		}
 	}
-	serverURL, apiKey := ResolveServer(o.URLFlag)
+	// ResolveServer can now fail (a malformed saved-credentials file fails
+	// closed); doctor carries it into the credentials check instead of
+	// aborting (see Doctor's contract).
+	resolved, resolveErr := ResolveServer(o.URLFlag)
+	serverURL, apiKey := resolved.URL, resolved.APIKey
 
 	// codex-home: where the Codex home came from and whether it exists.
 	if _, statErr := os.Stat(home); statErr != nil {
@@ -146,7 +150,7 @@ func doctorCodex(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 
 	// credentials: the shared check, with the agent identity read from
 	// the punk config.toml block.
-	urlOK := doctorCredentialsCheck(add, o.URLFlag, serverURL, apiKey, doctorCodexAgent(tomBody), "config.toml punk block X-Punk-Agent")
+	urlOK := doctorCredentialsCheck(add, o.URLFlag, resolved, resolveErr, doctorCodexAgent(tomBody), "config.toml punk block X-Punk-Agent")
 
 	// server: the shared reachability probe.
 	doctorServerCheck(ctx, add, serverURL, apiKey, urlOK)

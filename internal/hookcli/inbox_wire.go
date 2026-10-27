@@ -118,3 +118,18 @@ func mergeInboxFlatEntries(raw any, punkPath, client string, entry map[string]an
 	}
 	return append(entries, entry)
 }
+
+func hasPunkManagedInboxFlatEntry(raw any, punkPath, client string) bool {
+	arr, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, e := range arr {
+		if m, ok := e.(map[string]any); ok {
+			if cmd, ok := m["command"].(string); ok && isPunkManagedInbox(cmd, punkPath, client) {
+				return true
+			}
+		}
+	}
+	return false
+}

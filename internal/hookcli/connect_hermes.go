@@ -105,6 +105,12 @@ func connectHermes(configPath, punkPath, serverURL string, messaging bool) (chan
 	if err != nil {
 		return false, err
 	}
+	preLLM, err := hermesChildSequence(hooks, "pre_llm_call", configPath)
+	if err != nil {
+		return false, err
+	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	messaging = messaging || hasHermesInboxEntry(preLLM.Content, punkPath)
 
 	command := punkHermesHookCommand(punkPath, serverURL)
 	for _, ev := range hermesHookEvents {
@@ -350,6 +356,19 @@ func mergeHermesInboxEntries(entries []*yaml.Node, punkPath, command string) []*
 		kept = append(kept, e)
 	}
 	return append(kept, hermesEntryNode(command))
+}
+
+func hasHermesInboxEntry(entries []*yaml.Node, punkPath string) bool {
+	for _, e := range entries {
+		if e == nil || e.Kind != yaml.MappingNode {
+			continue
+		}
+		cmd := yamlMapValue(e, "command")
+		if cmd != nil && cmd.Kind == yaml.ScalarNode && isPunkManagedInbox(cmd.Value, punkPath, "hermes") {
+			return true
+		}
+	}
+	return false
 }
 
 // isPunkManagedHermesEntry reports whether entry is a punk-managed Hermes

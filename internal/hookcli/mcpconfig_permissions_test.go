@@ -94,7 +94,15 @@ func TestMCPConfigWriterSecurityClassificationIsExhaustive(t *testing.T) {
 	}
 }
 
-func TestMCPConfigCodexWriterIsEnvOnlyAndPrivate(t *testing.T) {
+// TestMCPConfigCodexWriterEmbedsLiteralKeyPrivately pins the Codex Desktop
+// fix: with no --api-key-env, the MCP entry carries the key as a static
+// Authorization header rather than a bearer_token_env_var reference. A GUI
+// launch (Codex Desktop) inherits no shell environment, so an env-var
+// reference resolves to nothing there and the session would connect
+// unauthenticated. The file is written owner-only because it now holds the
+// token - the same private-config discipline every other connector's
+// literal-token writer applies.
+func TestMCPConfigCodexWriterEmbedsLiteralKeyPrivately(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.toml")
 	if _, err := ConnectCodexConfig(p, MCPEntryOpts{
 		ServerURL: "https://punk.example.test",
@@ -106,11 +114,36 @@ func TestMCPConfigCodexWriterIsEnvOnlyAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), dummyMCPToken) {
-		t.Fatal("Codex is env-only and must never persist MCPEntryOpts.APIKey")
+	if strings.Contains(string(raw), "bearer_token_env_var") {
+		t.Fatalf("a literal key must not be an env reference a GUI launch cannot see:\n%s", raw)
 	}
-	if !strings.Contains(string(raw), `bearer_token_env_var = "PUNK_API_KEY"`) {
-		t.Fatalf("Codex config must classify authentication as env-only:\n%s", raw)
+	if !strings.Contains(string(raw), `"Authorization" = "Bearer `+dummyMCPToken+`"`) {
+		t.Fatalf("Codex config must embed the literal key as a static Authorization header:\n%s", raw)
+	}
+	requirePrivateConfig(t, p)
+}
+
+// TestMCPConfigCodexWriterKeepsExplicitEnvReference pins the opt-in half: an
+// explicitly selected --api-key-env NAME still writes the env-var reference
+// the operator asked for, and the key itself is never embedded.
+func TestMCPConfigCodexWriterKeepsExplicitEnvReference(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if _, err := ConnectCodexConfig(p, MCPEntryOpts{
+		ServerURL: "https://punk.example.test",
+		APIKey:    dummyMCPToken,
+		APIKeyEnv: "PUNK_CUSTOM_TOKEN",
+	}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `bearer_token_env_var = "PUNK_CUSTOM_TOKEN"`) {
+		t.Fatalf("an explicit --api-key-env must stay an env reference:\n%s", raw)
+	}
+	if strings.Contains(string(raw), dummyMCPToken) {
+		t.Fatalf("an explicit --api-key-env must not persist the key:\n%s", raw)
 	}
 	requirePrivateConfig(t, p)
 }

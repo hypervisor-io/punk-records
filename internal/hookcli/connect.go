@@ -71,9 +71,8 @@ func ConnectClaudeCodeMessaging(settingsPath, punkPath, serverURL, ns string) (c
 // running --action ensure on SessionStart, UserPromptSubmit and Stop,
 // and --action stop on SessionEnd (see wake_connect.go). The wake
 // groups are deduped by isPunkManagedWake, independently of both the
-// capture and the inbox groups; without --wake the output stays
-// byte-identical to ConnectClaudeCodeMessaging's, and a no-wake
-// reconnect over a wake install leaves the wake groups untouched.
+// capture and the inbox groups. A later reconnect without --wake preserves
+// that existing opt-in and refreshes its URL with the capture/inbox snapshot.
 func ConnectClaudeCodeWake(settingsPath, punkPath, serverURL, ns string) (changed bool, err error) {
 	return connectClaudeCode(settingsPath, punkPath, serverURL, ns, true, true)
 }
@@ -163,6 +162,33 @@ func addClaudeShapedInbox(hooksAny map[string]any, punkPath, client, serverURL, 
 	}
 }
 
+// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go evidence=docs/superpowers/reports/2026-10-09-client-credentials/builder-a.md
+func hasClaudeShapedInbox(hooksAny map[string]any, punkPath, client string) bool {
+	for _, ie := range claudeInboxEvents {
+		if arr, ok := hooksAny[ie.event].([]any); ok {
+			for _, g := range arr {
+				if isPunkManagedInboxGroup(g, punkPath, client) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func hasClaudeShapedWake(hooksAny map[string]any, punkPath, client string) bool {
+	for _, ev := range append(append([]string{}, claudeWakeEnsureEvents...), wakeStopEvent) {
+		if arr, ok := hooksAny[ev].([]any); ok {
+			for _, g := range arr {
+				if isPunkManagedWakeGroup(g, punkPath, client) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging, wake bool) (changed bool, err error) {
 	settings, existing, err := loadSettings(settingsPath)
 	if err != nil {
@@ -178,6 +204,11 @@ func connectClaudeCode(settingsPath, punkPath, serverURL, ns string, messaging, 
 	} else {
 		hooksAny = map[string]any{}
 	}
+	// Reconnect refreshes every already-enabled managed capability even when
+	// the operator omits its original opt-in flag. Presence, not a new flag,
+	// preserves the existing inbox/wake choice.
+	messaging = messaging || hasClaudeShapedInbox(hooksAny, punkPath, "claude-code")
+	wake = wake || hasClaudeShapedWake(hooksAny, punkPath, "claude-code")
 
 	command := punkHookCommand(punkPath, serverURL, ns)
 	for _, ev := range hookEvents {

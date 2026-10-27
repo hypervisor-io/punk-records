@@ -44,7 +44,7 @@ func jsStringLiteral(s string) string {
 }
 
 // openCodePluginTemplate is the full JavaScript source ConnectOpenCode
-// writes, with exactly one substitution point: the PUNK_URL fallback
+// writes, including the shared credential resolver and PUNK_URL fallback
 // default (see punkServerURL below), rendered via jsStringLiteral so a
 // serverURL containing a quote or backslash can never break out of the
 // string literal it's spliced into.
@@ -237,6 +237,8 @@ const openCodePluginTemplate = openCodePluginMarker + `
 // each carry their own watchdogs and it is torn down by its own abort
 // controllers on deletion/dispose.
 
+%s
+
 // punkCore holds every behaviour shared by the OpenCode 1.x entry point
 // (PunkMemoryPlugin, a hooks object) and the 2.x entry point
 // (default.setup, ctx.* registrations): URL/credential resolution, the
@@ -249,6 +251,7 @@ const openCodePluginTemplate = openCodePluginMarker + `
 // listSessions() (normalized [{id, directory, updated}] or null) and
 // sessionStatuses(list) (map of sessionID -> {type} or null).
 function punkCore(directory, host) {
+  const punkConnection = punkResolveConnection(%s)
   const injectedSessions = new Set()
   // Texts the bridge itself is currently handing to the host as a prompt.
   // The 2.x prompt hook has no synthetic flag, so it uses this to avoid
@@ -256,12 +259,11 @@ function punkCore(directory, host) {
   const punkBridgePrompts = new Set()
 
   function punkServerURL() {
-    const fromEnv = typeof process !== "undefined" && process.env && process.env.PUNK_URL
-    return (fromEnv || %s).replace(/\/+$/, "")
+    return punkConnection.url
   }
 
   function punkAPIKey() {
-    return (typeof process !== "undefined" && process.env && process.env.PUNK_API_KEY) || ""
+    return punkConnection.apiKey
   }
 
   // punkFetch performs one request against the punk-records server with a
@@ -276,6 +278,7 @@ function punkCore(directory, host) {
   // rejecting, so every call site can invoke it bare: no surrounding
   // try/catch and, for the observational hooks below, no await needed.
   async function punkFetch(path, init) {
+    if (!punkConnection.enabled) return null
     const controller = new AbortController()
     const parent = init && init.signal
     const abort = () => controller.abort()
@@ -420,7 +423,7 @@ function punkCore(directory, host) {
   //     messaging side does.
   // ------------------------------------------------------------------
   const messagingEnabled =
-    typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1"
+    punkConnection.enabled && typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1"
 
   // punkSessions maps sessionID -> bridge state for every bound session.
   // punkDeletedSessions records session ids that must never bind again.
@@ -722,6 +725,7 @@ function punkCore(directory, host) {
   // capped backoff as dropped connections; the backoff resets only after
   // a connection actually delivered bytes. Never rejects.
   async function punkListenSSE(sessionID, st, ns) {
+    if (!punkConnection.enabled) return
     const path = punkInboxMessagesBase(ns) + "/events?agent=" + encodeURIComponent(st.agent)
     let reconnect = false
     while (punkAlive(st, sessionID)) {
@@ -1658,5 +1662,5 @@ export default {
 // runtime via the PUNK_URL environment variable, see the rendered
 // plugin's own header comment and punkServerURL().
 func openCodePluginContent(serverURL string) string {
-	return fmt.Sprintf(openCodePluginTemplate, jsStringLiteral(serverURL), inboxBridgeJS(), openCodeBridgeExtrasJS)
+	return fmt.Sprintf(openCodePluginTemplate, credentialsJS, jsStringLiteral(serverURL), inboxBridgeJS(), openCodeBridgeExtrasJS)
 }

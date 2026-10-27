@@ -14,8 +14,8 @@ import (
 // SessionStart/UserPromptSubmit/Stop and the stop action on SessionEnd.
 // The three detectors are mutually exclusive by marker token (" hook"
 // + boundary vs " hook inbox" vs " hook wake"), so one kind's merge
-// never claims another kind's group, and a no-wake (re)connect leaves
-// every wake group - and every byte around it - untouched.
+// never claims another kind's group. A no-wake reconnect preserves an
+// existing wake opt-in and refreshes its URL; it never enables wake anew.
 //
 // The command deliberately ends with --messaging, like the inbox
 // command (see inbox_wire.go): --wake implies --messaging, so delivery

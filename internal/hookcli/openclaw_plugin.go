@@ -30,10 +30,9 @@ const OpenClawPluginID = "punk-memory"
 var nulSeparator = string(rune(0x5C)) + "u0000"
 
 // openClawPluginTemplate is the full JavaScript source WriteOpenClawPlugin
-// writes. Substitution points, in order: the managed marker, the PUNK_URL
-// fallback default (rendered via jsStringLiteral so a serverURL containing a
-// quote or backslash can never break out of its string literal), the plugin
-// id, the plugin id again for the display name, and the NUL separator.
+// writes. Substitution points: managed marker, shared credentials resolver,
+// installation URL (escaped via jsStringLiteral), plugin id, messaging bridge,
+// and prompt/tool identity NUL separators.
 //
 // Design notes, since this is a JS file most readers will only ever see as
 // generated output:
@@ -113,26 +112,30 @@ const openClawPluginTemplate = `%s
 // Injection: before_prompt_build returns prependContext holding this
 // project's recalled memory, once per session.
 
+%s
+
 const PUNK_DEFAULT_URL = %s;
 const PUNK_PLUGIN_ID = %s;
 const PUNK_TIMEOUT_MS = 2000;
 
+// Keep credentials and bridge state scoped to this registration, even if a
+// host reuses the cached module while replacing a plugin instance.
+function punkRegister(api) {
+const punkConnection = punkResolveConnection(PUNK_DEFAULT_URL);
+
 function punkURL() {
-  const raw =
-    (typeof process !== "undefined" && process.env && process.env.PUNK_URL) ||
-    PUNK_DEFAULT_URL;
-  return String(raw).replace(/\/+$/, "");
+  return punkConnection.url;
 }
 
 function punkHeaders() {
   const headers = { "Content-Type": "application/json" };
-  const key =
-    (typeof process !== "undefined" && process.env && process.env.PUNK_API_KEY) || "";
+  const key = punkConnection.apiKey;
   if (key) headers["Authorization"] = "Bearer " + key;
   return headers;
 }
 
 async function punkFetch(path, init) {
+  if (!punkConnection.enabled) return null;
   const controller = new AbortController();
   const parent = init && init.signal;
   const abort = () => controller.abort();
@@ -260,13 +263,6 @@ const punkInjected = new Set();
 
 %s
 
-// The plugin object is declared as a named const (not an anonymous export
-// literal) so punk's behavioral harness can call register() directly;
-// the default export shape OpenClaw loads is unchanged.
-const punkOpenClawPlugin = {
-  id: PUNK_PLUGIN_ID,
-  name: "punk memory",
-  register(api) {
     api.on("session_start", async (event, ctx) => {
       try {
         punkCapture(punkEnvelope(event, ctx, "SessionStart"));
@@ -389,20 +385,27 @@ const punkOpenClawPlugin = {
         console.error("[punk] gateway_stop:", err);
       }
     });
-  },
+}
+
+// The default export shape OpenClaw loads is unchanged.
+const punkOpenClawPlugin = {
+  id: PUNK_PLUGIN_ID,
+  name: "punk memory",
+  register: punkRegister,
 };
 
 export default punkOpenClawPlugin;
 `
 
 // openClawPluginSource renders the plugin entry file for serverURL. Verb
-// order in the template: managed marker, PUNK_URL fallback, plugin id,
+// order in the template: managed marker, credentials, PUNK_URL fallback, plugin id,
 // the messaging-bridge splice (after the punkInjected declaration, before
 // the register body), then the four NUL separators inside the capture
 // handlers.
 func openClawPluginSource(serverURL string) string {
 	return fmt.Sprintf(openClawPluginTemplate,
 		openClawPluginMarker,
+		credentialsJS,
 		jsStringLiteral(serverURL),
 		jsStringLiteral(OpenClawPluginID),
 		openClawMessagingBridgeJS(),
@@ -499,7 +502,7 @@ const openClawBridgeCoreJS = `
   // the confirmed-registration retry loop, gateway_stop teardown, and
   // the before_prompt_build catch-up itself.
   const punkMessagingEnabled =
-    typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1";
+    punkConnection.enabled && typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1";
   const punkSessions = new Map();
   let punkDisposed = false;
 

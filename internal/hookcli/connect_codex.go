@@ -62,6 +62,9 @@ func connectCodexHooks(hooksPath, punkPath, serverURL, ns string, messaging, wak
 	} else {
 		hooksAny = map[string]any{}
 	}
+	// codeops:trace repo=punk-records work_item=punk-connect-remote-url-review-20261009 spec=docs/client-credentials.md plan=phase-1/task-1-A test=internal/hookcli/client_credentials_reconnect_test.go
+	messaging = messaging || hasClaudeShapedInbox(hooksAny, punkPath, "codex")
+	wake = wake || hasClaudeShapedWake(hooksAny, punkPath, "codex")
 	command := punkHookCommandFrom(punkPath, serverURL, ns, "codex")
 	for _, ev := range codexHookEvents {
 		if raw, ok := hooksAny[ev]; ok && raw != nil {
@@ -133,13 +136,21 @@ func codexManagedBlock(o MCPEntryOpts, includeFeatures bool) string {
 	}
 	b.WriteString(codexPunkTable + "\n")
 	b.WriteString("url = " + tomlString(mcpEndpoint(o.ServerURL)) + "\n")
-	switch {
-	case o.APIKeyEnv != "":
-		b.WriteString("bearer_token_env_var = " + tomlString(o.APIKeyEnv) + "\n")
-	case o.APIKey != "":
-		b.WriteString("bearer_token_env_var = \"PUNK_API_KEY\"\n")
-	}
+	// Credential placement, decided by the one shared rule (mcpKeyEnv).
+	// An explicit --api-key-env NAME keeps the env-var reference the
+	// operator chose, and so does a project-scoped config (the file lives
+	// in the repository and may be committed). A literal key is written as
+	// a static Authorization header INSIDE this punk-managed block only for
+	// a GLOBAL config: a GUI launch (Codex Desktop) inherits no shell
+	// environment, so a PUNK_API_KEY reference would resolve to nothing
+	// there. That embedding is safe because ConnectCodexConfig writes
+	// config.toml mode 0600.
 	var hdrs []string
+	if env, ok := mcpKeyEnv(o); ok {
+		b.WriteString("bearer_token_env_var = " + tomlString(env) + "\n")
+	} else if o.APIKey != "" {
+		hdrs = append(hdrs, tomlString("Authorization")+" = "+tomlString("Bearer "+o.APIKey))
+	}
 	if o.Namespace != "" {
 		hdrs = append(hdrs, tomlString("X-Punk-Namespace")+" = "+tomlString(o.Namespace))
 	}
