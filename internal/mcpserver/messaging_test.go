@@ -235,7 +235,10 @@ func TestMessagingValidation(t *testing.T) {
 		value       any
 	}{
 		{"empty body", "body", ""}, {"large body", "body", strings.Repeat("x", 16*1024+1)},
-		{"long identifier", "task_id", strings.Repeat("x", 257)}, {"unknown sender", "sender", "unknown"},
+		{"long identifier", "task_id", strings.Repeat("x", 257)},
+		// No "unknown sender" case: P4-B auto-registers an unknown
+		// caller plain, so a first send from it succeeds; the new
+		// semantics are pinned in messaging_autoregister_test.go.
 		{"unknown reply", "reply_to", "missing"}, {"conflicting retry", "body", "different"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
