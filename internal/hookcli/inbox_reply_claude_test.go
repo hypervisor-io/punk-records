@@ -469,9 +469,10 @@ func TestClaudeInboxRoutingGuidance(t *testing.T) {
 		t.Fatalf("delivery changed: out=%q acked=%v", out, f.ackedIDs())
 	}
 
-	// Other clients keep their silent minimum reply on an empty inbox.
-	if out := run("codex", "UserPromptSubmit"); out != "" {
-		t.Fatalf("codex empty inbox printed %q", out)
+	// Codex shares this writer and, like every context-capable client,
+	// now also carries the routing identity on its context events (P1-A).
+	if out := run("codex", "UserPromptSubmit"); !strings.Contains(out, "[PUNK ROUTING]") {
+		t.Fatalf("codex empty inbox must carry guidance, got %q", out)
 	}
 
 	// Disabled messaging stays fully silent (and request-free).
