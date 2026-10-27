@@ -223,6 +223,14 @@ func TestOpenCodeV2SetupHooksAndCleanup(t *testing.T) {
   await ctx.hooks.session["context"](ev2)
   must(ev2.system.length === 0 && punkTestServer.contextFetches === 1, "context fetched once per session")
 
+  // A 2.x host older than the execution events only sends session.idle:
+  // there it is still the full end of turn (Stop recorded).
+  const beforeOld = hookPosts.length
+  ctx.emit({ type: "session.created", data: { sessionID: "s2" } })
+  ctx.emit({ type: "session.idle", data: { sessionID: "s2" } })
+  await until(() => hookPosts.length === beforeOld + 2, "older-host SessionStart + Stop")
+  must(hookPosts[beforeOld + 1].body.hook_event_name === "Stop" && hookPosts[beforeOld + 1].body.session_id === "s2", "Stop from session.idle on a host without execution events: " + JSON.stringify(hookPosts[beforeOld + 1].body))
+
   // cleanup
   await cleanup()
   must(ctx.subscribeCalls[0].signal.aborted, "cleanup aborts the event subscription")

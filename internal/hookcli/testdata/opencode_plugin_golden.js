@@ -2931,9 +2931,16 @@ async function punkSetupV2(ctx) {
     }
   })
 
+  // Sessions whose host reports runs through session.execution.*; for
+  // the rest (a 2.x host older than the execution events) session.idle
+  // is still the end of the turn.
+  const executionSessions = new Set()
   function handleEvent(ev) {
     try {
       const d = (ev && ev.data) || {}
+      if (ev && typeof ev.type === "string" && ev.type.startsWith("session.execution.") && d.sessionID) {
+        executionSessions.add(d.sessionID)
+      }
       switch (ev && ev.type) {
         case "session.created":
           core.sessionCreated(d.sessionID)
@@ -2954,16 +2961,19 @@ async function punkSetupV2(ctx) {
           break
         // Deprecated ephemeral events (@opencode/schema@2.2.0
         // session-status-event.ts) that the 2.2.0 server never publishes.
-        // Still honoured should a host emit them, but idle-only: the Stop
-        // capture rides session.execution.succeeded, so a host that sends
-        // both does not record the turn twice.
+        // A host that also reports session.execution.* gets idle-only
+        // here (the Stop capture rides session.execution.succeeded, so
+        // the turn is not recorded twice); an older host that only sends
+        // session.idle keeps it as the full end of turn.
         case "session.idle":
-          core.sessionError(d.sessionID)
+          if (executionSessions.has(d.sessionID)) core.sessionError(d.sessionID)
+          else core.sessionIdle(d.sessionID)
           break
         case "session.status":
           core.sessionStatus({ sessionID: d.sessionID, status: d.status })
           break
         case "session.deleted":
+          executionSessions.delete(d.sessionID)
           core.sessionDeleted(d.sessionID)
           break
       }

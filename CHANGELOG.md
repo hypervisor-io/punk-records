@@ -145,6 +145,20 @@ that must be earned by the transport and the file it lands in.
 
 ### Fixed
 
+- **OpenCode 2.x idle wake (opencode serve, desktop).** OpenCode 2.2.0
+  reports a run only through `session.execution.started/succeeded/
+  failed/interrupted`; `session.idle` and `session.status` are deprecated
+  and never published. The plugin waited for `session.idle`, so after a
+  session's first human turn every later message stayed
+  `waiting_for_idle` and the wake never fired. The plugin now ends a turn
+  on `session.execution.succeeded` (Stop capture plus the idle drain) and
+  keeps `session.idle` as the end of turn only for hosts that never send
+  the execution events. Headless `opencode serve` also loads plugins
+  lazily per directory and unloads them after
+  `experimental.location_idle_timeout` (default 60 minutes) without
+  session activity; set `"experimental": {"location_idle_timeout": false}`
+  in `opencode.json` to keep the bridge listening on an idle server.
+
 - **Client-neutral command text.** The shared command render carried a
   per-client invocation token, so the Codex copy under `$CODEX_HOME` and
   the copy at the shared `~/.agents/skills` root differed and Codex listed
