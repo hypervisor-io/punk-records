@@ -234,8 +234,10 @@ func TestAgentGuidanceMessaging(t *testing.T) {
 				// Pi has no slash commands, so its fallback stays the HTTP API.
 				forbidGuidance(t, text, CommandJoin)
 			} else {
-				// The absent-[PUNK ROUTING] fallback names this client's syntax.
-				requireGuidance(t, text, commandInvocation(opts.Agent, CommandJoin)+" to register")
+				// The absent-[PUNK ROUTING] fallback names the shared,
+				// client-neutral form (P2-A-fix), identical for every client
+				// so the Codex/shared-root dedupe fires.
+				requireGuidance(t, text, commandRef(CommandJoin)+" to register")
 			}
 			if opts.Pi {
 				requireGuidance(t, text, "POST /v1/namespaces/<ns>/messages", "GET /messages?agent=", "POST /messages/ack", "four Pi memory tools are not message tools", "HTTP routes")
@@ -294,10 +296,11 @@ func TestAgentGuidanceBudgets(t *testing.T) {
 			}
 			// Apply the opt-in bound to every tool prefix and both
 			// renderers, not just the plain-tools render. P2-A raised it
-			// from 1400: the opt-in text now points at the [PUNK ROUTING]
-			// block and the punk-join fallback and drops the SSE wording
-			// (net +147 bytes; the widest render, claude-code's planner,
-			// measured 1547).
+			// from 1400 (the [PUNK ROUTING] pointer and the punk-join
+			// fallback replaced the SSE wording) and P2-A-fix made that
+			// fallback client-neutral so Codex dedupes against the shared
+			// root; the widest render, claude-code's planner, now measures
+			// 1580.
 			for _, render := range []func(SkillOpts) string{RenderSkill, RenderPlanSkill} {
 				if extra := len(render(opts)) - len(render(base)); extra > 1600 {
 					t.Errorf("messaging adds %d bytes, budget 1600 including tool prefixes", extra)

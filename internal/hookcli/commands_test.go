@@ -1,6 +1,7 @@
 package hookcli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,8 +147,8 @@ func TestCommandFrontmatterValid(t *testing.T) {
 }
 
 // TestCommandBodiesCallMCPTools pins the workflow each command wraps and the
-// per-client tool prefix and invocation syntax, so a body cannot silently
-// stop calling the tool it documents.
+// per-client tool prefix, so a body cannot silently stop calling the tool it
+// documents.
 func TestCommandBodiesCallMCPTools(t *testing.T) {
 	tools := map[string][]string{
 		CommandJoin:    {"whoami", "register", "list_region_members"},
@@ -178,33 +179,36 @@ func TestCommandBodiesCallMCPTools(t *testing.T) {
 				}
 			}
 			// Every command except punk-join sends the model to punk-join
-			// when the [PUNK ROUTING] block is absent, in this client's
-			// syntax.
+			// when the [PUNK ROUTING] block is absent, in the client-neutral
+			// form every render shares.
 			if name != CommandJoin {
-				if want := commandInvocation(agent, CommandJoin); !strings.Contains(body, want) {
+				if want := commandRef(CommandJoin); !strings.Contains(body, want) {
 					t.Fatalf("%s/%s: body must name the join command as %s", agent, name, want)
 				}
 			}
 			if !strings.Contains(body, "[PUNK ROUTING]") {
 				t.Fatalf("%s/%s: body must point at the [PUNK ROUTING] block", agent, name)
 			}
+			// The neutral reference names both client forms, so a client
+			// still learns its own syntax from the shared text.
+			if name != CommandJoin && !strings.Contains(body, "/"+CommandJoin) {
+				t.Fatalf("%s/%s: body must name the slash form", agent, name)
+			}
+			if name != CommandJoin && !strings.Contains(body, "$"+CommandJoin+" in Codex") {
+				t.Fatalf("%s/%s: body must name the Codex form", agent, name)
+			}
 		}
 	}
-	// The invocation syntax is the task's per-client contract.
-	if got := commandInvocation("codex", CommandJoin); got != "$punk-join" {
-		t.Fatalf("codex invocation = %q", got)
-	}
-	for _, agent := range []string{"claude-code", "hermes", "cursor", "copilot"} {
-		if got := commandInvocation(agent, CommandJoin); got != "/punk-join" {
-			t.Fatalf("%s invocation = %q", agent, got)
-		}
+	// P2-A-fix: the reference is client-neutral, not per-client.
+	if got := commandRef(CommandJoin); got != "punk-join (/punk-join; $punk-join in Codex)" {
+		t.Fatalf("commandRef(punk-join) = %q", got)
 	}
 }
 
 // TestCommandTextSingleSharedSource proves the client files are one source:
 // the body CommandBody returns (the text P2-B reuses) appears exactly once
-// inside the rendered file, and the only difference between two clients is
-// the tool prefix and the invocation syntax.
+// inside the rendered file, and two clients differ only by the tool prefix
+// (the invocation text is shared, not per-client - P2-A-fix).
 func TestCommandTextSingleSharedSource(t *testing.T) {
 	for _, name := range CommandNames {
 		o := SkillOpts{Agent: "claude-code", ToolPrefix: "mcp__punk__", Command: name}
@@ -222,15 +226,21 @@ func TestCommandTextSingleSharedSource(t *testing.T) {
 		if _, ok := CommandBody("no-such-command", o); ok {
 			t.Fatal("unknown command must not render")
 		}
+		if desc, ok := CommandDescription(name); !ok || desc == "" {
+			t.Fatalf("%s: CommandDescription = %q, %t", name, desc, ok)
+		}
 	}
-	// Cross-client: identical bytes once the prefix and the invocation token
-	// are normalized away, so nothing is duplicated per client.
+	if _, ok := CommandDescription("no-such-command"); ok {
+		t.Fatal("unknown command must not have a description")
+	}
+	// Cross-client: identical bytes once the tool prefix is normalized away,
+	// so nothing else is duplicated per client.
 	for _, name := range CommandNames {
 		claude, _ := CommandBody(name, SkillOpts{Agent: "claude-code", ToolPrefix: "mcp__punk__", Command: name})
 		codex, _ := CommandBody(name, SkillOpts{Agent: "codex", Command: name})
-		norm := strings.NewReplacer("`mcp__punk__", "`", "/punk-", "$punk-")
+		norm := strings.NewReplacer("`mcp__punk__", "`")
 		if norm.Replace(claude) != norm.Replace(codex) {
-			t.Fatalf("%s: bodies differ by more than the tool prefix and invocation syntax", name)
+			t.Fatalf("%s: bodies differ by more than the tool prefix", name)
 		}
 	}
 }
@@ -285,5 +295,63 @@ func TestCommandTargetsInstalledThroughAllSkillTargets(t *testing.T) {
 		if tg.Opts.Command != "" {
 			t.Fatalf("pi must not install command %s", tg.Name)
 		}
+	}
+}
+
+// TestCodexRenderMatchesSharedRootForEverySkill is the P2-A-fix regression:
+// Codex discovers both CODEX_HOME/skills and the shared ~/.agents/skills
+// tree, so every skill punk installs must render byte-identically for codex
+// and for a shared-root client, with messaging guidance on and off.
+// Otherwise ReconcileCodexSkillTargets cannot dedupe and Codex's catalog
+// lists each punk skill twice.
+func TestCodexRenderMatchesSharedRootForEverySkill(t *testing.T) {
+	const serverURL = "http://127.0.0.1:19393"
+	for _, messaging := range []bool{false, true} {
+		t.Run(fmt.Sprintf("messaging=%t", messaging), func(t *testing.T) {
+			home := t.TempDir()
+			env := func(k string) string {
+				if k == "CODEX_HOME" {
+					return filepath.Join(home, ".codex")
+				}
+				return ""
+			}
+			// Populate effective options exactly as installSkillFor does,
+			// before any comparison or write.
+			populate := func(agent string) []SkillTarget {
+				ts, err := AllSkillTargets(agent, false, home, env)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := range ts {
+					ts[i].Opts.ServerURL, ts[i].Opts.Messaging = serverURL, messaging
+				}
+				return ts
+			}
+			codex := populate("codex")
+			shared := populate("cursor") // cursor renders the shared-root bytes
+			if len(codex) != 2+len(CommandNames) || len(shared) != len(codex) {
+				t.Fatalf("codex=%d shared=%d skills, want %d", len(codex), len(shared), 2+len(CommandNames))
+			}
+			byName := make(map[string]SkillTarget, len(shared))
+			for _, tg := range shared {
+				byName[tg.Name] = tg
+				writeSkillFile(t, filepath.Join(home, ".agents", "skills", tg.Name, "SKILL.md"), Render(tg))
+			}
+			for _, tg := range codex {
+				sh, ok := byName[tg.Name]
+				if !ok {
+					t.Fatalf("codex skill %s has no shared counterpart", tg.Name)
+				}
+				if got, want := Render(tg), Render(sh); got != want {
+					t.Fatalf("codex %s render differs from the shared root", tg.Name)
+				}
+			}
+			// End to end: with the shared copies installed, every codex
+			// target is redundant and the reconcile keeps none.
+			kept, notes := ReconcileCodexSkillTargets(codex, home, env)
+			if len(kept) != 0 {
+				t.Fatalf("codex must dedupe against the shared root, kept=%+v notes=%v", kept, notes)
+			}
+		})
 	}
 }
