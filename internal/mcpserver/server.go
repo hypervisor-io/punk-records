@@ -527,6 +527,7 @@ func New(d Deps) *mcp.Server {
 
 	if d.Region != nil {
 		registerRegionTools(s, d, nsr)
+		registerJoinTool(s, d, nsr)
 		if d.MessagingEnabled {
 			registerMessagingTools(s, d, nsr)
 		}

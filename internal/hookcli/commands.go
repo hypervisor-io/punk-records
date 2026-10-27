@@ -77,11 +77,9 @@ var commandSpecs = []commandSpec{
 
 Register this session so peers can message it, then report the address.
 
-1. {{tool .Opts "whoami"}} reports the default namespace, identity and server. It registers nothing and does not change omitted namespace or sender.
-2. {{tool .Opts "register"}} with inbox: true and a session-unique agent id. This binds only this session's address in an authorized namespace. Under enforced HTTP authorization it needs a write grant first; a plain register (no inbox) does not bind, and binding does not change omitted namespace or sender.
-3. {{tool .Opts "list_region_members"}} with active_only: true to confirm the address and list peers. listening: true means that client's bridge is attached; roles are metadata, resolved to <client>:<session>.
-4. Report, one line each: namespace, this session's address, server, and the active peers. Never invent an alias or a namespace.
-5. Messaging also needs the server opt-in PUNK_MESSAGING=1 and the client hooks/bridge; if the bridge is not installed, say so. The address and namespace for every later call come from the [PUNK ROUTING] context block on each prompt.
+1. {{tool .Opts "join"}} does it in one call: it registers this session's address in the resolved namespace, binds its inbox, and returns the address, the namespace, and the active peers with each peer's delivery tier (live: a bridge stream is listening now; catch_up: delivery waits for the peer's next hook, read or await). Without a hook-supplied identity it mints a stable <client>:<random> address for this session and reuses it on repeat calls. Under enforced HTTP authorization the register+bind half needs a write grant; the peer listing rides the read grant and degrades to a peers_note without one.
+2. Report, one line each: namespace, this session's address (say if it was minted), and the active peers with their delivery tiers. Never invent an alias or a namespace.
+3. Messaging also needs the server opt-in PUNK_MESSAGING=1 and the client hooks/bridge; if the bridge is not installed, say so. The address and namespace for every later call come from the [PUNK ROUTING] context block on each prompt.
 `),
 	},
 	{
