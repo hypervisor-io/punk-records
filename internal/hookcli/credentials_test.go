@@ -86,6 +86,99 @@ func TestResolveServerSavedKeyBoundary(t *testing.T) {
 	}
 }
 
+// TestResolveServerRefusesSavedKeyOverCleartextRemote pins the transport
+// rule: a SAVED key is never sent over plain http to a non-loopback host.
+// Loopback http and https anywhere stay allowed, and an explicit
+// PUNK_API_KEY (the operator's own per-invocation choice) is never refused.
+func TestResolveServerRefusesSavedKeyOverCleartextRemote(t *testing.T) {
+	cases := []struct {
+		name     string
+		saved    string
+		flag     string
+		envKey   string
+		wantKey  string
+		wantErr  bool
+		wantDiag bool
+	}{
+		{name: "loopback http allowed", saved: "http://localhost:9090", wantKey: "synthetic-saved-key"},
+		{name: "loopback ipv4 allowed", saved: "http://127.0.0.1:9090/base", wantKey: "synthetic-saved-key"},
+		{name: "loopback ipv4 range allowed", saved: "http://127.9.9.9:9090", wantKey: "synthetic-saved-key"},
+		{name: "loopback ipv6 allowed", saved: "http://[::1]:9090", wantKey: "synthetic-saved-key"},
+		{name: "https anywhere allowed", saved: "https://punk.example.com/base", wantKey: "synthetic-saved-key"},
+		{name: "cleartext remote refused", saved: "http://punk.example.com", wantErr: true},
+		{name: "cleartext remote refused on explicit same url", saved: "http://punk.example.com", flag: "http://punk.example.com", wantErr: true},
+		{name: "cleartext remote ip refused", saved: "http://192.0.2.10:9090", wantErr: true},
+		{name: "mapped ipv6 is not loopback", saved: "http://[::ffff:127.0.0.1]", wantErr: true},
+		{name: "explicit key over cleartext allowed", saved: "http://punk.example.com", envKey: "explicit-key", wantKey: "explicit-key"},
+		{name: "explicit url+key over cleartext allowed", saved: "http://punk.example.com", flag: "http://punk.example.com", envKey: "explicit-key", wantKey: "explicit-key"},
+		{name: "different server keeps the mismatch diagnostic", saved: "https://punk.example.com", flag: "http://other.example.com", wantDiag: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "credentials.json")
+			if err := SaveCredentials(p, Credentials{URL: tc.saved, APIKey: "synthetic-saved-key"}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PUNK_CREDENTIALS", p)
+			t.Setenv("PUNK_URL", "")
+			t.Setenv("PUNK_API_KEY", tc.envKey)
+
+			r, err := ResolveServer(tc.flag)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want a refusal, got %+v", r)
+				}
+				if err.Error() != cleartextSavedKeyError {
+					t.Fatalf("refusal must carry the sanitized cleartext message, got %q", err.Error())
+				}
+				if strings.Contains(err.Error(), "example.com") || strings.Contains(err.Error(), "synthetic") {
+					t.Fatal("refusal leaked a host or key value")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if r.APIKey != tc.wantKey {
+				t.Fatalf("key = %q, want %q", r.APIKey, tc.wantKey)
+			}
+			if tc.wantDiag && r.Diagnostic != savedKeyMismatchDiagnostic {
+				t.Fatalf("diagnostic = %q, want the mismatch diagnostic", r.Diagnostic)
+			}
+			if !tc.wantDiag && r.Diagnostic != "" {
+				t.Fatalf("unexpected diagnostic: %q", r.Diagnostic)
+			}
+		})
+	}
+}
+
+// TestIsLoopbackHost pins the host classification the cleartext rule is
+// built on, including the deliberate refusal to treat a 4-in-6 mapped
+// address as loopback.
+func TestIsLoopbackHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"localhost":       true,
+		"LOCALHOST":       true,
+		"localhost.":      true,
+		"127.0.0.1":       true,
+		"127.255.255.254": true,
+		"::1":             true,
+		"::ffff:7f00:1":   false,
+		"192.0.2.1":       false,
+		"10.0.0.1":        false,
+		"example.test":    false,
+		"example.test.":   false,
+		"0.0.0.0":         false,
+		"::":              false,
+		"2001:db8::1":     false,
+		"not a host":      false,
+	} {
+		if got := isLoopbackHost(host); got != want {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
 func TestLoadCredentialsRejectsInvalidPresentFiles(t *testing.T) {
 	cases := map[string]string{
 		"malformed":          `{`,

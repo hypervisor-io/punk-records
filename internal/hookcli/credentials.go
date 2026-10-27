@@ -28,6 +28,54 @@ const defaultServerURL = "http://localhost:9090"
 
 const savedKeyMismatchDiagnostic = "saved credentials do not match the selected server; saved key ignored; reconnect or set PUNK_API_KEY explicitly"
 
+// cleartextSavedKeyError is the refusal a SAVED bearer token earns when the
+// selected server is plain http on a host that is not loopback: the token
+// would cross the network in the clear on every future invocation, silently,
+// because a saved key is a stored default rather than a per-invocation
+// decision. It is deliberately sanitized - no URL, host or key value appears
+// - and it is the one resolution failure a user can clear by switching to
+// https or by passing PUNK_API_KEY explicitly (an explicit key is the
+// operator's own choice for this run, so it is never refused).
+const cleartextSavedKeyError = "refusing to send a saved API key over plain http to a non-loopback host; use https, or set PUNK_API_KEY explicitly for this host"
+
+// isCleartextRemote reports whether canonicalURL is plain http to a host
+// that is not loopback. https is never cleartext, and http to localhost /
+// 127.0.0.0/8 / ::1 never leaves the machine, so both stay allowed.
+func isCleartextRemote(canonicalURL string) bool {
+	u, err := url.Parse(canonicalURL)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	return !isLoopbackHost(u.Hostname())
+}
+
+// isLoopbackHost reports whether host names this machine's loopback
+// interface: "localhost" (a single trailing root dot ignored, matching
+// canonicalBaseURL's DNS handling), any 127.0.0.0/8 address, or ::1.
+// canonicalBaseURL only ever emits a strict dotted-decimal IPv4, a DNS name
+// or a bracketed-free IPv6 address, so those three shapes are exhaustive; a
+// 4-in-6 mapped address is normalized to its hex IPv6 form and is NOT
+// treated as loopback, which errs toward refusing.
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" {
+		return true
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		// A 4-in-6 mapped address is deliberately NOT loopback here.
+		// canonicalBaseURL normalizes it to its hex IPv6 form precisely so
+		// it stays a distinct identity from the plain IPv4 address (see the
+		// "mapped-is-not-ipv4" parity case), and netip's IsLoopback would
+		// otherwise unmap it. Treating it as a remote host errs toward
+		// refusing the saved key, which is the safe direction.
+		if ip.Is4In6() {
+			return false
+		}
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 // ServerResolution is one coherent URL/key pair selected for a command.
 // Diagnostic is deliberately sanitized and never contains an input URL or key.
 type ServerResolution struct {
@@ -251,6 +299,14 @@ func ResolveServer(flagURL string) (ServerResolution, error) {
 		return result, nil
 	}
 	if selected == creds.URL {
+		// The saved key is the right one for this server - but a saved key
+		// must never ride plain http to another host. Refuse instead of
+		// attaching it: an unauthenticated cleartext connection to a remote
+		// server is not a safe downgrade either (the server may be in
+		// bootstrap pass-through).
+		if isCleartextRemote(selected) {
+			return ServerResolution{}, errors.New(cleartextSavedKeyError)
+		}
 		result.APIKey = creds.APIKey
 	} else {
 		result.Diagnostic = savedKeyMismatchDiagnostic

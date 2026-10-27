@@ -136,13 +136,25 @@ func codexManagedBlock(o MCPEntryOpts, includeFeatures bool) string {
 	}
 	b.WriteString(codexPunkTable + "\n")
 	b.WriteString("url = " + tomlString(mcpEndpoint(o.ServerURL)) + "\n")
-	switch {
-	case o.APIKeyEnv != "":
+	// Credential placement. An explicit --api-key-env NAME keeps the
+	// env-var reference the operator chose (bearer_token_env_var). A
+	// literal key is written as a static Authorization header INSIDE this
+	// punk-managed block instead: a GUI launch (Codex Desktop) inherits no
+	// shell environment, so a PUNK_API_KEY reference would resolve to
+	// nothing there and the Desktop session would connect
+	// unauthenticated. This is the mechanism every other connector in this
+	// package already uses (mcpHeaders writes `Authorization: Bearer
+	// <literal>` into the client's own config), and it is safe because
+	// ConnectCodexConfig writes config.toml mode 0600 - the same
+	// private-config discipline ConnectHermesMCP applies when it embeds a
+	// literal token.
+	if o.APIKeyEnv != "" {
 		b.WriteString("bearer_token_env_var = " + tomlString(o.APIKeyEnv) + "\n")
-	case o.APIKey != "":
-		b.WriteString("bearer_token_env_var = \"PUNK_API_KEY\"\n")
 	}
 	var hdrs []string
+	if o.APIKeyEnv == "" && o.APIKey != "" {
+		hdrs = append(hdrs, tomlString("Authorization")+" = "+tomlString("Bearer "+o.APIKey))
+	}
 	if o.Namespace != "" {
 		hdrs = append(hdrs, tomlString("X-Punk-Namespace")+" = "+tomlString(o.Namespace))
 	}

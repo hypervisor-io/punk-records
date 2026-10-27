@@ -192,7 +192,7 @@ func TestConnectCodexConfigWritesManagedBlock(t *testing.T) {
 	for _, want := range []string{
 		"# punk-managed-start", "# punk-managed-end",
 		"[mcp_servers.punk]", `url = "https://punk.example.com/mcp?toolset=agent"`,
-		`bearer_token_env_var = "PUNK_API_KEY"`,
+		`"Authorization" = "Bearer prk_secret"`,
 		`"X-Punk-Namespace" = "agent-x-abcdef"`, `"X-Punk-Agent" = "alice@laptop"`,
 		`default_tools_approval_mode = "approve"`, "[features]", "hooks = true",
 	} {
@@ -200,11 +200,15 @@ func TestConnectCodexConfigWritesManagedBlock(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "prk_secret") {
-		t.Fatal("literal API key must never be written into config.toml")
+	// A literal key is embedded as a static Authorization header rather
+	// than an env-var reference: Codex Desktop inherits no shell
+	// environment, so PUNK_API_KEY would resolve to nothing in a GUI
+	// launch. The embedding is safe only because the file is 0600.
+	if strings.Contains(s, "bearer_token_env_var") {
+		t.Fatalf("a literal key must not be an env-var reference (a GUI launch has no shell environment):\n%s", s)
 	}
 	if info, _ := os.Stat(p); info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v", info.Mode().Perm())
+		t.Fatalf("mode = %v, want 0600: the block holds a literal token", info.Mode().Perm())
 	}
 	if changed, _ := ConnectCodexConfig(p, o, true, false); changed {
 		t.Fatal("idempotent")

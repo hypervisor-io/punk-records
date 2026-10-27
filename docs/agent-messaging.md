@@ -80,6 +80,12 @@ default ports and trailing slashes are ignored. Different path-mounted
 services on one host do not share saved credentials. A mismatch leaves the
 saved key unused and emits a generic diagnostic.
 
+A saved key is never sent over plain `http` to a non-loopback host: connect and
+the CLI refuse with a sanitized error, and a generated plugin disables its Punk
+network activity, rather than leaking the token in the clear. `https` anywhere,
+and `http` to `localhost`, `127.0.0.0/8` or `::1`, remain allowed; an explicit
+`PUNK_API_KEY` is the operator's own per-run choice and is never refused.
+
 A missing credential file permits anonymous operation. An unreadable or
 invalid file, including a malformed base URL, disables Punk network activity
 for that plugin instance and emits a sanitized startup diagnostic; the coding
@@ -764,7 +770,12 @@ Recipe:
    trust state: hook command trust is granted interactively, once, by
    Codex itself (the "Hooks need review" gate, "Trust all and
    continue"). Codex Desktop may run under a different `CODEX_HOME` than
-   the CLI; `punk doctor codex` reports which home it inspected.
+   the CLI; `punk doctor codex` reports which home it inspected. The MCP
+   entry carries the credential in a form Desktop reads: a literal key is
+   embedded as a static `Authorization` header inside the punk-managed
+   `config.toml` block (mode 0600), so Desktop authenticates without
+   inheriting a shell environment. An explicit `--api-key-env NAME` still
+   writes an env-var reference, which a GUI launch cannot see.
 2. In Codex Desktop, attach a scheduled task to the chat whose prompt
    runs the punk-inbox recipe on a fixed cadence - `/punk-inbox` (or
    `$punk-inbox`): fetch pending punk messages with the `read_messages`

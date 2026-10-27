@@ -22,6 +22,13 @@ Never send a saved key to a different server. Report a sanitized mismatch
 diagnostic without printing a token or unvalidated URL. An explicit environment
 key remains usable with an explicitly selected server.
 
+A saved key is additionally never sent over plain `http` to a non-loopback
+host: resolution refuses with a sanitized error instead of attaching it, since
+a saved key is a stored default rather than a per-invocation decision.
+`https` anywhere, and `http` to `localhost`, `127.0.0.0/8` or `::1`, remain
+allowed; an explicit `PUNK_API_KEY` is never refused. A 4-in-6 mapped address
+(`[::ffff:7f00:1]`) is a distinct authority and is not treated as loopback.
+
 **CREDS-3.** Missing credentials are valid for an anonymous/local installation.
 A present but unreadable or malformed credential file is not equivalent to a
 missing file. Reject invalid JSON, non-object data, wrong-typed fields, missing
@@ -97,9 +104,15 @@ This change does not add a relay, replace HTTP with `punk mcp` (which serves a
 local database), or promise automatic credential-file following inside those
 hosts. Preserve existing host-specific environment-reference syntax,
 `--api-key-env`, foreign-entry ownership checks, and owner-only permissions
-for literal-token configuration. Codex's env-only MCP auth requires an
-actionable diagnostic when the named environment key is unavailable; a probe
-with a different saved key must not masquerade as host-auth verification.
+for literal-token configuration. A selected `--api-key-env NAME` keeps the
+host's env-var reference (Codex's `bearer_token_env_var`) and requires an
+actionable diagnostic when that named variable is unavailable; a probe with a
+different saved key must not masquerade as host-auth verification. A literal
+key must instead be readable by a GUI launch, which inherits no shell
+environment: Codex embeds it as a static `Authorization` header inside the
+punk-managed `config.toml` block (written owner-only, matching every other
+connector's literal token), and `--verify` reports that header credential as
+unverified rather than claiming an alignment it cannot compare.
 
 ## OpenCode configuration ownership
 

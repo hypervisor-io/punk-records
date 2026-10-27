@@ -4579,7 +4579,7 @@ func cmdConnectCodex(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only wire hooks; do not write the MCP entry or the hooks feature flag")
 	noHooks := fs.Bool("no-hooks", false, "only write the MCP entry; do not wire capture hooks")
 	force := fs.Bool("force", false, "replace an [mcp_servers.punk] table punk did not write")
-	apiKeyEnv := fs.String("api-key-env", "", "name of the env var Codex reads the bearer token from (default PUNK_API_KEY when a key is configured)")
+	apiKeyEnv := fs.String("api-key-env", "", "name of an env var Codex reads the bearer token from instead of embedding the key (a GUI launch inherits no shell environment, so leave this unset for Codex Desktop)")
 	agent := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
 	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
@@ -4659,12 +4659,10 @@ func cmdConnectCodex(args []string) error {
 		if aliases, err := hookcli.DetectCodexMCPAliases(configPath, serverURL); err == nil && len(aliases) > 1 {
 			fmt.Printf("punk: warning - %s registers more than one MCP alias for the same punk server (%s); codex will connect twice - remove the extra [mcp_servers.*] table by hand\n", configPath, strings.Join(aliases, ", "))
 		}
-		if apiKey != "" || *apiKeyEnv != "" {
-			envName := *apiKeyEnv
-			if envName == "" {
-				envName = "PUNK_API_KEY"
-			}
-			fmt.Printf("punk: note - Codex reads the bearer token from $%s; export it in the shell that starts codex\n", envName)
+		if *apiKeyEnv != "" {
+			fmt.Printf("punk: note - Codex reads the bearer token from $%s; export it in the shell that starts codex (a GUI launch inherits no shell environment - use a literal key, or a saved login, for Codex Desktop)\n", *apiKeyEnv)
+		} else if apiKey != "" {
+			fmt.Printf("punk: note - the bearer token is written into the punk block of %s (mode 0600), so Codex Desktop and CLI launches both authenticate; that file holds a secret, keep it private\n", configPath)
 		}
 	}
 	if !*noHooks {

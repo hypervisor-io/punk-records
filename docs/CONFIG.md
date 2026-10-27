@@ -96,11 +96,16 @@ rather than probing with a different CLI credential. The probe proves server
 connectivity/tool discovery; it does not prove the host loaded its plugin or
 delivered a message.
 
-Codex native MCP authentication is environment-only. When a key is selected,
-its config names `PUNK_API_KEY` (or `--api-key-env NAME`) rather than embedding
-the key; that variable must be present in the process that starts Codex. A
-missing named variable is reported as unverified and is never substituted with
-an unrelated saved key.
+Codex native MCP authentication: a selected `--api-key-env NAME` writes
+`bearer_token_env_var = "NAME"`, and that variable must be present in the
+process that starts Codex. A missing named variable is reported as unverified
+and is never substituted with an unrelated saved key. Without `--api-key-env`,
+a selected key is embedded as a static `Authorization` header inside the
+punk-managed `config.toml` block instead - a GUI launch (Codex Desktop)
+inherits no shell environment, so a `PUNK_API_KEY` reference would resolve to
+nothing there. The embedding is safe because `punk connect codex` writes
+`config.toml` mode 0600; `--verify` reports that header credential as
+unverified, since a header credential is not one it can compare safely.
 
 The named variable selects MCP authentication only. Generated plugin capture,
 context and inbox requests still read `PUNK_API_KEY`; subprocess hooks can also

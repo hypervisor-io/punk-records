@@ -79,8 +79,17 @@ function punkResolveConnection(installedURL) {
     url = url || savedURL || "http://localhost:9090";
     let apiKey = explicitKey;
     if (!apiKey && savedKey) {
-      if (url === savedURL) apiKey = savedKey;
-      else console.error("[punk] saved credentials do not match the selected server; saved key ignored. Reconnect and restart, or set PUNK_API_KEY explicitly.");
+      if (url === savedURL) {
+        // A saved key never rides plain http to a non-loopback host: refuse
+        // rather than leak it in the clear. Mirrors isCleartextRemote in
+        // credentials.go; an explicit PUNK_API_KEY above is the operator's
+        // own choice and is never refused here.
+        if (punkIsCleartextRemote(url)) {
+          console.error("[punk] refusing to send a saved API key over plain http to a non-loopback host; use https, or set PUNK_API_KEY explicitly. Punk network activity is disabled.");
+          return Object.freeze({ url: "", apiKey: "", enabled: false });
+        }
+        apiKey = savedKey;
+      } else console.error("[punk] saved credentials do not match the selected server; saved key ignored. Reconnect and restart, or set PUNK_API_KEY explicitly.");
     }
     return Object.freeze({ url, apiKey, enabled: true });
   } catch (_) {
@@ -88,6 +97,29 @@ function punkResolveConnection(installedURL) {
     // tokens, credential-bearing URLs, raw file contents or private paths.
     console.error("[punk] invalid connection credentials or server URL; Punk network activity is disabled. Correct saved credentials or set PUNK_URL and PUNK_API_KEY, then restart the client.");
     return Object.freeze({ url: "", apiKey: "", enabled: false });
+  }
+}
+
+// punkIsLoopbackHost reports whether a canonical URL's hostname names this
+// machine's loopback interface. Mirrors isLoopbackHost in credentials.go: a
+// single trailing root dot is ignored, "localhost", any 127.0.0.0/8 address
+// and ::1 are loopback, and nothing else is.
+function punkIsLoopbackHost(host) {
+  const h = String(host).replace(/\.$/, "").toLowerCase();
+  if (h === "localhost") return true;
+  if (h.startsWith("[") && h.endsWith("]")) return h.slice(1, -1) === "::1";
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  return octets !== null && Number(octets[1]) === 127;
+}
+
+// punkIsCleartextRemote reports whether a canonical URL is plain http to a
+// host that is not loopback (the transport a saved key may never ride).
+function punkIsCleartextRemote(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" && !punkIsLoopbackHost(u.hostname);
+  } catch (_) {
+    return false;
   }
 }
 `

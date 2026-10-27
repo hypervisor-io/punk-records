@@ -36,6 +36,18 @@ func parityConnection(url, keySource string, mismatch bool) credentialParityResu
 	}
 }
 
+// parityWant is parityConnection plus the cleartext refusal the two
+// resolvers now share: a SAVED key selected for a plain-http non-loopback
+// host is refused outright (both sides report the connection unusable)
+// rather than attached. An explicit key, an https host and a loopback http
+// host are unaffected, so only a "saved" expectation can flip to an error.
+func parityWant(canonical, keySource string, mismatch bool) credentialParityResult {
+	if canonical == "" || (keySource == "saved" && isCleartextRemote(canonical)) {
+		return credentialParityResult{Error: true, KeySource: "none"}
+	}
+	return parityConnection(canonical, keySource, mismatch)
+}
+
 // CREDS-2/3/4 regression: compare the real Go resolver with the unmodified
 // credentialsJS fragment emitted into all three plugins, executed as Node ESM.
 // Each side reads the SAME synthetic file under the SAME isolated home. Expected
@@ -179,7 +191,7 @@ func TestCredentialsGoJSParity(t *testing.T) {
 		}
 		cases = append(cases,
 			selected,
-			parityCase{name: u.name + "/saved", file: savedFile(u.raw), want: parityConnection(u.canonical, "saved", false)},
+			parityCase{name: u.name + "/saved", file: savedFile(u.raw), want: parityWant(u.canonical, "saved", false)},
 		)
 	}
 	for _, pair := range []struct {
@@ -217,7 +229,7 @@ func TestCredentialsGoJSParity(t *testing.T) {
 		if pair.match {
 			source = "saved"
 		}
-		want := parityConnection(pair.canonical, source, !pair.match)
+		want := parityWant(pair.canonical, source, !pair.match)
 		cases = append(cases, parityCase{name: "pair/" + pair.name, file: savedFile(pair.saved), selected: pair.selected, want: want})
 		// An installation snapshot and a CLI hook's explicit URL share the same
 		// key boundary when there is no runtime environment override.
@@ -294,7 +306,7 @@ func TestCredentialsGoJSParity(t *testing.T) {
 			}
 			if resolveErr != nil {
 				switch resolveErr.Error() {
-				case "invalid server URL", "invalid credentials file", "cannot read credentials file":
+				case "invalid server URL", "invalid credentials file", "cannot read credentials file", cleartextSavedKeyError:
 				default:
 					t.Fatal("Go returned an unexpected unsanitized error (value suppressed)")
 				}
@@ -375,11 +387,19 @@ const connection = punkResolveConnection(JSON.parse(process.env.PUNK_PARITY_INST
 assert.deepEqual(readViolations, []);
 assert.equal(fetchCalls, 0);
 const mismatch = connection.enabled && diagnostics.length !== 0;
-const expectedDiagnostics = !connection.enabled
-  ? ["[punk] invalid connection credentials or server URL; Punk network activity is disabled. Correct saved credentials or set PUNK_URL and PUNK_API_KEY, then restart the client."]
-  : mismatch
-    ? ["[punk] saved credentials do not match the selected server; saved key ignored. Reconnect and restart, or set PUNK_API_KEY explicitly."] : [];
-assert.deepEqual(diagnostics, expectedDiagnostics, "exact sanitized diagnostic");
+const disabledDiagnostics = [
+  "[punk] invalid connection credentials or server URL; Punk network activity is disabled. Correct saved credentials or set PUNK_URL and PUNK_API_KEY, then restart the client.",
+  "[punk] refusing to send a saved API key over plain http to a non-loopback host; use https, or set PUNK_API_KEY explicitly. Punk network activity is disabled.",
+];
+const mismatchDiagnostic = "[punk] saved credentials do not match the selected server; saved key ignored. Reconnect and restart, or set PUNK_API_KEY explicitly.";
+if (!connection.enabled) {
+  assert.equal(diagnostics.length, 1, "a disabled connection emits exactly one sanitized diagnostic");
+  assert.ok(disabledDiagnostics.includes(diagnostics[0]), "sanitized disabled diagnostic");
+} else if (mismatch) {
+  assert.deepEqual(diagnostics, [mismatchDiagnostic], "exact sanitized diagnostic");
+} else {
+  assert.deepEqual(diagnostics, [], "no diagnostic for a coherent connection");
+}
 let keySource = "none";
 if (connection.apiKey === "synthetic-parity-saved-key") keySource = "saved";
 else if (connection.apiKey === "synthetic-parity-explicit-key") keySource = "explicit";
