@@ -1041,29 +1041,45 @@ func validNamespace(s string) bool {
 // what sets one; see internal/region's SetInboxBinding), so a session
 // that re-registered to a different namespace rewires its readers on
 // the next resolution. Without a binding - or without the parameter -
-// the answer is byte-identical to the cwd-derived one. The response
-// shape ({"namespace": ...}) and the route's permission class are
-// unchanged: this is namespace derivation, not access; the revealed
-// name grants nothing and actual reads/writes stay per-request
-// authorized. A genuine store failure answering the binding lookup is a
-// 500 rather than a silent cwd fallback, so a reader can tell "no
-// binding" from "binding store unreachable".
+// the answer is byte-identical to the cwd-derived one: {"namespace"}.
+// A bound answer additionally carries the P3-D visibility fields -
+// bound, the stored setter (omitted while unknown) and time, and the
+// cwd_namespace the binding overrode - so the hook can render 'inbox
+// bound to <ns> by <setter> at <time>' and a local PUNK_NAMESPACES
+// allowlist can refuse the binding without a second round trip. The
+// route's permission class is unchanged: this is namespace derivation,
+// not access; the revealed name grants nothing and actual reads/writes
+// stay per-request authorized. A genuine store failure answering the
+// binding lookup is a 500 rather than a silent cwd fallback, so a
+// reader can tell "no binding" from "binding store unreachable".
 func (s *Server) handleAgentNamespace(w http.ResponseWriter, r *http.Request) {
 	cwd := r.URL.Query().Get("cwd")
 	if cwd == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cwd required"})
 		return
 	}
-	ns := AgentNamespace(cwd)
+	answer := struct {
+		Namespace    string `json:"namespace"`
+		Bound        bool   `json:"bound,omitempty"`
+		SetBy        string `json:"set_by,omitempty"`
+		SetAt        string `json:"set_at,omitempty"`
+		CwdNamespace string `json:"cwd_namespace,omitempty"`
+	}{Namespace: AgentNamespace(cwd)}
 	if agent := r.URL.Query().Get("agent"); agent != "" && s.region != nil {
-		bound, ok, err := s.region.InboxBinding(r.Context(), agent)
+		info, ok, err := s.region.InboxBindingInfo(r.Context(), agent)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		if ok {
-			ns = bound
+			answer.Namespace = info.Namespace
+			answer.Bound = true
+			answer.SetBy = info.SetBy
+			answer.SetAt = info.SetAt
+			// The cwd derivation the binding overrode: the refusal
+			// fallback a local allowlist lands on.
+			answer.CwdNamespace = AgentNamespace(cwd)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"namespace": ns})
+	writeJSON(w, http.StatusOK, answer)
 }

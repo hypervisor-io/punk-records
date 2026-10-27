@@ -54,10 +54,12 @@ func (b *bindingNSServer) rawQueries() []string {
 }
 
 // resetNamespacePins neutralises every pin so resolution must consult
-// the server.
+// the server, and pins PUNK_NAMESPACES off so the shell environment
+// cannot smuggle an allowlist into a test that never set one.
 func resetNamespacePins(t *testing.T) {
 	t.Helper()
 	t.Setenv("PUNK_NAMESPACE", "")
+	t.Setenv("PUNK_NAMESPACES", "")
 	SetNamespaceOverride("")
 	t.Cleanup(func() { SetNamespaceOverride("") })
 }
@@ -65,7 +67,7 @@ func resetNamespacePins(t *testing.T) {
 func TestResolveNamespaceFlagPinWinsAndSkipsQuery(t *testing.T) {
 	resetNamespacePins(t)
 	b, srv := newBindingNSServer(t, map[string]string{"fake:s1": "bound-ns"})
-	ns, err := resolveInboxNamespace(InboxOpts{Namespace: "pin-ns", BaseURL: srv.URL}, "/work/x", "fake:s1")
+	ns, _, err := resolveInboxNamespace(InboxOpts{Namespace: "pin-ns", BaseURL: srv.URL}, "/work/x", "fake:s1")
 	if err != nil || ns != "pin-ns" {
 		t.Fatalf("--ns pin: ns=%q err=%v", ns, err)
 	}
@@ -78,7 +80,7 @@ func TestResolveNamespaceEnvPinWinsAndSkipsQuery(t *testing.T) {
 	resetNamespacePins(t)
 	t.Setenv("PUNK_NAMESPACE", "env-ns")
 	b, srv := newBindingNSServer(t, map[string]string{"fake:s1": "bound-ns"})
-	ns, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
+	ns, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
 	if err != nil || ns != "env-ns" {
 		t.Fatalf("PUNK_NAMESPACE pin: ns=%q err=%v", ns, err)
 	}
@@ -91,7 +93,7 @@ func TestResolveNamespaceOverridePinWinsAndSkipsQuery(t *testing.T) {
 	resetNamespacePins(t)
 	SetNamespaceOverride("override-ns")
 	b, srv := newBindingNSServer(t, map[string]string{"fake:s1": "bound-ns"})
-	ns, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
+	ns, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
 	if err != nil || ns != "override-ns" {
 		t.Fatalf("namespace override pin: ns=%q err=%v", ns, err)
 	}
@@ -103,7 +105,7 @@ func TestResolveNamespaceOverridePinWinsAndSkipsQuery(t *testing.T) {
 func TestResolveNamespaceBindingBeatsCwd(t *testing.T) {
 	resetNamespacePins(t)
 	b, srv := newBindingNSServer(t, map[string]string{"fake:s1": "bound-ns"})
-	ns, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
+	ns, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
 	if err != nil || ns != "bound-ns" {
 		t.Fatalf("server binding must beat cwd derivation: ns=%q err=%v", ns, err)
 	}
@@ -125,11 +127,11 @@ func TestResolveNamespaceNoBindingFallsBackToCwd(t *testing.T) {
 	// The server has no binding for this address: resolution must land
 	// on the same cwd-derived answer it produces today.
 	b, srv := newBindingNSServer(t, map[string]string{"fake:other": "bound-ns"})
-	withAgent, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
+	withAgent, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "fake:s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutAgent, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "")
+	withoutAgent, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, "/work/x", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,7 @@ func TestResolveNamespaceEmptyAgentQueryByteIdentical(t *testing.T) {
 	resetNamespacePins(t)
 	b, srv := newBindingNSServer(t, nil)
 	cwd := "/work/my proj"
-	if _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, cwd, ""); err != nil {
+	if _, _, err := resolveInboxNamespace(InboxOpts{BaseURL: srv.URL}, cwd, ""); err != nil {
 		t.Fatal(err)
 	}
 	q := b.rawQueries()

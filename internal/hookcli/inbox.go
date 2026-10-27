@@ -672,6 +672,27 @@ func renderHeader(ns, address string, n int) string {
 
 const inboxFooterAck = "The hook acknowledges these messages once this text is delivered; do not ack them yourself. A repeated message id is a redelivery."
 
+// inboxRoutingBindingLine is the P3-D binding-visibility line: the
+// hook states that the inbox is bound, to what, by whom and when, so a
+// model (or an operator reading a transcript) can see the rewire is
+// server-side and deliberate. Hook-authored like the rest of the block.
+// Namespace and time are server-derived (headerField); the setter is
+// binder-supplied and passes peerField, so it can never start a line or
+// smuggle an intact protocol marker into the block. nil - no binding
+// followed - renders nothing: the block stays byte-identical to its
+// pre-P3-D shape. An unknown setter renders no "by" clause, never a
+// fabricated name.
+func inboxRoutingBindingLine(b *inboxBinding) string {
+	if b == nil {
+		return ""
+	}
+	line := "Inbox bound to " + headerField(b.Namespace)
+	if setter := strings.TrimSpace(b.SetBy); setter != "" {
+		line += " by " + peerField(setter)
+	}
+	return line + " at " + headerField(b.SetAt) + ".\n"
+}
+
 // inboxRoutingIdentity is the compact routing identity block every
 // context-capable client shows on a context-carrying event that would
 // otherwise print nothing (empty inbox), so the model always knows its
@@ -681,9 +702,11 @@ const inboxFooterAck = "The hook acknowledges these messages once this text is d
 // delivers on the real session_id/cwd-derived pair). Hook-authored, not
 // peer content; a delivered envelope already names address and namespace
 // in its header and reply line, so guidance is never stacked on top of
-// it. One line per fact, headerField-safe inputs only.
-func inboxRoutingIdentity(ns, address string) string {
+// it. One line per fact, headerField-safe inputs only. bound is the
+// binding the hook followed (P3-D), nil when none was.
+func inboxRoutingIdentity(ns, address string, bound *inboxBinding) string {
 	return InboxMarkerRouting + " Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
+		inboxRoutingBindingLine(bound) +
 		"Send: send_message(namespace=" + quoteArg(ns) + ", sender=" + quoteArg(address) + ", recipient=\"<their address>\", body=\"...\"). " +
 		"Read/ack: read_messages/ack_messages(namespace=" + quoteArg(ns) + ", agent=" + quoteArg(address) + ").\n" +
 		"Use exactly this address and namespace; never invent aliases or namespaces. "
@@ -695,7 +718,7 @@ func inboxRoutingIdentity(ns, address string) string {
 // capability: without a requested listener it states there is no idle
 // wake; with one it says the listener was requested and whether the
 // native endpoint is available, never that it is live.
-func inboxRoutingGuidance(ns, address string, wakeRequested, wakeCapable bool) string {
+func inboxRoutingGuidance(ns, address string, bound *inboxBinding, wakeRequested, wakeCapable bool) string {
 	wakeLine := "There is no idle wake: an idle session picks up messages on its next prompt.\n"
 	switch {
 	case wakeRequested && wakeCapable:
@@ -703,7 +726,7 @@ func inboxRoutingGuidance(ns, address string, wakeRequested, wakeCapable bool) s
 	case wakeRequested:
 		wakeLine = "A native wake listener was configured for this session, but its native endpoint is currently unavailable; an idle session picks up messages on its next prompt.\n"
 	}
-	return inboxRoutingIdentity(ns, address) + wakeLine
+	return inboxRoutingIdentity(ns, address, bound) + wakeLine
 }
 
 // inboxWakeClients are the clients with a native wake transport (the
@@ -993,6 +1016,39 @@ func inboxDo(ctx context.Context, method, target, key string, in, out any) error
 	return nil
 }
 
+// inboxBinding is the server-side inbox binding the hook FOLLOWED for
+// one invocation (P3-D visibility): nil whenever no binding was
+// followed - the address is unbound, a pin fired, or the local
+// PUNK_NAMESPACES allowlist refused the binding. SetBy is empty when
+// the setter is unknown (a binding written before migration 0028, or
+// by a setter-less call site); the routing block then states the bind
+// without a "by" clause rather than naming anyone.
+type inboxBinding struct {
+	Namespace string
+	SetBy     string
+	SetAt     string
+}
+
+// namespaceAllowlist parses the optional local PUNK_NAMESPACES
+// allowlist: comma-separated namespaces the hook is permitted to follow
+// a server inbox binding into. Unset (or empty after trimming) means no
+// enforcement. Entries are trimmed and empty entries dropped; a
+// set-but-empty list admits nothing, so garbage never widens what the
+// hook follows. This is a client-local control on data the server
+// already answered - not authz, and no server enforcement changes.
+func namespaceAllowlist() (list []string, configured bool) {
+	raw := strings.TrimSpace(os.Getenv("PUNK_NAMESPACES"))
+	if raw == "" {
+		return nil, false
+	}
+	for _, e := range strings.Split(raw, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			list = append(list, e)
+		}
+	}
+	return list, true
+}
+
 // resolveInboxNamespace picks the namespace for one hook invocation:
 // --ns (or the connect-baked override) > PUNK_NAMESPACE > the server's
 // inbox binding for agent > cwd-derived. Pins return without any
@@ -1002,29 +1058,64 @@ func inboxDo(ctx context.Context, method, target, key string, in, out any) error
 // exactly as before, and an empty agent leaves the query byte-identical
 // to the pre-binding form. Resolved fresh on every call: a rebound
 // address rewires delivery on the next hook event.
-func resolveInboxNamespace(opts InboxOpts, cwd, agent string) (string, error) {
+//
+// The second result is the binding the hook followed (P3-D), nil when
+// none was. A followed binding answers with its stored setter and time
+// (the routing block's 'Inbox bound to ...' line) and with the
+// cwd-derived namespace it overrode, so the PUNK_NAMESPACES allowlist
+// can refuse a non-listed binding in the same round trip: refusing is
+// the fail-open direction - delivery continues on the default namespace
+// instead of the rewire, and the event is never blocked. A refusal
+// whose answer carries no usable cwd fallback is an error, which lands
+// in the hook's existing fail-open path.
+func resolveInboxNamespace(opts InboxOpts, cwd, agent string) (string, *inboxBinding, error) {
 	for _, ns := range []string{opts.Namespace, namespaceOverride, os.Getenv("PUNK_NAMESPACE")} {
 		if ns = strings.TrimSpace(ns); ns != "" {
-			return ns, nil
+			return ns, nil, nil
 		}
 	}
 	if cwd == "" {
-		return "", errors.New("no namespace: pass --ns, set PUNK_NAMESPACE, or send a payload with cwd")
+		return "", nil, errors.New("no namespace: pass --ns, set PUNK_NAMESPACE, or send a payload with cwd")
 	}
 	target := opts.BaseURL + "/v1/agent/namespace?cwd=" + url.QueryEscape(cwd)
 	if agent != "" {
 		target += "&agent=" + url.QueryEscape(agent)
 	}
 	var out struct {
-		Namespace string `json:"namespace"`
+		Namespace    string `json:"namespace"`
+		Bound        bool   `json:"bound"`
+		SetBy        string `json:"set_by"`
+		SetAt        string `json:"set_at"`
+		CwdNamespace string `json:"cwd_namespace"`
 	}
 	if err := inboxDo(context.Background(), http.MethodGet, target, opts.APIKey, nil, &out); err != nil {
-		return "", fmt.Errorf("namespace lookup: %w", err)
+		return "", nil, fmt.Errorf("namespace lookup: %w", err)
 	}
 	if out.Namespace == "" || strings.ContainsAny(out.Namespace, ":/") {
-		return "", fmt.Errorf("namespace lookup returned %q", out.Namespace)
+		return "", nil, fmt.Errorf("namespace lookup returned %q", out.Namespace)
 	}
-	return out.Namespace, nil
+	if !out.Bound {
+		return out.Namespace, nil, nil
+	}
+	if list, configured := namespaceAllowlist(); configured {
+		listed := false
+		for _, e := range list {
+			if e == out.Namespace {
+				listed = true
+				break
+			}
+		}
+		if !listed {
+			// Refuse the binding and fall back to the default
+			// (cwd-derived) namespace the server sent alongside it.
+			fallback := strings.TrimSpace(out.CwdNamespace)
+			if fallback == "" || strings.ContainsAny(fallback, ":/") {
+				return "", nil, fmt.Errorf("namespace lookup: binding to %q refused by PUNK_NAMESPACES and the server sent no usable cwd fallback", out.Namespace)
+			}
+			return fallback, nil, nil
+		}
+	}
+	return out.Namespace, &inboxBinding{Namespace: out.Namespace, SetBy: out.SetBy, SetAt: out.SetAt}, nil
 }
 
 func (a inboxAPI) register(role string) error {
@@ -1226,7 +1317,7 @@ func (r *inboxRun) deliver() error {
 	}
 	capExhausted := false
 
-	ns, err := resolveInboxNamespace(r.opts, r.payload.CWD, addr)
+	ns, bound, err := resolveInboxNamespace(r.opts, r.payload.CWD, addr)
 	if err != nil {
 		return r.failOpen(err)
 	}
@@ -1300,10 +1391,10 @@ func (r *inboxRun) deliver() error {
 		// Clients with a native wake transport also get the honest wake
 		// sentence; the rest are told nothing about wake.
 		if inboxGuidanceEvent(r.c, r.payload.Event) {
-			g := inboxRoutingIdentity(ns, addr)
+			g := inboxRoutingIdentity(ns, addr, bound)
 			if inboxWakeClients[r.c.Name] {
 				wakeRequested, wakeCapable := WakeListenerStatus(r.c.Name, r.payload.SessionID)
-				g = inboxRoutingGuidance(ns, addr, wakeRequested, wakeCapable)
+				g = inboxRoutingGuidance(ns, addr, bound, wakeRequested, wakeCapable)
 			}
 			d.Guidance = guidanceWithinBudget(r.c, g)
 		}
