@@ -315,6 +315,13 @@ func New(d Deps) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "punk-records", Version: "0.1.0"}, opts)
 	s.AddReceivingMiddleware(traceMiddleware)
 	nsr := newNSResolver(d.NamespaceFor, d.DefaultNamespace)
+	// Task P1-C: the unread trailer, only for messaging-enabled
+	// sessions. Added after traceMiddleware so the count rides inside
+	// the call's span; middleware wraps the method handler, so tool
+	// registration order does not matter.
+	if d.Region != nil && d.MessagingEnabled {
+		s.AddReceivingMiddleware(newUnreadTrailer(d.Region.CountUnreadMessages, nsr).middleware())
+	}
 	registerWhoami(s, nsr)
 
 	if d.Bus != nil {
