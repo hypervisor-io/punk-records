@@ -210,6 +210,8 @@ On each developer machine (needs the punk binary; see Install):
 
 What that does: hooks and the MCP entry carry the bearer token from `~/.punk/credentials.json` (0600); the namespace is derived from the git remote, so every clone of `billing` on every machine shares `agent-billing-<hash>`; claims and registrations default to `<user>@<host>`; `--verify` proves the round trip from that machine. `punk namespace` prints what a directory maps to. Keep `/mcp` and `/v1` behind TLS: the token is a bearer credential.
 
+Behind the central profile's Caddy reverse proxy every remote agent shares Caddy's IP, so set `http.trusted_proxies` to the CIDR Caddy connects from: the per-IP stream backstop (`messaging.stream_ip_limit`, default 256) then keys on the client IP Caddy forwards in `X-Forwarded-For` (rightmost non-trusted entry) instead of pooling the whole fleet on one address. The per-inbox cap (`messaging.stream_limit`, default 4) is unaffected — it already keys on subject + namespace + agent address.
+
 ## Using Postgres
 
 SQLite is the default and needs nothing. To run on Postgres instead —

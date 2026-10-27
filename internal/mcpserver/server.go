@@ -38,6 +38,7 @@ type Deps struct {
 	Mem              *memory.Store
 	Region           *region.Store        // nil disables region tools
 	MessagingEnabled bool                 // opt-in four message tools and lean member discovery
+	AwaitLimit       int                  // max concurrent await_messages per inbox (subject+namespace+agent); 0 = default (4)
 	Bus              *bus.Bus             // nil disables resource subscriptions
 	A2ARemotes       []A2ARemote          // outbound delegation targets; empty disables the delegate tool
 	LLM              llm.Client           // nil disables the reflect tool (deterministic-first)

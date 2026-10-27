@@ -7,6 +7,10 @@ defaults. Validation runs at load: bad values refuse to boot.
 | Key | Env override | Default | Notes |
 |---|---|---|---|
 | `http.addr` | `PUNK_HTTP_ADDR` | `:9090` | REST + /mcp listener |
+| `http.max_body_bytes` | `PUNK_HTTP_MAX_BODY_BYTES` | `8388608` | request-body cap for every JSON POST/PUT/PATCH; a declared body over it is 413. Above the agent-hook endpoint's own 5 MiB cap, so that endpoint keeps its 400 |
+| `http.rate_limit_rps` | `PUNK_HTTP_RATE_LIMIT_RPS` | `50` | per-IP requests/second on the message-send and member-register endpoints; overflow is 429 + `Retry-After` |
+| `http.rate_limit_burst` | `PUNK_HTTP_RATE_LIMIT_BURST` | `100` | per-IP burst for the same bucket |
+| `http.trusted_proxies` | `PUNK_HTTP_TRUSTED_PROXIES` | empty | CIDRs whose peers may name the real client in `X-Forwarded-For`; that client IP then keys the per-IP stream backstop (rightmost non-trusted XFF entry wins). Empty: `X-Forwarded-For` is never trusted |
 | `log.format` | `PUNK_LOG_FORMAT` | `text` | `text` or `json` |
 | `log.level` | `PUNK_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 | `db.driver` | `PUNK_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
@@ -23,6 +27,8 @@ defaults. Validation runs at load: bad values refuse to boot.
 | `messaging.max_unread_per_recipient` | `PUNK_MESSAGING_MAX_UNREAD_PER_RECIPIENT` | `200` | positive cap per namespace/address; atomic admission, idempotent retries bypass |
 | `messaging.retention_days` | `PUNK_MESSAGING_RETENTION_DAYS` | `30` | delete only older ACKed messages in hourly maintenance; 0 disables; unread never deleted |
 | `messaging.member_expiry_days` | `PUNK_MESSAGING_MEMBER_EXPIRY_DAYS` | `7` | remove namespace members not seen in this many days, in the same hourly sweep; 0 disables; a currently listening member is never removed |
+| `messaging.stream_limit` | `PUNK_MESSAGING_STREAM_LIMIT` | `4` | concurrent message streams (`/messages/events`, `/messages/stream`) and `await_messages` waits per INBOX — verified subject + namespace + agent address — so distinct agent addresses never share a pool; enough for reconnect overlap. Overflow is 429 + `Retry-After` (HTTP) or a tool error (MCP); a slot is released the moment the holder disconnects or its wait ends |
+| `messaging.stream_ip_limit` | `PUNK_MESSAGING_STREAM_IP_LIMIT` | `256` | per-IP backstop across ALL inboxes on the same long-lived operations; deliberately much higher than `stream_limit` — it stops a runaway or hostile host, not coordination traffic (many agents legitimately share one proxy IP) |
 | `messaging.content_filter.mode` | `PUNK_MESSAGING_CONTENT_FILTER` | `block` | dangerous-intent blocking at send time: `block` rejects matching message bodies, `off` disables. See "Message content policy" below |
 | `messaging.content_filter.namespaces` | - | `[]` | namespaces where the filter is skipped (security-research coordination, for example) |
 | `messaging.content_filter.extra_patterns` | - | `[]` | additional Go regex sources appended to the registry under the `custom` category |

@@ -805,6 +805,7 @@ func cmdServe(args []string) error {
 	mcpDeps := mcpserver.Deps{
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem, Region: regionStore, Bus: eventBus,
 		MessagingEnabled: cfg.Messaging.Enabled,
+		AwaitLimit:       cfg.Messaging.StreamLimit,
 		A2ARemotes:       a2aRemotes(cfg), LLM: reflectClient, Expander: expander,
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),
@@ -837,6 +838,14 @@ func cmdServe(args []string) error {
 		AIEnabled:         cfg.AI.Enabled,
 		MessagingEnabled:  cfg.Messaging.Enabled,
 		AuthzMode:         cfg.Authz.Enforcement,
+		Limits: api.Limits{
+			MaxBodyBytes:   cfg.HTTP.MaxBodyBytes,
+			RateLimitRPS:   float64(cfg.HTTP.RateLimitRPS),
+			RateLimitBurst: cfg.HTTP.RateLimitBurst,
+			StreamLimit:    cfg.Messaging.StreamLimit,
+			StreamIPLimit:  cfg.Messaging.StreamIPLimit,
+			TrustedProxies: cfg.HTTP.TrustedProxies,
+		},
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,
@@ -1875,6 +1884,7 @@ func cmdMCP(args []string) error {
 		Ledger: ledger, Router: router, Reg: reg, Mem: mem,
 		Region: configuredMessageRegion(db, cfg), Bus: eventBus,
 		MessagingEnabled: cfg.Messaging.Enabled,
+		AwaitLimit:       cfg.Messaging.StreamLimit,
 		A2ARemotes:       a2aRemotes(cfg),
 		NamespaceFor:     api.AgentNamespace,
 		DefaultNamespace: os.Getenv("PUNK_NAMESPACE"),

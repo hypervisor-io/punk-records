@@ -26,6 +26,20 @@ import (
 // first frame, before every delivery and on every keepalive tick, so a
 // mid-stream revocation ends the stream instead of continuing to notify.
 func (s *Server) handleMessageStream(w http.ResponseWriter, r *http.Request) {
+	// Same concurrent stream caps as handleMessageEvents: the per-inbox
+	// cap keys subject+namespace+agent (no agent here - the namespace
+	// stream's key degrades to subject+namespace) plus the per-IP
+	// backstop. Acquired before the SSE headers so an over-cap caller
+	// gets 429, released by defer when this handler returns on
+	// disconnect or revocation.
+	ns := chi.URLParam(r, "ns")
+	slots, ok := s.acquireStream(r, ns, "")
+	if !ok {
+		writeRateLimited(w, "too many concurrent streams")
+		return
+	}
+	defer s.releaseStream(slots)
+
 	if s.bus == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not wired"})
 		return
@@ -35,7 +49,6 @@ func (s *Server) handleMessageStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 		return
 	}
-	ns := chi.URLParam(r, "ns")
 	// Subscribe before the initial authorization check, matching
 	// handleMessageEvents: an event published between check and
 	// subscribe must not be missed once the stream is confirmed allowed.

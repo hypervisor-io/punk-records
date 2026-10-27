@@ -4,6 +4,15 @@
 
 http:
   addr: ":9090"
+  # Request limits (P3-A): generous defaults; they stop runaway or
+  # hostile clients, not normal traffic.
+  max_body_bytes: 8388608  # request-body cap for JSON POST/PUT/PATCH; a larger declared body is 413
+  rate_limit_rps: 50       # per-IP requests/second on message send + member register
+  rate_limit_burst: 100    # per-IP burst for the same bucket; overflow is 429
+  # Peers in these CIDRs may name the real client in X-Forwarded-For;
+  # that client IP then keys the per-IP stream backstop. Empty (default):
+  # X-Forwarded-For is never trusted.
+  trusted_proxies: []
 
 log:
   format: text # text | json
@@ -82,3 +91,10 @@ a2a:                             # outbound Agent2Agent delegation targets
     - name: research-agent
       url: https://research.example.com/v1/a2a   # remote's JSON-RPC endpoint (its card "url")
       token_env: PUNK_A2A_RESEARCH_TOKEN
+
+messaging:                       # agent messaging; see docs/agent-messaging.md
+  stream_limit: 4                # concurrent streams (SSE) + await_messages waits per INBOX (subject+namespace+agent); overflow is 429 / a tool error; a slot frees on disconnect
+  stream_ip_limit: 256           # per-IP backstop across all inboxes; deliberately much higher than stream_limit (it stops runaway hosts, not coordination)
+  # max_unread_per_recipient: 200  # >0; new sends blocked at cap
+  # retention_days: 30             # ACK age; 0 disables deletion
+  # member_expiry_days: 7          # last_seen_at age; 0 disables; listening members never expire

@@ -3,6 +3,7 @@ package api
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -47,6 +48,11 @@ type Deps struct {
 	AIEnabled        bool
 	MessagingEnabled bool
 	AuthzMode        string // config authz.enforcement ("" reads as "off")
+
+	// Limits bounds inbound request work (body size, per-IP rate on the
+	// write endpoints, concurrent streams/awaits). The zero value takes
+	// the generous package defaults; see limits.go.
+	Limits Limits
 }
 
 // Server owns the HTTP router.
@@ -82,6 +88,17 @@ type Server struct {
 	// bookkeeping write.
 	delivery *deliveryMutex
 
+	// limits is the resolved (defaults-applied) request-limit config;
+	// sendLimiter is the shared per-IP bucket for the write endpoints and
+	// streams the per-subject+IP concurrent stream/await cap.
+	limits      Limits
+	sendLimiter *ipLimiter
+	streams     *concurrencyLimiter
+	ipStreams   *concurrencyLimiter
+	// trustedProxies are the parsed http.trusted_proxies CIDRs; nil
+	// (the default) means X-Forwarded-For is never trusted.
+	trustedProxies []*net.IPNet
+
 	// Ready reports readiness (DB reachable, registry loaded). Nil means
 	// "ready" so the skeleton stays honest before P1 wires the store.
 	Ready func() error
@@ -98,12 +115,23 @@ func New(log *slog.Logger, d Deps) *Server {
 		aiEnabled: d.AIEnabled, messagingEnabled: d.MessagingEnabled, authzMode: d.AuthzMode,
 		clock: time.Now,
 	}
+	// Request limits: resolve defaults once, then build the shared
+	// per-IP send bucket, the per-inbox stream cap and the per-IP
+	// stream backstop, and the trusted-proxy CIDRs behind XFF handling.
+	s.limits = d.Limits.withDefaults()
+	s.sendLimiter = newSendLimiter(s.limits)
+	s.streams = newConcurrencyLimiter(s.limits.StreamLimit)
+	s.ipStreams = newConcurrencyLimiter(s.limits.StreamIPLimit)
+	s.trustedProxies = parseTrustedProxies(d.Limits.TrustedProxies)
 	// The caches read s.clock lazily so a test can swap the clock after New.
 	now := func() time.Time { return s.clock() }
 	s.nsSums = newTTLCache[[]memory.NamespaceSummary](overviewTTL, now)
 	s.overview = newTTLCache[*overviewData](overviewTTL, now)
 	s.mux.Use(middleware.RequestID)
 	s.mux.Use(middleware.Recoverer)
+	// Body cap for every JSON endpoint, installed as router middleware so
+	// it also covers the endpoints that never set their own MaxBytesReader.
+	s.mux.Use(s.bodyLimit)
 	s.mux.Get("/healthz", s.handleHealthz)
 	s.mux.Get("/readyz", s.handleReadyz)
 	s.mux.Route("/v1", func(v1 chi.Router) {
