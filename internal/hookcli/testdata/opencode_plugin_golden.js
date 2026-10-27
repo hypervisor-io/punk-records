@@ -69,8 +69,23 @@
 // each carry their own watchdogs and it is torn down by its own abort
 // controllers on deletion/dispose.
 
-export const PunkMemoryPlugin = async ({ directory, client }) => {
+// punkCore holds every behaviour shared by the OpenCode 1.x entry point
+// (PunkMemoryPlugin, a hooks object) and the 2.x entry point
+// (default.setup, ctx.* registrations): URL/credential resolution, the
+// 2-second punkFetch discipline, hook forwarding, first-turn context
+// injection and the whole messaging bridge. The two entry points only
+// translate their host's event/hook payload shapes into the small handler
+// surface returned at the bottom of this function. The host argument
+// abstracts the three SDK operations whose shape differs between major
+// versions: canPrompt() / prompt(sessionID, text) (idle wake),
+// listSessions() (normalized [{id, directory, updated}] or null) and
+// sessionStatuses(list) (map of sessionID -> {type} or null).
+function punkCore(directory, host) {
   const injectedSessions = new Set()
+  // Texts the bridge itself is currently handing to the host as a prompt.
+  // The 2.x prompt hook has no synthetic flag, so it uses this to avoid
+  // capturing the bridge's own delivery as a human UserPromptSubmit.
+  const punkBridgePrompts = new Set()
 
   function punkServerURL() {
     const fromEnv = typeof process !== "undefined" && process.env && process.env.PUNK_URL
@@ -1717,7 +1732,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // never throws; the actual work lives in punkRefreshSession.
   function punkBindSession(sessionID, initiallyBusy) {
     if (!messagingEnabled || !sessionID || punkDisposed || punkDeletedSessions.has(sessionID)) return
-    if (!client || !client.session || typeof client.session.prompt !== "function") return
+    if (!host.canPrompt()) return
     const st = punkSessionState(sessionID)
     if (!st) return
     if (initiallyBusy === true) st.busy = true
@@ -1730,7 +1745,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // lifecycle with Pi/OpenClaw. OpenCode owns recovery, busy state and SDK
   // handoff; concurrent refreshes join the same namespace's restore.
   function punkRefreshSession(sessionID) {
-    if (!messagingEnabled || !client || !client.session || typeof client.session.prompt !== "function") return Promise.resolve(null)
+    if (!messagingEnabled || !host.canPrompt()) return Promise.resolve(null)
     const st = punkSessionState(sessionID)
     if (!st) return Promise.resolve(null)
     return punkInboxRefreshBinding(punkSessions, st, directory || "", "",
@@ -1995,17 +2010,15 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // delivery; a real human message during the prompt is not
   // synthetic-only and is still fully honored.
   async function punkPromptSession(sessionID, text) {
+    punkBridgePrompts.add(text)
     try {
-      const res = await client.session.prompt({
-        path: { id: sessionID },
-        body: {
-          parts: [{ type: "text", text: text, synthetic: true }],
-        },
-      })
+      const res = await host.prompt(sessionID, text)
       return res != null && !res.error
     } catch (err) {
       console.error("punk connect opencode: session prompt delivery failed:", err && err.message ? err.message : err)
       return false
+    } finally {
+      punkBridgePrompts.delete(text)
     }
   }
 
@@ -2210,23 +2223,12 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
   // dispose that happens while the awaited list/status calls are in
   // flight is honored before each bind. Never rejects.
   async function punkBindRestoredSessions() {
-    if (!messagingEnabled || !client || !client.session) return
+    if (!messagingEnabled || !host.canPrompt()) return
     try {
-      if (typeof client.session.list !== "function") return
-      const listed = await client.session.list()
+      const arr = await host.listSessions()
       if (punkDisposed) return
-      const arr = listed && Array.isArray(listed.data) ? listed.data : Array.isArray(listed) ? listed : []
-      let statuses = null
-      if (client.session.status && typeof client.session.status === "function") {
-        try {
-          const statusRes = await client.session.status()
-          if (statusRes && statusRes.data && typeof statusRes.data === "object" && !statusRes.error) {
-            statuses = statusRes.data
-          }
-        } catch (err) {
-          statuses = null
-        }
-      }
+      if (!arr) return
+      const statuses = await host.sessionStatuses(arr)
       if (punkDisposed) return
       let newest = null
       for (let i = 0; i < arr.length; i++) {
@@ -2240,7 +2242,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           punkBindSession(s.id, true)
           continue
         }
-        const updated = s.time && typeof s.time.updated === "number" ? s.time.updated : 0
+        const updated = typeof s.updated === "number" ? s.updated : 0
         if (!newest || updated > newest.updated) newest = { id: s.id, updated: updated }
       }
       if (newest && !punkDisposed) {
@@ -2258,72 +2260,244 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     punkBindRestoredSessions()
   }
 
+  // ---- host-neutral handlers (called by both entry points) ----
+  // OBSERVATIONAL handlers: nothing in the running session is waiting on
+  // the capture, so postHook(...) is deliberately NOT awaited
+  // (fire-and-forget). punkFetch never rejects (see above), so there is
+  // no unhandled-rejection risk from not awaiting it - awaiting would
+  // otherwise stall every session-start/idle event by up to punkFetch's
+  // 2-second timeout whenever the server is slow or down. The messaging
+  // bridge work (bind/unbind/status/drain) is likewise fire-and-forget:
+  // each punk* function swallows its own errors. Callers wrap every
+  // handler in try/catch so a bug here never reaches the host.
   return {
-    // OBSERVATIONAL: nothing in the running session is waiting on this
-    // capture, so postHook(...) is deliberately NOT awaited
-    // (fire-and-forget). punkFetch never rejects (see above), so there is
-    // no unhandled-rejection risk from not awaiting it - awaiting here
-    // would otherwise stall every session-start/idle event by up to
-    // punkFetch's 2-second timeout whenever the server is slow or down.
-    // The messaging bridge work (bind/unbind/status/drain) is likewise
-    // fire-and-forget: each punk* function swallows its own errors.
+    messagingEnabled: messagingEnabled,
+
+    sessionCreated(sessionID) {
+      postHook({
+        hook_event_name: "SessionStart",
+        session_id: sessionID,
+        cwd: directory || "",
+        source: "opencode",
+      })
+      // A freshly created session has nothing running: bind idle.
+      if (messagingEnabled && sessionID) {
+        punkBindSession(sessionID, false)
+      }
+    },
+
+    sessionIdle(sessionID) {
+      // The idle event only carries { sessionID } - there is no
+      // assistant-message text on it, but "idle" is itself meaningful
+      // terminal-state content, so it is sent as last_assistant_message
+      // rather than left out entirely: an empty Stop body would otherwise
+      // store a fact with no information at all (the same lesson Cursor's
+      // stop/sessionEnd translation already applies - see
+      // hookcli/normalize.go's translateCursor).
+      postHook({
+        hook_event_name: "Stop",
+        session_id: sessionID,
+        last_assistant_message: "status=idle",
+        cwd: directory || "",
+        source: "opencode",
+      })
+      if (messagingEnabled) {
+        punkMarkIdle(sessionID)
+      }
+    },
+
+    // A deleted session's inbox binding, SSE stream, and pending
+    // registration retries go away with it, and it is never rebound (even
+    // by a late restored-session bind or a duplicate session.created).
+    // This bridge does not deregister the member; it remains until
+    // explicit removal or configured expiry. Removing membership does not
+    // delete messages or the server inbox binding.
+    sessionDeleted(sessionID) {
+      if (messagingEnabled && sessionID) {
+        punkUnbindSession(sessionID)
+      }
+    },
+
+    // props: { sessionID, status: { type } }
+    sessionStatus(props) {
+      if (messagingEnabled) {
+        punkSessionStatus(props)
+      }
+    },
+
+    // A failed run leaves the session not busy; flush pending delivery so
+    // an errored session can still receive messages.
+    sessionError(sessionID) {
+      if (messagingEnabled && sessionID) {
+        punkMarkIdle(sessionID)
+      }
+    },
+
+    toolAfter(sessionID, callID, tool, args, response) {
+      postHook({
+        hook_event_name: "PostToolUse",
+        session_id: sessionID,
+        tool_use_id: callID,
+        tool_name: tool,
+        tool_input: args,
+        tool_response: response,
+        cwd: directory || "",
+        source: "opencode",
+      })
+    },
+
+    // True while the bridge is handing this exact text to the host as a
+    // prompt (2.x prompt hook only; 1.x marks the part synthetic instead).
+    isBridgePrompt(text) {
+      return punkBridgePrompts.has(text)
+    },
+
+    // messageID becomes prompt_id when the runtime provides one;
+    // otherwise a deterministic hash of sessionID+prompt stands in,
+    // mirroring hookcli's promptIDFallback (normalize.go) - including its
+    // NUL separator between the two joined fields (see fnv1aHex's own
+    // comment above for why that separator is written as an escape
+    // sequence, not a raw byte, in this source file) - the server drops
+    // any UserPromptSubmit whose prompt_id sanitizes to empty, so a
+    // missing id must never mean a silently dropped prompt.
+    userPrompt(sessionID, messageID, prompt) {
+      const promptID = messageID || "msg-" + fnv1aHex((sessionID || "") + "\u0000" + prompt)
+      postHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: sessionID,
+        prompt_id: promptID,
+        prompt,
+        cwd: directory || "",
+        source: "opencode",
+      })
+      if (messagingEnabled && sessionID) {
+        // A human turn marks the session busy and, for a session that
+        // was resumed rather than created in this process, is its
+        // first sign of life: bind (register + listen) so its inbox is
+        // delivered once the turn ends.
+        punkBindSession(sessionID, true)
+      }
+    },
+
+    // BLOCKING: the only handler that awaits its network call. The
+    // model's system prompt for this turn is genuinely incomplete until
+    // context injection either succeeds or gives up, so - unlike the
+    // observational handlers above - stalling here (bounded by
+    // punkFetch's 2-second timeout) is the intended tradeoff, not an
+    // oversight. push(text) appends one system-prompt block in the host's
+    // own shape. Two separate concerns ride this call with separate gates:
+    //   - The memory context fetch stays ONCE PER SESSION
+    //     (injectedSessions): marked BEFORE the fetch, so one transient
+    //     failure disables it for the rest of the session rather than
+    //     stalling every turn.
+    //   - The messaging guidance block rides EVERY call: the host hands
+    //     the plugin a fresh system array per LLM turn, so a block
+    //     pushed only once would vanish from every subsequent turn. Its
+    //     namespace lookup is negative-cached per session for 15s after a
+    //     failure so a dead server cannot re-stall each turn.
+    async injectContext(sessionID, push) {
+      if (!sessionID) {
+        return
+      }
+      if (!injectedSessions.has(sessionID)) {
+        // See the comment above: marked injected BEFORE the fetch.
+        injectedSessions.add(sessionID)
+        const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(directory || ""))
+        if (data && typeof data.context === "string" && data.context.length > 0) {
+          push(data.context)
+        }
+      }
+      if (messagingEnabled) {
+        const st = punkSessionState(sessionID)
+        if (st && Date.now() >= (st.namespaceNegUntil || 0)) {
+          const bound = await punkRefreshSession(sessionID)
+          if (bound && punkAlive(bound, sessionID)) {
+            push(punkMessagingBlock(bound.ns, sessionID))
+          } else {
+            st.namespaceNegUntil = Date.now() + 15000
+          }
+        }
+      }
+    },
+
+    // Flips the disposed latch (no new binds, drains, or registrations may
+    // start or continue) and aborts every session's sleeps and SSE
+    // connections. Best-effort old-namespace lease releases are never
+    // awaited here.
+    dispose() {
+      punkDisposed = true
+      const ids = Array.from(punkSessions.keys())
+      for (let i = 0; i < ids.length; i++) {
+        punkUnbindSession(ids[i])
+      }
+    },
+  }
+}
+
+// ======================================================================
+// OpenCode 1.x entry point (and the module's named export): the legacy
+// function-returning-hooks shape, also reached through default.server()
+// below on 1.x runtimes that read the default definition. The 1.x loader
+// (packages/opencode/src/plugin/index.ts, applyPlugin) uses ONLY the
+// default definition when it has an id/server and ignores other named
+// exports, so exporting both never double-registers.
+// ======================================================================
+
+function punkV1Host(client) {
+  return {
+    canPrompt() {
+      return !!(client && client.session && typeof client.session.prompt === "function")
+    },
+    prompt(sessionID, text) {
+      return client.session.prompt({
+        path: { id: sessionID },
+        body: {
+          parts: [{ type: "text", text: text, synthetic: true }],
+        },
+      })
+    },
+    async listSessions() {
+      if (!client || !client.session || typeof client.session.list !== "function") return null
+      const listed = await client.session.list()
+      const arr = listed && Array.isArray(listed.data) ? listed.data : Array.isArray(listed) ? listed : []
+      return arr.map((s) =>
+        s && typeof s.id === "string"
+          ? { id: s.id, directory: s.directory, updated: s.time && typeof s.time.updated === "number" ? s.time.updated : 0 }
+          : null
+      )
+    },
+    async sessionStatuses() {
+      if (client.session.status && typeof client.session.status === "function") {
+        try {
+          const statusRes = await client.session.status()
+          if (statusRes && statusRes.data && typeof statusRes.data === "object" && !statusRes.error) {
+            return statusRes.data
+          }
+        } catch (err) {
+          return null
+        }
+      }
+      return null
+    },
+  }
+}
+
+export const PunkMemoryPlugin = async ({ directory, client }) => {
+  const core = punkCore(directory, punkV1Host(client))
+  return {
+    // OBSERVATIONAL (not awaited by the handlers; see punkCore).
     event: async ({ event }) => {
       try {
         if (event.type === "session.created") {
-          postHook({
-            hook_event_name: "SessionStart",
-            session_id: event.properties.info.id,
-            cwd: directory || "",
-            source: "opencode",
-          })
-          // A freshly created session has nothing running: bind idle.
-          if (messagingEnabled && event.properties && event.properties.info && event.properties.info.id) {
-            punkBindSession(event.properties.info.id, false)
-          }
+          core.sessionCreated(event.properties.info.id)
         } else if (event.type === "session.idle") {
-          // EventSessionIdle only carries { sessionID } - there is no
-          // assistant-message text on this event, but "idle" is itself
-          // meaningful terminal-state content, so it is sent as
-          // last_assistant_message rather than left out entirely: an
-          // empty Stop body would otherwise store a fact with no
-          // information at all (the same lesson Cursor's stop/sessionEnd
-          // translation already applies - see
-          // hookcli/normalize.go's translateCursor).
-          postHook({
-            hook_event_name: "Stop",
-            session_id: event.properties.sessionID,
-            last_assistant_message: "status=idle",
-            cwd: directory || "",
-            source: "opencode",
-          })
-          if (messagingEnabled) {
-            punkMarkIdle(event.properties.sessionID)
-          }
+          core.sessionIdle(event.properties.sessionID)
         } else if (event.type === "session.deleted") {
-          // A deleted session's inbox binding, SSE stream, and pending
-          // registration retries go away with it, and it is never rebound
-          // (even by a late restored-session bind or a duplicate
-          // session.created). This bridge does not deregister the member;
-          // it remains until explicit removal or configured expiry. Removing
-          // membership does not delete messages or the server inbox binding.
-          if (
-            messagingEnabled &&
-            event.properties &&
-            event.properties.info &&
-            event.properties.info.id
-          ) {
-            punkUnbindSession(event.properties.info.id)
-          }
+          core.sessionDeleted(event.properties && event.properties.info && event.properties.info.id)
         } else if (event.type === "session.status") {
-          if (messagingEnabled) {
-            punkSessionStatus(event.properties)
-          }
+          core.sessionStatus(event.properties)
         } else if (event.type === "session.error") {
-          // A failed run leaves the session not busy; flush pending
-          // delivery so an errored session can still receive messages.
-          if (messagingEnabled && event.properties && event.properties.sessionID) {
-            punkMarkIdle(event.properties.sessionID)
-          }
+          core.sessionError(event.properties && event.properties.sessionID)
         }
       } catch (err) {
         console.error("punk connect opencode: event hook failed:", err && err.message ? err.message : err)
@@ -2333,16 +2507,7 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     // OBSERVATIONAL (see the "event" hook's comment above): not awaited.
     "tool.execute.after": async (input, output) => {
       try {
-        postHook({
-          hook_event_name: "PostToolUse",
-          session_id: input.sessionID,
-          tool_use_id: input.callID,
-          tool_name: input.tool,
-          tool_input: input.args,
-          tool_response: output ? output.output : undefined,
-          cwd: directory || "",
-          source: "opencode",
-        })
+        core.toolAfter(input.sessionID, input.callID, input.tool, input.args, output ? output.output : undefined)
       } catch (err) {
         console.error("punk connect opencode: tool.execute.after hook failed:", err && err.message ? err.message : err)
       }
@@ -2362,14 +2527,6 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
     // message (any non-synthetic part) is captured as before AND marks
     // the session busy - including one arriving while the bridge is
     // mid-prompt or while registration is still pending (lazy state).
-    // messageID becomes prompt_id when the runtime provides one;
-    // otherwise a deterministic hash of sessionID+prompt stands in,
-    // mirroring hookcli's promptIDFallback (normalize.go) - including its
-    // NUL separator between the two joined fields (see fnv1aHex's own
-    // comment above for why that separator is written as an escape
-    // sequence, not a raw byte, in this source file) - the server drops
-    // any UserPromptSubmit whose prompt_id sanitizes to empty, so a
-    // missing id must never mean a silently dropped prompt.
     "chat.message": async (input, output) => {
       try {
         const message = output && output.message
@@ -2387,87 +2544,277 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
           .filter((p) => p && p.type === "text" && typeof p.text === "string" && !p.synthetic && !p.ignored)
           .map((p) => p.text)
           .join("\n")
-        const sessionID = input && input.sessionID
-        const promptID = (input && input.messageID) || "msg-" + fnv1aHex((sessionID || "") + "\u0000" + prompt)
-        postHook({
-          hook_event_name: "UserPromptSubmit",
-          session_id: sessionID,
-          prompt_id: promptID,
-          prompt,
-          cwd: directory || "",
-          source: "opencode",
-        })
-        if (messagingEnabled && sessionID) {
-          // A human turn marks the session busy and, for a session that
-          // was resumed rather than created in this process, is its
-          // first sign of life: bind (register + listen) so its inbox is
-          // delivered once the turn ends.
-          punkBindSession(sessionID, true)
-        }
+        core.userPrompt(input && input.sessionID, input && input.messageID, prompt)
       } catch (err) {
         console.error("punk connect opencode: chat.message hook failed:", err && err.message ? err.message : err)
       }
     },
 
-    // BLOCKING: the only hook here that awaits its network call. The
-    // model's system prompt for this turn is genuinely incomplete until
-    // context injection either succeeds or gives up, so - unlike the
-    // observational hooks above - stalling here (bounded by punkFetch's
-    // 2-second timeout) is the intended tradeoff, not an oversight. Two
-    // separate concerns ride this hook with separate gates:
-    //   - The memory context fetch stays ONCE PER SESSION
-    //     (injectedSessions): marked BEFORE the fetch, so one transient
-    //     failure disables it for the rest of the session rather than
-    //     stalling every turn.
-    //   - The messaging guidance block rides EVERY call: OpenCode hands
-    //     the plugin a fresh output.system per LLM turn, so a block
-    //     pushed only once would vanish from every subsequent turn. Its
-    //     namespace lookup is negative-cached per session for 15s after a
-    //     failure so a dead server cannot re-stall each turn.
+    // BLOCKING (see core.injectContext).
     "experimental.chat.system.transform": async (input, output) => {
       try {
-        const sessionID = input && input.sessionID
-        if (!sessionID) {
-          return
-        }
-        if (!injectedSessions.has(sessionID)) {
-          // See the comment above: marked injected BEFORE the fetch.
-          injectedSessions.add(sessionID)
-          const data = await punkFetch("/v1/agent/context?cwd=" + encodeURIComponent(directory || ""))
-          if (data && typeof data.context === "string" && data.context.length > 0) {
-            output.system.push(data.context)
-          }
-        }
-        if (messagingEnabled) {
-          const st = punkSessionState(sessionID)
-          if (st && Date.now() >= (st.namespaceNegUntil || 0)) {
-            const bound = await punkRefreshSession(sessionID)
-            if (bound && punkAlive(bound, sessionID)) {
-              output.system.push(punkMessagingBlock(bound.ns, sessionID))
-            } else {
-              st.namespaceNegUntil = Date.now() + 15000
-            }
-          }
-        }
+        await core.injectContext(input && input.sessionID, (text) => output.system.push(text))
       } catch (err) {
         console.error("punk connect opencode: context injection failed:", err && err.message ? err.message : err)
       }
     },
 
-    // dispose: OpenCode awaits this on shutdown. Flips the
-    // disposed latch (no new binds, drains, or registrations may start or
-    // continue) and aborts every session's sleeps and SSE connections.
-    // Best-effort old-namespace lease releases are never awaited here.
+    // dispose: OpenCode awaits this on shutdown.
     dispose: async () => {
       try {
-        punkDisposed = true
-        const ids = Array.from(punkSessions.keys())
-        for (let i = 0; i < ids.length; i++) {
-          punkUnbindSession(ids[i])
-        }
+        core.dispose()
       } catch (err) {
         console.error("punk connect opencode: messaging dispose failed:", err && err.message ? err.message : err)
       }
     },
   }
+}
+
+// ======================================================================
+// OpenCode 2.x entry point: default.setup(ctx). V2 does not run V1
+// plugins; it requires a default definition with an id and a setup
+// function (@opencode/plugin@2.2.0 promise/plugin.d.ts). Payload shapes
+// come from that package plus @opencode/client@2.2.0 and
+// @opencode/schema@2.2.0: events are { type, data: {...} } (not
+// properties), tool.execute.after is ctx.tool.hook("execute.after"),
+// chat.message is ctx.session.hook("prompt"), the system-prompt transform
+// is ctx.session.hook("context") editing event.system (SystemPart
+// { type: "text", text }), and a prompt is
+// ctx.session.prompt({ sessionID, text, ... }).
+// ======================================================================
+
+function punkV2Text(content) {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c) => c && c.type === "text" && typeof c.text === "string")
+      .map((c) => c.text)
+      .join("\n")
+  }
+  return ""
+}
+
+function punkV2Host(ctx, directory) {
+  const session = ctx.session
+  return {
+    canPrompt() {
+      return !!(session && typeof session.prompt === "function")
+    },
+    prompt(sessionID, text) {
+      // metadata marks the delivery as the bridge's own; resume wakes the
+      // idle session so the model actually processes the message.
+      return session.prompt({ sessionID: sessionID, text: text, resume: true, metadata: { punk_bridge: true } })
+    },
+    async listSessions() {
+      if (!session || typeof session.list !== "function") return null
+      const input = { limit: 50, order: "desc" }
+      if (directory) input.directory = directory
+      const listed = await session.list(input)
+      const arr = listed && Array.isArray(listed.data) ? listed.data : Array.isArray(listed) ? listed : []
+      return arr.map((s) =>
+        s && typeof s.id === "string"
+          ? {
+              id: s.id,
+              directory: s.location && s.location.directory,
+              updated: s.time && typeof s.time.updated === "number" ? s.time.updated : 0,
+            }
+          : null
+      )
+    },
+    // The 2.x plugin context has no status snapshot call. Probe only the
+    // newest session (the one a restart most plausibly interrupted) with
+    // session.wait, which settles once the session is idle: settled within
+    // the probe window means idle, still pending means busy. Other stored
+    // sessions bind lazily on their first status/idle event.
+    async sessionStatuses(list) {
+      if (!session || typeof session.wait !== "function") return null
+      let newest = null
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i]
+        if (s && s.id && (!newest || s.updated > newest.updated)) newest = s
+      }
+      if (!newest) return {}
+      let timer = null
+      try {
+        const idle = await Promise.race([
+          Promise.resolve(session.wait({ sessionID: newest.id })).then(() => true),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(false), 750)
+          }),
+        ])
+        const out = {}
+        out[newest.id] = { type: idle ? "idle" : "busy" }
+        return out
+      } catch (err) {
+        return null
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    },
+  }
+}
+
+async function punkSetupV2(ctx) {
+  const directory = (ctx && ctx.location && ctx.location.directory) || ""
+  const core = punkCore(directory, punkV2Host(ctx, directory))
+  const registrations = []
+  const abort = new AbortController()
+
+  // Each registration is independent and fail-open: one missing or
+  // rejected hook must not prevent the others from registering.
+  async function register(domain, kind, name, callback) {
+    try {
+      const reg = await ctx[domain][kind](name, callback)
+      if (reg) registrations.push(reg)
+    } catch (err) {
+      console.error("punk connect opencode: " + domain + "." + kind + " " + name + " registration failed:", err && err.message ? err.message : err)
+    }
+  }
+
+  await register("tool", "hook", "execute.after", (e) => {
+    try {
+      let response
+      if (e.status === "error") {
+        response = e.error && e.error.message ? e.error.message : e.error !== undefined ? String(e.error) : undefined
+      } else if (e.result) {
+        const text = punkV2Text(e.result.content)
+        response = text || e.result.output
+      }
+      core.toolAfter(e.sessionID, e.id, e.tool, e.input, response)
+    } catch (err) {
+      console.error("punk connect opencode: tool.execute.after hook failed:", err && err.message ? err.message : err)
+    }
+  })
+
+  // The V2 prompt hook runs before durable prompt admission. It carries
+  // plain text (no synthetic part flag), so the bridge's own deliveries are
+  // recognised by their metadata marker or by being in flight.
+  await register("session", "hook", "prompt", (e) => {
+    try {
+      const prompt = e && e.prompt && typeof e.prompt.text === "string" ? e.prompt.text : ""
+      if (e && e.metadata && e.metadata.punk_bridge === true) return
+      if (core.isBridgePrompt(prompt)) return
+      core.userPrompt(e.sessionID, e.messageID, prompt)
+    } catch (err) {
+      console.error("punk connect opencode: prompt hook failed:", err && err.message ? err.message : err)
+    }
+  })
+
+  // BLOCKING (see core.injectContext): the hook callback is awaited by the
+  // host, bounded by punkFetch's 2-second timeout.
+  await register("session", "hook", "context", async (e) => {
+    try {
+      await core.injectContext(e.sessionID, (text) => {
+        if (Array.isArray(e.system)) e.system.push({ type: "text", text: text })
+      })
+    } catch (err) {
+      console.error("punk connect opencode: context injection failed:", err && err.message ? err.message : err)
+    }
+  })
+
+  function handleEvent(ev) {
+    try {
+      const d = (ev && ev.data) || {}
+      switch (ev && ev.type) {
+        case "session.created":
+          core.sessionCreated(d.sessionID)
+          break
+        case "session.idle":
+          core.sessionIdle(d.sessionID)
+          break
+        case "session.deleted":
+          core.sessionDeleted(d.sessionID)
+          break
+        case "session.status":
+          core.sessionStatus({ sessionID: d.sessionID, status: d.status })
+          break
+        case "session.execution.failed":
+        case "session.execution.interrupted":
+          core.sessionError(d.sessionID)
+          break
+      }
+    } catch (err) {
+      console.error("punk connect opencode: event hook failed:", err && err.message ? err.message : err)
+    }
+  }
+
+  // Event subscription: one long-lived async iteration, stopped by the
+  // AbortController in cleanup. If the stream ends or errors while the
+  // plugin is live it re-subscribes with a capped, abort-cancellable
+  // backoff instead of silently going deaf.
+  function sleepAbortable(ms) {
+    return new Promise((resolve) => {
+      if (abort.signal.aborted) return resolve()
+      const timer = setTimeout(done, ms)
+      function done() {
+        clearTimeout(timer)
+        abort.signal.removeEventListener("abort", done)
+        resolve()
+      }
+      abort.signal.addEventListener("abort", done)
+    })
+  }
+  const eventTypes = [
+    "session.created",
+    "session.idle",
+    "session.deleted",
+    "session.status",
+    "session.execution.failed",
+    "session.execution.interrupted",
+  ]
+  if (ctx && ctx.event && typeof ctx.event.subscribe === "function") {
+    ;(async () => {
+      let delay = 1000
+      while (!abort.signal.aborted) {
+        let gotEvent = false
+        try {
+          for await (const ev of ctx.event.subscribe({ types: eventTypes, signal: abort.signal })) {
+            if (abort.signal.aborted) break
+            gotEvent = true
+            handleEvent(ev)
+          }
+        } catch (err) {
+          if (!abort.signal.aborted) {
+            console.error("punk connect opencode: event stream failed:", err && err.message ? err.message : err)
+          }
+        }
+        if (abort.signal.aborted) break
+        if (gotEvent) delay = 1000
+        await sleepAbortable(delay)
+        delay = Math.min(delay * 2, 30000)
+      }
+    })().catch(() => {})
+  }
+
+  // Cleanup: stop the event loop, unregister every hook, then dispose the
+  // bridge (aborts sleeps/SSE; lease releases are best-effort, un-awaited).
+  return async () => {
+    abort.abort()
+    try {
+      core.dispose()
+    } catch (err) {
+      console.error("punk connect opencode: messaging dispose failed:", err && err.message ? err.message : err)
+    }
+    for (const reg of registrations.splice(0)) {
+      try {
+        await reg.dispose()
+      } catch (err) {}
+    }
+    // The event loop is deliberately NOT awaited: a host iterator that is
+    // slow to honour the abort must never stall shutdown.
+  }
+}
+
+// Default definition: V2 calls setup(ctx); V1 (>= 1.18.x, whose loader
+// reads a default {id, server}) calls server(input). Dependency-free: the
+// SDK's define() helpers are identity functions, so a plain object is
+// equivalent.
+export default {
+  id: "punk-memory",
+  setup(ctx) {
+    return punkSetupV2(ctx)
+  },
+  server(input) {
+    return PunkMemoryPlugin(input)
+  },
 }
