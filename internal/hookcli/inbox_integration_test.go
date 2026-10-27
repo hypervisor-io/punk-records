@@ -123,7 +123,7 @@ func TestNativeInboxBuiltBinaryMatrix(t *testing.T) {
 				}
 				return out.String()
 			}
-			empty := nativeExpectedEmptyReply(client, addr)
+			empty := nativeExpectedEmptyReply(client, addr, "")
 			if got := run(srv.URL, "context", false); got != empty {
 				t.Fatalf("empty=%q want=%q", got, empty)
 			}
@@ -186,8 +186,9 @@ func nativeExpectedEnvelope(addr string, m *region.Message) string {
 // (after confirmed registration). Hand-written like the envelopes above,
 // never built from the production renderer. Only the clients with a
 // native wake transport (claude-code, codex) carry the wake sentence.
-func nativeExpectedRouting(client, addr string) string {
+func nativeExpectedRouting(client, addr, bindingLine string) string {
 	base := "[PUNK ROUTING] Your punk messaging address is " + addr + " in namespace team.\n" +
+		bindingLine +
 		"Send: send_message(namespace=\"team\", sender=\"" + addr + "\", recipient=\"<their address>\", body=\"...\"). Read/ack: read_messages/ack_messages(namespace=\"team\", agent=\"" + addr + "\").\n" +
 		"Use exactly this address and namespace; never invent aliases or namespaces. "
 	switch client {
@@ -203,8 +204,11 @@ func nativeExpectedRouting(client, addr string) string {
 // the routing identity for every context-capable client (even an empty
 // inbox), the silent minimum for anything else. A dead server still
 // fails open to nativeExpectedReply(client, "", false) for all clients.
-func nativeExpectedEmptyReply(client, addr string) string {
-	if g := nativeExpectedRouting(client, addr); g != "" {
+// bindingLine is the P3-D binding-visibility line the block carries
+// when the hook followed an explicit binding ("" when it did not: no
+// binding, or a pin beat it, or PUNK_NAMESPACES refused it).
+func nativeExpectedEmptyReply(client, addr, bindingLine string) string {
+	if g := nativeExpectedRouting(client, addr, bindingLine); g != "" {
 		return nativeExpectedReply(client, g, false)
 	}
 	return nativeExpectedReply(client, "", false)

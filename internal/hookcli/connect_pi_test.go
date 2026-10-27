@@ -645,6 +645,24 @@ export default function punkPiExtension(pi) {
   // EXTEND the shared bridge: pins are local, otherwise resolve the server's
   // per-address binding fresh at host events/reconnects. No global ns cache
   // and no guessed cwd fallback when the server cannot answer the lookup.
+  // P3-D: PUNK_NAMESPACES is the optional local allowlist (comma-separated)
+  // gating which server inbox BINDINGS this bridge follows - the same rule
+  // the Go hook enforces. A binding outside the list is refused: the bridge
+  // falls back to the cwd-derived namespace the server sent alongside it
+  // (fail-open direction - delivery continues on the default namespace).
+  // Pins are explicit local intent and are never gated. A refusal with no
+  // usable fallback answers "" and rides the existing retry path.
+  function punkInboxBindingAllowed(data) {
+    if (!data || !data.bound) return true;
+    const raw = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACES;
+    if (!raw || !String(raw).trim()) return true;
+    const list = String(raw).split(",");
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].trim() === data.namespace) return true;
+    }
+    return false;
+  }
+
   async function punkInboxResolveNamespace(cwd, agent, pin, signal) {
     const env = typeof process !== "undefined" && process.env && process.env.PUNK_NAMESPACE;
     if (env || pin) return env || pin;
@@ -652,7 +670,11 @@ export default function punkPiExtension(pi) {
       "/v1/agent/namespace?cwd=" + encodeURIComponent(cwd || "") + "&agent=" + encodeURIComponent(agent),
       { signal: signal }
     );
-    return data && typeof data.namespace === "string" ? data.namespace : "";
+    if (!data || typeof data.namespace !== "string") return "";
+    if (!punkInboxBindingAllowed(data)) {
+      return typeof data.cwd_namespace === "string" ? data.cwd_namespace : "";
+    }
+    return data.namespace;
   }
 
   function punkInboxRetire(st) {

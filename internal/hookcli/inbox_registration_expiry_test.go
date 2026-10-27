@@ -87,6 +87,13 @@ func TestInboxRegistrationExpiryRestoresBoundMembership(t *testing.T) {
 			if err := reg.SetInboxBinding(ctx, "team", addr); err != nil {
 				t.Fatal(err)
 			}
+			// The P3-D binding-visibility line the routing block carries
+			// on every empty-inbox reply: the binding was set through
+			// the setter-less region call at the locked clock, so the
+			// line states the bind without a "by" clause. The binding
+			// itself survives member expiry/removal (0027), so both
+			// pins below carry the identical line.
+			const boundLine = "Inbox bound to team at 2026-10-09T12:00:00.000000000Z.\n"
 			keys := api.NewKeys(db, nil)
 			az := authz.New(db, nil)
 			keys.SetAuthorizer(az)
@@ -120,7 +127,7 @@ func TestInboxRegistrationExpiryRestoresBoundMembership(t *testing.T) {
 				}
 				return out.String()
 			}
-			if got, want := run(), nativeExpectedEmptyReply(opts.Client, addr); got != want {
+			if got, want := run(), nativeExpectedEmptyReply(opts.Client, addr, boundLine); got != want {
 				t.Fatalf("initial hook=%q want=%q", got, want)
 			}
 			statePath, stateBefore := registeredInboxSnapshot(t, stateHome, opts.Client, "team", addr)
@@ -191,7 +198,7 @@ func TestInboxRegistrationExpiryRestoresBoundMembership(t *testing.T) {
 			run()
 			assertBinding()
 			opts.Namespace = ""
-			if got, want := run(), nativeExpectedEmptyReply(opts.Client, addr); got != want {
+			if got, want := run(), nativeExpectedEmptyReply(opts.Client, addr, boundLine); got != want {
 				t.Fatalf("binding after pinned poll=%q want=%q", got, want)
 			}
 			assertBinding()

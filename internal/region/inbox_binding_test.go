@@ -160,3 +160,75 @@ func TestInboxBindingSurvivesMemberExpiry(t *testing.T) {
 		t.Fatalf("binding after remove = (%q, %v, %v), want ns-c", ns, ok, err)
 	}
 }
+
+// P3-D binding visibility: SetInboxBindingAs names the setter, and
+// InboxBindingInfo reports the full stored row - namespace, who set it
+// and when - while the legacy SetInboxBinding signature keeps working
+// (every server call site still uses it) and records an honest
+// ” = unknown setter rather than a fabricated name.
+func TestSetInboxBindingAsRecordsSetterAndTime(t *testing.T) {
+	s := newTest(t)
+	ctx := context.Background()
+	if err := s.Register(ctx, "punk-pbs", "claude-code:s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetInboxBindingAs(ctx, "punk-pbs", "claude-code:s1", "codex:operator"); err != nil {
+		t.Fatal(err)
+	}
+	info, ok, err := s.InboxBindingInfo(ctx, "claude-code:s1")
+	if err != nil || !ok {
+		t.Fatalf("info = (%+v, %v, %v), want the binding", info, ok, err)
+	}
+	if info.Namespace != "punk-pbs" || info.SetBy != "codex:operator" {
+		t.Fatalf("info = %+v, want punk-pbs bound by codex:operator", info)
+	}
+	if _, perr := time.Parse(time.RFC3339Nano, info.SetAt); perr != nil {
+		t.Fatalf("set_at %q is not a stored-format timestamp: %v", info.SetAt, perr)
+	}
+	// The membership gate applies to the setter-named form unchanged.
+	if err := s.SetInboxBindingAs(ctx, "repo-main", "claude-code:s1", "codex:operator"); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("setter-named bind without membership = %v, want ErrNotMember", err)
+	}
+	// A rebind replaces namespace, setter and time together: latest
+	// explicit bind wins, and the test clock advances on every call.
+	if err := s.Register(ctx, "repo-main", "claude-code:s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetInboxBindingAs(ctx, "repo-main", "claude-code:s1", "hermes:lead"); err != nil {
+		t.Fatal(err)
+	}
+	again, ok, err := s.InboxBindingInfo(ctx, "claude-code:s1")
+	if err != nil || !ok || again.Namespace != "repo-main" || again.SetBy != "hermes:lead" {
+		t.Fatalf("rebound info = (%+v, %v, %v), want repo-main bound by hermes:lead", again, ok, err)
+	}
+	if again.SetAt == info.SetAt {
+		t.Fatalf("rebind kept set_at %q, want a fresh timestamp", again.SetAt)
+	}
+	// The namespace-only wrapper never changed shape.
+	if ns, ok, err := s.InboxBinding(ctx, "claude-code:s1"); err != nil || !ok || ns != "repo-main" {
+		t.Fatalf("wrapper = (%q, %v, %v), want repo-main", ns, ok, err)
+	}
+}
+
+func TestInboxBindingLegacyCallRecordsUnknownSetter(t *testing.T) {
+	s := newTest(t)
+	ctx := context.Background()
+	if err := s.Register(ctx, "punk-pbs", "opencode:s9", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-P3-D signature stores an honest '' = unknown setter.
+	if err := s.SetInboxBinding(ctx, "punk-pbs", "opencode:s9"); err != nil {
+		t.Fatal(err)
+	}
+	info, ok, err := s.InboxBindingInfo(ctx, "opencode:s9")
+	if err != nil || !ok || info.Namespace != "punk-pbs" || info.SetBy != "" {
+		t.Fatalf("info = (%+v, %v, %v), want punk-pbs with an unknown setter", info, ok, err)
+	}
+	if info.SetAt == "" {
+		t.Fatal("set_at must be recorded even when the setter is unknown")
+	}
+	// Unbound address: the info lookup mirrors the wrapper's contract.
+	if _, ok, err := s.InboxBindingInfo(ctx, "nobody:s0"); err != nil || ok {
+		t.Fatalf("unbound info = (%v, %v), want not-ok", ok, err)
+	}
+}

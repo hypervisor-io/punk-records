@@ -158,7 +158,7 @@ func TestInstalledInboxHookMatrix(t *testing.T) {
 				}
 				return out.String()
 			}
-			empty := nativeExpectedEmptyReply(client, addr)
+			empty := nativeExpectedEmptyReply(client, addr, "")
 			if got := run(command, false); got != empty {
 				t.Fatalf("empty installed=%q want=%q", got, empty)
 			}

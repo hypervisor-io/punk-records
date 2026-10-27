@@ -268,7 +268,11 @@ func wakeEnsure(client string, opts WakeOpts, stdin io.Reader, errw io.Writer) {
 	// Resolved fresh on every ensure with the session address on the
 	// lookup: a moved inbox binding changes the namespace, the
 	// fingerprint follows, and the old generation is superseded below.
-	ns, err := resolveInboxNamespace(InboxOpts{Namespace: opts.Namespace, BaseURL: opts.BaseURL, APIKey: opts.APIKey}, cwd, client+":"+sessionID)
+	// The P3-D allowlist rides the same resolution: a binding refused
+	// by PUNK_NAMESPACES never ensures a listener on the refused
+	// namespace. Binding visibility info is the routing block's concern
+	// (inbox.go), not the listener's.
+	ns, _, err := resolveInboxNamespace(InboxOpts{Namespace: opts.Namespace, BaseURL: opts.BaseURL, APIKey: opts.APIKey}, cwd, client+":"+sessionID)
 	if err != nil {
 		wakeNote(errw, "namespace resolution failed; no listener ensured")
 		return

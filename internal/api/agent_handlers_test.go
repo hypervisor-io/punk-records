@@ -1691,9 +1691,11 @@ func bindingTestServer(t *testing.T) *Server {
 
 // TestAgentNamespaceAgentParam pins the binding-aware resolution
 // contract: with agent present and a binding on file the route answers
-// the bound namespace; with agent present but unbound, and with agent
-// absent, it answers exactly today's cwd-derived namespace. The
-// response shape is unchanged and cwd remains required.
+// the bound namespace plus the P3-D visibility fields (bound, the
+// stored setter and time, and the cwd-derived namespace the binding
+// overrode); with agent present but unbound, and with agent absent, it
+// answers exactly today's cwd-derived namespace, byte-identical to the
+// pre-P3-D shape. cwd remains required.
 func TestAgentNamespaceAgentParam(t *testing.T) {
 	srv := bindingTestServer(t)
 	ctx := context.Background()
@@ -1711,10 +1713,19 @@ func TestAgentNamespaceAgentParam(t *testing.T) {
 		return rec.Code, strings.TrimSpace(rec.Body.String())
 	}
 
-	// Binding wins over the cwd-derived namespace.
+	// Binding wins over the cwd-derived namespace, and the visibility
+	// fields ride the bound answer: bound=true, the stored setter
+	// (omitted while unknown) and time, and the cwd-derived namespace
+	// the binding overrode - so a local PUNK_NAMESPACES allowlist can
+	// refuse the binding without a second round trip.
+	info, ok, err := srv.region.InboxBindingInfo(ctx, "claude-code:s1")
+	if err != nil || !ok || info.SetBy != "" {
+		t.Fatalf("stored info = (%+v, %v, %v), want an unknown setter", info, ok, err)
+	}
+	wantBound := `{"namespace":"punk-pbs","bound":true,"set_at":"` + info.SetAt + `","cwd_namespace":"agent-otherproj"}`
 	code, body := get("/v1/agent/namespace?cwd=/home/u/otherproj&agent=claude-code:s1")
-	if code != http.StatusOK || body != `{"namespace":"punk-pbs"}` {
-		t.Fatalf("bound: %d %s, want 200 {\"namespace\":\"punk-pbs\"}", code, body)
+	if code != http.StatusOK || body != wantBound {
+		t.Fatalf("bound: %d %s, want 200 %s", code, body, wantBound)
 	}
 	// Agent present but unbound: cwd fallback, byte-identical to today.
 	code, body = get("/v1/agent/namespace?cwd=/home/u/My_Proj_2&agent=codex:s3")
@@ -1733,12 +1744,41 @@ func TestAgentNamespaceAgentParam(t *testing.T) {
 	if err := srv.region.SetInboxBinding(ctx, "repo-main", "claude-code:s1"); err != nil {
 		t.Fatal(err)
 	}
+	rebound, ok, err := srv.region.InboxBindingInfo(ctx, "claude-code:s1")
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	wantRebound := `{"namespace":"repo-main","bound":true,"set_at":"` + rebound.SetAt + `","cwd_namespace":"agent-otherproj"}`
 	code, body = get("/v1/agent/namespace?cwd=/home/u/otherproj&agent=claude-code:s1")
-	if code != http.StatusOK || body != `{"namespace":"repo-main"}` {
-		t.Fatalf("rebound: %d %s, want repo-main", code, body)
+	if code != http.StatusOK || body != wantRebound {
+		t.Fatalf("rebound: %d %s, want 200 %s", code, body, wantRebound)
 	}
 	// cwd stays required exactly as before.
 	if code, _ := get("/v1/agent/namespace?agent=claude-code:s1"); code != http.StatusBadRequest {
 		t.Fatalf("missing cwd with agent = %d, want 400", code)
+	}
+}
+
+// TestAgentNamespaceBindingVisibility pins P3-D's bound-answer shape
+// with a NAMED setter: the hook's routing-block line 'inbox bound to
+// <ns> by <setter> at <time>' renders from exactly these fields.
+func TestAgentNamespaceBindingVisibility(t *testing.T) {
+	srv := bindingTestServer(t)
+	ctx := context.Background()
+	if err := srv.region.Register(ctx, "punk-pbs", "claude-code:s1", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.region.SetInboxBindingAs(ctx, "punk-pbs", "claude-code:s1", "codex:operator"); err != nil {
+		t.Fatal(err)
+	}
+	info, ok, err := srv.region.InboxBindingInfo(ctx, "claude-code:s1")
+	if err != nil || !ok || info.SetBy != "codex:operator" {
+		t.Fatalf("stored info = (%+v, %v, %v), want the named setter", info, ok, err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/agent/namespace?cwd=/home/u/otherproj&agent=claude-code:s1", nil))
+	want := `{"namespace":"punk-pbs","bound":true,"set_by":"codex:operator","set_at":"` + info.SetAt + `","cwd_namespace":"agent-otherproj"}`
+	if body := strings.TrimSpace(rec.Body.String()); rec.Code != http.StatusOK || body != want {
+		t.Fatalf("bound answer = %d %s, want 200 %s", rec.Code, body, want)
 	}
 }

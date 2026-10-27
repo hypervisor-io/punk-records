@@ -839,7 +839,7 @@ func TestWakeListenerStatusAndGuidance(t *testing.T) {
 	if requested, capable := WakeListenerStatus("claude-code", "sess-1"); requested || capable {
 		t.Fatal("status without a listener must be false/false")
 	}
-	g := inboxRoutingGuidance("ns-a", "claude-code:sess-1", false, false)
+	g := inboxRoutingGuidance("ns-a", "claude-code:sess-1", nil, false, false)
 	if !strings.Contains(g, "There is no idle wake") {
 		t.Fatalf("default guidance changed: %q", g)
 	}
@@ -850,7 +850,7 @@ func TestWakeListenerStatusAndGuidance(t *testing.T) {
 	if !requested || !capable {
 		t.Fatalf("ensured listener status %v/%v", requested, capable)
 	}
-	g = inboxRoutingGuidance("ns-a", "claude-code:sess-1", requested, capable)
+	g = inboxRoutingGuidance("ns-a", "claude-code:sess-1", nil, requested, capable)
 	if !strings.Contains(g, "capability note, not a liveness guarantee") {
 		t.Fatalf("requested+capable guidance %q", g)
 	}
@@ -861,7 +861,7 @@ func TestWakeListenerStatusAndGuidance(t *testing.T) {
 	if !requested || capable {
 		t.Fatalf("stale-endpoint status %v/%v", requested, capable)
 	}
-	g = inboxRoutingGuidance("ns-a", "claude-code:sess-1", requested, capable)
+	g = inboxRoutingGuidance("ns-a", "claude-code:sess-1", nil, requested, capable)
 	if !strings.Contains(g, "endpoint is currently unavailable") {
 		t.Fatalf("requested+unavailable guidance %q", g)
 	}

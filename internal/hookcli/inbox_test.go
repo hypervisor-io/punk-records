@@ -33,11 +33,32 @@ type fakeInbox struct {
 	down     bool
 	// hint, when non-nil, is written to every SSE stream after the
 	// initial hint: the test sends on it to simulate a new message.
-	hint       chan struct{}
-	sseOpened  chan struct{}
-	namespace  string // /v1/agent/namespace answer
+	hint      chan struct{}
+	sseOpened chan struct{}
+	namespace string // /v1/agent/namespace answer
+	// bound, when set, makes /v1/agent/namespace answer the P3-D bound
+	// shape (namespace + bound + set_by + set_at + cwd_namespace)
+	// instead of the plain namespace answer.
+	bound      *fakeBoundNamespace
 	failAck    bool
 	noRegister bool
+}
+
+// fakeBoundNamespace is the P3-D bound answer the fake server gives:
+// the binding's namespace, its stored setter and time, and the
+// cwd-derived namespace the binding overrides (the allowlist refusal
+// fallback).
+type fakeBoundNamespace struct {
+	namespace string
+	setBy     string
+	setAt     string
+	cwd       string
+}
+
+func (f *fakeInbox) setBoundNamespace(ns, setBy, setAt, cwdNS string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bound = &fakeBoundNamespace{namespace: ns, setBy: setBy, setAt: setAt, cwd: cwdNS}
 }
 
 type fakeAck struct {
@@ -97,7 +118,12 @@ func (f *fakeInbox) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/v1/agent/namespace":
-		_ = json.NewEncoder(w).Encode(map[string]string{"namespace": f.namespace})
+		if f.bound != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"namespace": f.bound.namespace, "bound": true,
+				"set_by": f.bound.setBy, "set_at": f.bound.setAt, "cwd_namespace": f.bound.cwd})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]string{"namespace": f.namespace})
+		}
 	case strings.HasSuffix(r.URL.Path, "/members") && r.Method == http.MethodPost:
 		var in struct{ Agent, Role string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
@@ -230,6 +256,7 @@ func inboxTestEnv(t *testing.T) {
 	t.Setenv("PUNK_MESSAGING", "1")
 	t.Setenv("PUNK_MESSAGING_FROM", "")
 	t.Setenv("PUNK_NAMESPACE", "")
+	t.Setenv("PUNK_NAMESPACES", "")
 	t.Setenv("PUNK_MESSAGING_RENDER_BYTES", "")
 	t.Setenv("PUNK_MESSAGING_MAX_CONTINUE", "")
 	t.Setenv("PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS", "")
