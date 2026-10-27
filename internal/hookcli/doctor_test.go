@@ -31,14 +31,24 @@ func doctorEnvFixture(t *testing.T) {
 // loudly so a wrong request path fails the test instead of silently
 // passing a check.
 func doctorFakeServer(t *testing.T, diagnosticsBody string) *httptest.Server {
+	return doctorFakeServerNS(t, "agent-demo", diagnosticsBody, true)
+}
+
+// doctorFakeServerNS is doctorFakeServer for an arbitrary namespace. With
+// allowLookup false the /v1/agent/namespace route fails the test when hit:
+// the pinned-namespace cases must never reach the server lookup.
+func doctorFakeServerNS(t *testing.T, ns, diagnosticsBody string, allowLookup bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/healthz":
+		switch {
+		case r.URL.Path == "/healthz":
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case "/v1/agent/namespace":
-			_, _ = w.Write([]byte(`{"namespace":"agent-demo"}`))
-		case "/v1/namespaces/agent-demo/messages/diagnostics":
+		case r.URL.Path == "/v1/agent/namespace":
+			if !allowLookup {
+				t.Errorf("namespace lookup must not run when the hook command pins --ns")
+			}
+			_, _ = w.Write([]byte(`{"namespace":"` + ns + `"}`))
+		case r.URL.Path == "/v1/namespaces/"+ns+"/messages/diagnostics":
 			_, _ = w.Write([]byte(diagnosticsBody))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)

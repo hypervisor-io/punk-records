@@ -238,3 +238,69 @@ func TestCmdDoctorHermesAgainstFakeServer(t *testing.T) {
 		t.Fatalf("FAIL server line missing:\n%s", stdout)
 	}
 }
+
+// TestCmdDoctorCodexAgainstFakeServer is the codex CLI round trip (P4-C):
+// "punk doctor codex" needs no cmd-side wiring beyond the hookcli registry,
+// so this pins that a wired CODEX_HOME install passes against a healthy
+// fake server (exit 0 - hook-trust stays a WARN by design) and that a dead
+// server still exits non-zero.
+func TestCmdDoctorCodexAgainstFakeServer(t *testing.T) {
+	doctorHomeFixture(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/v1/agent/namespace", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"namespace":"agent-demo"}`))
+	})
+	mux.HandleFunc("/v1/namespaces/agent-demo/messages/diagnostics", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"diagnostics":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if _, err := hookcli.ConnectCodexHooks(filepath.Join(codexHome, "hooks.json"), "/opt/punk", srv.URL, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, err := captureStdout(t, func() error {
+		return run([]string{"doctor", "codex", "--url", srv.URL})
+	})
+	if err != nil {
+		t.Fatalf("doctor codex must pass against the fake server: %v\n%s", err, stdout)
+	}
+	for _, want := range []string{
+		"punk doctor: codex",
+		"PASS codex-home:",
+		"PASS config:",
+		"PASS hook-entries:",
+		"WARN hook-trust:",
+		"PASS app-server:",
+		"PASS credentials:",
+		"PASS server:",
+		"PASS messaging:",
+		"WARN hook-diagnostic:",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("line %q missing:\n%s", want, stdout)
+		}
+	}
+	// The Desktop caveat is user-facing text: it must never promise hook
+	// execution in Codex Desktop (openai/codex#35863).
+	if !strings.Contains(stdout, "openai/codex#35863") || !strings.Contains(stdout, "Codex Desktop") {
+		t.Fatalf("Desktop caveat missing:\n%s", stdout)
+	}
+
+	// Dead server: FAIL server and a non-zero exit.
+	stdout, err = captureStdout(t, func() error {
+		return run([]string{"doctor", "codex", "--url", "http://127.0.0.1:19798"})
+	})
+	if err == nil {
+		t.Fatalf("doctor must exit non-zero when a check fails:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "FAIL server:") {
+		t.Fatalf("FAIL server line missing:\n%s", stdout)
+	}
+}

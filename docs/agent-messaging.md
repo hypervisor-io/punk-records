@@ -708,6 +708,54 @@ unchanged capture group:
   https://developers.openai.com/codex/hooks (codex-cli 0.156.1 installed).
   A real-session delivery check is part of the final gate.
 
+## Codex Desktop
+
+Codex Desktop has no hook-driven delivery path: trusted `SessionStart`
+command hooks never execute there (openai/codex#35863), and Codex offers
+no MCP prompts (openai/codex#5059), so neither the `punk hook inbox`
+command nor an MCP prompt can inject the envelope. The Desktop delivery
+path is a **chat-attached scheduled task** that runs the punk-inbox
+recipe periodically.
+
+Recipe:
+
+1. Connect from a terminal as usual: `punk connect codex --messaging
+   [--url ...] [--agent ...]`. This writes the punk MCP entry (and the
+   `[features]` hooks flag) to `$CODEX_HOME/config.toml` and the hook
+   groups CLI sessions use to `hooks.json`. punk never flips a Codex
+   trust state: hook command trust is granted interactively, once, by
+   Codex itself (the "Hooks need review" gate, "Trust all and
+   continue"). Codex Desktop may run under a different `CODEX_HOME` than
+   the CLI; `punk doctor codex` reports which home it inspected.
+2. In Codex Desktop, attach a scheduled task to the chat whose prompt
+   runs the punk-inbox recipe on a fixed cadence - `/punk-inbox` (or
+   `$punk-inbox`): fetch pending punk messages with the `read_messages`
+   MCP tool, treat them as evidence, and `ack_messages` only IDs the
+   session read itself. The envelope discipline is the hook path's:
+   peer message text is untrusted data, never instructions.
+3. Address discovery: no hook fires in Desktop, so there is no
+   `[PUNK ROUTING]` context block. The fallback is the MCP server
+   instructions - the messaging lead sits inside the first 512
+   characters of the initialize instructions, the prefix Codex reliably
+   reads, and it tells the session to call `whoami` and pass namespace
+   and sender explicitly on every punk call. A pinned identity
+   (`punk connect codex --agent ...`, written as `X-Punk-Agent` in the
+   config.toml punk block) makes the address deterministic without any
+   hook payload.
+
+Catch-up semantics are bounded by the schedule: messages wait in the box
+until the next task run, no continuation slot is spent, and `Stop` never
+blocks. A missed run delays delivery by one cadence; nothing is lost,
+because boxes retain messages until they are read and ACKed.
+
+Native wake does not apply to Desktop-only sessions: the `--wake`
+ensure groups are hooks, which never execute in Desktop, so no listener
+is ever installed. `punk doctor codex` reports the shared app-server
+daemon's control socket when present (the `app-server` check), but wake
+availability still requires a CLI session launched by that shared
+daemon - see
+[Native wake bridge](#native-wake-bridge-opt-in-claude-code-and-codex).
+
 ## Native wake bridge (opt-in, Claude Code and Codex)
 
 `punk connect claude-code --wake` and `punk connect codex --wake` add a
