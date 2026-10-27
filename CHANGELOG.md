@@ -156,8 +156,12 @@ that must be earned by the transport and the file it lands in.
   the execution events. Headless `opencode serve` also loads plugins
   lazily per directory and unloads them after
   `experimental.location_idle_timeout` (default 60 minutes) without
-  session activity; set `"experimental": {"location_idle_timeout": false}`
-  in `opencode.json` to keep the bridge listening on an idle server.
+  session activity, which stopped the wake on an idle server. `punk
+  connect opencode` now sets `"experimental": {"location_idle_timeout":
+  false}` in the opencode.json/opencode.jsonc it manages (comments kept;
+  a value the user already chose is left alone; `--keep-idle-unload`
+  skips it). After a restart the plugin still starts only when a client
+  first touches the project directory.
 
 - **Client-neutral command text.** The shared command render carried a
   per-client invocation token, so the Codex copy under `$CODEX_HOME` and

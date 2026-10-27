@@ -496,6 +496,67 @@ func ConnectOpenCodeMCP(configPath string, o MCPEntryOpts, force bool) (bool, er
 		isPunkOpenCodeMCPEntry, map[string]any{"$schema": "https://opencode.ai/config.json"}, force, hasLiteralMCPToken(o))
 }
 
+// openCodeIdleTimeoutKey is OpenCode's per-directory unload timer
+// (experimental.location_idle_timeout, default "60 minutes" in 2.2.0's
+// packages/core/src/location-activity.ts). OpenCode 2.x runs plugins
+// inside per-directory location services and evicts them after that much
+// time without session activity; a headless "opencode serve" with no TUI
+// touching the directory then unloads the punk plugin and its inbox
+// stream, so mail stops waking the session.
+const openCodeIdleTimeoutKey = "location_idle_timeout"
+
+// EnsureOpenCodeLocationIdleTimeout sets experimental.location_idle_timeout
+// to false in an OpenCode opencode.json or opencode.jsonc so the punk
+// plugin stays loaded on an idle server. A value the user already set -
+// any value, including a duration - is left alone, as is a non-object
+// experimental setting. JSONC comments, trailing commas and foreign keys
+// survive: the member is inserted into the existing text, never
+// re-encoded. A missing or empty file gets a minimal config.
+func EnsureOpenCodeLocationIdleTimeout(configPath string) (bool, error) {
+	cfg, original, normalized, err := loadOpenCodeSettings(configPath)
+	if err != nil {
+		return false, err
+	}
+	if original == nil || len(strings.TrimSpace(string(original))) == 0 {
+		out, err := json.MarshalIndent(map[string]any{
+			"$schema":      "https://opencode.ai/config.json",
+			"experimental": map[string]any{openCodeIdleTimeoutKey: false},
+		}, "", "  ")
+		if err != nil {
+			return false, err
+		}
+		return true, writePreservingSymlinkAndMode(configPath, append(out, '\n'), 0o644)
+	}
+	var out []byte
+	switch exp, ok := cfg["experimental"]; {
+	case !ok || exp == nil:
+		if ok { // "experimental": null - replace the null
+			cur := gjson.GetBytes(normalized, "experimental")
+			start, end := cur.Index, cur.Index+len(cur.Raw)
+			if len(cur.Raw) == 0 || start < 0 || end > len(original) {
+				return false, errors.New("invalid OpenCode configuration")
+			}
+			out = append(append(append([]byte{}, original[:start]...), `{"`+openCodeIdleTimeoutKey+`": false}`...), original[end:]...)
+		} else {
+			out, err = jsoncObjectInsert(original, normalized, gjson.ParseBytes(normalized), "experimental",
+				[]byte(`{"`+openCodeIdleTimeoutKey+`": false}`))
+		}
+	default:
+		m, isObj := exp.(map[string]any)
+		if !isObj {
+			return false, nil // not ours to rewrite
+		}
+		if _, set := m[openCodeIdleTimeoutKey]; set {
+			return false, nil // the user's choice stands
+		}
+		out, err = jsoncObjectInsert(original, normalized, gjson.GetBytes(normalized, "experimental"), openCodeIdleTimeoutKey, []byte("false"))
+	}
+	if err != nil {
+		return false, fmt.Errorf("merge OpenCode experimental setting: %w", err)
+	}
+	return true, writePreservingSymlinkAndMode(configPath, out, 0o644)
+}
+
 // EnsureClaudePermission appends rule to permissions.allow in a Claude
 // Code settings.json when it is not already present.
 func EnsureClaudePermission(settingsPath, rule string) (changed bool, err error) {

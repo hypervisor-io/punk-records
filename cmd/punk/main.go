@@ -3889,6 +3889,7 @@ func cmdConnectOpenCode(args []string) error {
 	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills, or the punk command files")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer {env:NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
+	keepIdleUnload := fs.Bool("keep-idle-unload", false, "do not set experimental.location_idle_timeout=false (OpenCode then unloads the plugin, and its inbox wake, after 60 idle minutes)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3937,6 +3938,18 @@ func cmdConnectOpenCode(args []string) error {
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
+	}
+	// OpenCode 2.x unloads a directory's plugins after 60 minutes without
+	// session activity, which silently stops the inbox wake on a headless
+	// "opencode serve". Keep the plugin loaded unless the user opts out
+	// or already chose a timeout.
+	if !*keepIdleUnload {
+		idleChanged, err := hookcli.EnsureOpenCodeLocationIdleTimeout(configPath)
+		if err != nil {
+			fmt.Printf("punk: warning - could not set experimental.location_idle_timeout in %s: %v\n", configPath, err)
+		} else if idleChanged {
+			fmt.Printf("punk: set experimental.location_idle_timeout=false in %s so OpenCode keeps the plugin (and its inbox wake) loaded when idle; --keep-idle-unload skips this\n", configPath)
+		}
 	}
 	if *verify {
 		if err := printConnectVerify(context.Background(), serverURL, apiKey, *apiKeyEnv, connectVerifySides("", pluginPath, false, "", configPath, *noMCP)); err != nil {

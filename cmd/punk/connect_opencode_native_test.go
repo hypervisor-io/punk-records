@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,5 +129,46 @@ func TestConnectOpenCodeForeignConfigLeavesPluginUntouched(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(".opencode", "plugins", "punk-memory.js")); !os.IsNotExist(err) {
 		t.Fatalf("foreign config allowed plugin write: %v", err)
+	}
+}
+
+// TestConnectOpenCodeKeepsPluginLoadedWhenIdle: connect sets
+// experimental.location_idle_timeout=false beside the MCP entry so a
+// headless opencode serve does not unload the plugin (and its inbox
+// wake) after 60 idle minutes; --keep-idle-unload leaves it unset.
+func TestConnectOpenCodeKeepsPluginLoadedWhenIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default", nil, true},
+		{"opt out", []string{"--keep-idle-unload"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withWorkingDir(t, t.TempDir())
+			args := append([]string{"--project", "--no-skill", "--url", "http://127.0.0.1:19090"}, tc.args...)
+			if err := cmdConnectOpenCode(args); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile("opencode.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg struct {
+				MCP          map[string]any `json:"mcp"`
+				Experimental map[string]any `json:"experimental"`
+			}
+			if err := json.Unmarshal(raw, &cfg); err != nil {
+				t.Fatalf("opencode.json: %v\n%s", err, raw)
+			}
+			if cfg.MCP["punk"] == nil {
+				t.Fatalf("mcp.punk missing:\n%s", raw)
+			}
+			v, set := cfg.Experimental["location_idle_timeout"]
+			if got := set && v == false; got != tc.want {
+				t.Fatalf("location_idle_timeout set=%v value=%v, want %v:\n%s", set, v, tc.want, raw)
+			}
+		})
 	}
 }
