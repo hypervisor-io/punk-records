@@ -151,7 +151,7 @@ func TestCommandFrontmatterValid(t *testing.T) {
 // documents.
 func TestCommandBodiesCallMCPTools(t *testing.T) {
 	tools := map[string][]string{
-		CommandJoin:    {"whoami", "register", "list_region_members"},
+		CommandJoin:    {"join"},
 		CommandPeers:   {"list_region_members", "send_message"},
 		CommandSend:    {"send_message"},
 		CommandInbox:   {"read_messages", "ack_messages", "await_messages"},

@@ -27,17 +27,26 @@ import (
 // promptSkillOpts renders the shared command bodies for the MCP
 // surface: no client tool prefix (a bare `send_message` is the
 // server's own tool identity, and prefixed clients know their own
-// prefix) and the default slash form for sibling-command references,
-// matching the skill files punk connect installs.
+// prefix). Sibling-command references are client-neutral since the
+// P2-A fix - hookcli's commandRef names every client form in one
+// shared string - so no reference-form option is left to set here.
 var promptSkillOpts = hookcli.SkillOpts{}
 
-// commandPrompt binds one MCP prompt to the hookcli command whose body
-// it serves, plus the prompt's argument schema.
+// commandPrompt binds one MCP prompt to the hookcli command whose
+// picker label (CommandDescription) and body (CommandBody) it serves,
+// plus the prompt's argument schema.
 type commandPrompt struct {
-	name        string
-	command     string
-	description string
-	args        []*mcp.PromptArgument
+	name    string
+	command string
+	args    []*mcp.PromptArgument
+}
+
+// description is the prompt's picker label: hookcli's own one-line
+// command description, the same text the installed skill front matter
+// carries, so prompts/list and the skills never drift apart.
+func (cp commandPrompt) description() string {
+	desc, _ := hookcli.CommandDescription(cp.command)
+	return desc
 }
 
 // The three prompt arguments the commands need: namespace is optional
@@ -63,29 +72,25 @@ var (
 
 // commandPrompts is the prompt table in prompts/list order.
 var commandPrompts = []commandPrompt{
-	{name: "join", command: hookcli.CommandJoin,
-		description: "Run the punk-join workflow: register this session's punk messaging address."},
+	{name: "join", command: hookcli.CommandJoin},
 	{name: "peers", command: hookcli.CommandPeers,
-		description: "Run the punk-peers workflow: list the addressable punk peers.",
-		args:        []*mcp.PromptArgument{promptArgNamespace}},
+		args: []*mcp.PromptArgument{promptArgNamespace}},
 	{name: "send", command: hookcli.CommandSend,
-		description: "Run the punk-send workflow: send one message to a peer.",
-		args:        []*mcp.PromptArgument{promptArgNamespace, promptArgRecipient, promptArgText}},
-	{name: "inbox", command: hookcli.CommandInbox,
-		description: "Run the punk-inbox workflow: read, acknowledge and await punk messages."},
+		args: []*mcp.PromptArgument{promptArgNamespace, promptArgRecipient, promptArgText}},
+	{name: "inbox", command: hookcli.CommandInbox},
 	{name: "handoff", command: hookcli.CommandHandoff,
-		description: "Run the punk-handoff workflow: write the task fact and notify the next worker.",
-		args:        []*mcp.PromptArgument{promptArgNamespace, promptArgRecipient, promptArgText}},
+		args: []*mcp.PromptArgument{promptArgNamespace, promptArgRecipient, promptArgText}},
 }
 
 // registerCommandPrompts adds the five punk command prompts to the
-// server (prompts/list, prompts/get). The bodies are client- and
+// server (prompts/list, prompts/get). Labels and bodies both come from
+// hookcli's command table, and the bodies are client- and
 // Deps-independent, so every toolset serves the same five.
 func registerCommandPrompts(s *mcp.Server) {
 	for _, cp := range commandPrompts {
 		s.AddPrompt(&mcp.Prompt{
 			Name:        cp.name,
-			Description: cp.description,
+			Description: cp.description(),
 			Arguments:   cp.args,
 		}, commandPromptHandler(cp))
 	}
@@ -111,7 +116,7 @@ func commandPromptHandler(cp commandPrompt) mcp.PromptHandler {
 			return nil, fmt.Errorf("prompt %s: no shared body for command %q", cp.name, cp.command)
 		}
 		return &mcp.GetPromptResult{
-			Description: cp.description,
+			Description: cp.description(),
 			Messages: []*mcp.PromptMessage{{
 				Role:    "user",
 				Content: &mcp.TextContent{Text: promptArgumentHeader(cp, req.Params.Arguments) + body},

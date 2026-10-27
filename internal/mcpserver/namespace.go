@@ -145,6 +145,21 @@ func registerWhoami(s *mcp.Server, r *nsResolver) {
 // punk connect wrote into the MCP entry, else the API key subject the
 // auth middleware verified, else "mcp".
 func (r *nsResolver) identity(req *mcp.CallToolRequest) string {
+	if p := r.pinnedIdentity(req); p != "" {
+		return p
+	}
+	return "mcp"
+}
+
+// pinnedIdentity reports the identity the connection pins - the agent
+// name punk connect wrote into the MCP entry, else the API key subject
+// the auth middleware verified - or "" when the session carries neither.
+// It is metadata, never an inbox address: punk connect writes
+// X-Punk-Agent as one user@host value for every client on the host, so
+// joining under it would fuse every HTTP MCP session on the machine
+// into one shared mailbox. whoami reports it as the claims default, and
+// join records it in the registered role as "(host identity <pinned>)".
+func (r *nsResolver) pinnedIdentity(req *mcp.CallToolRequest) string {
 	if req != nil && req.Extra != nil && req.Extra.Header != nil {
 		if a := strings.TrimSpace(req.Extra.Header.Get("X-Punk-Agent")); a != "" {
 			return a
@@ -153,5 +168,5 @@ func (r *nsResolver) identity(req *mcp.CallToolRequest) string {
 			return s
 		}
 	}
-	return "mcp"
+	return ""
 }

@@ -72,16 +72,15 @@ func commandTemplate(name, body string) *template.Template {
 var commandSpecs = []commandSpec{
 	{
 		Name:        CommandJoin,
-		Description: "Register this session's punk messaging address and report it. Use when the [PUNK ROUTING] block is absent or a send is refused for a missing address.",
+		Description: "Register this session's punk messaging address and report it, passing the address from the [PUNK ROUTING] block when present. Use when the block is absent or a send is refused for a missing address.",
 		body: commandTemplate(CommandJoin, `# {{.Name}}
 
 Register this session so peers can message it, then report the address.
 
-1. {{tool .Opts "whoami"}} reports the default namespace, identity and server. It registers nothing and does not change omitted namespace or sender.
-2. {{tool .Opts "register"}} with inbox: true and a session-unique agent id. This binds only this session's address in an authorized namespace. Under enforced HTTP authorization it needs a write grant first; a plain register (no inbox) does not bind, and binding does not change omitted namespace or sender.
-3. {{tool .Opts "list_region_members"}} with active_only: true to confirm the address and list peers. listening: true means that client's bridge is attached; roles are metadata, resolved to <client>:<session>.
-4. Report, one line each: namespace, this session's address, server, and the active peers. Never invent an alias or a namespace.
-5. Messaging also needs the server opt-in PUNK_MESSAGING=1 and the client hooks/bridge; if the bridge is not installed, say so. The address and namespace for every later call come from the [PUNK ROUTING] context block on each prompt.
+1. If the prompt carries a [PUNK ROUTING] context block, pass its address as {{tool .Opts "join"}}'s address argument: the hooks read that <client>:<session> inbox, so join must bind exactly it. Call {{tool .Opts "join"}} with no address only when no routing block exists; it then mints a stable <client>:<random> address for this MCP session and reuses it on repeat calls, and that minted address has no hook reader: receive with read_messages/await_messages.
+2. {{tool .Opts "join"}} registers the address in the resolved namespace, binds its inbox, and returns the address, the namespace, and the active peers with delivery tiers (live: a bridge stream is listening now; catch_up: delivery waits for the peer's next hook, read or await). Under enforced HTTP authorization the register+bind half needs a write grant; the peer listing rides the read grant and degrades to a peers_note without one.
+3. Report, one line each: namespace, this session's address (say if it was minted), and the active peers with their delivery tiers. Never invent an alias or a namespace.
+4. Messaging also needs the server opt-in PUNK_MESSAGING=1 and the client hooks/bridge; if the bridge is not installed, say so. The address and namespace for every later call come from the [PUNK ROUTING] context block on each prompt.
 `),
 	},
 	{
@@ -162,8 +161,8 @@ func commandRef(name string) string {
 
 // CommandDescription returns the shared one-line description of a command,
 // for callers that need the label without the body (the MCP prompts P2-B
-// serves currently keep their own short picker labels). ok is false when
-// name is not one of CommandNames.
+// serves use it as their picker label). ok is false when name is not one
+// of CommandNames.
 func CommandDescription(name string) (string, bool) {
 	c, ok := commandFor(name)
 	if !ok {

@@ -219,6 +219,11 @@ func TestInstructionsNotRepeatedPerTool(t *testing.T) {
 // optional inbox boolean (one input-schema property + its lean
 // description); the lean set is 25832 bytes = 6458 tokens, +125 bytes /
 // ~31 tokens. The tool description and every other entry are untouched.
+// P4-A join re-measurement (2026-10-27): the join tool (one-call
+// register + inbox bind + who-am-I with active peers and delivery tiers)
+// is admitted to the lean toolset; the lean set is 27153 bytes = 6789
+// tokens, +1321 bytes / ~331 tokens (the join wire entry alone). Every
+// other entry and the initialize instructions are untouched.
 const (
 	// instructionsBudgetTokens = 533 baseline - 150 verified redundancy
 	// + 37 slack (~10% of the trimmed size). Red below the change (533),
@@ -240,7 +245,9 @@ const (
 	// Inbox-binding ratchet step (2026-09-28): 6458 measured for the
 	// register tool's inbox property (see the re-measurement note above)
 	// + 16 slack.
-	agentToolsetBudgetTokens = 6474
+	// P4-A ratchet step (2026-10-27): 6789 measured for the join tool's
+	// lean admission (see the re-measurement note above) + 16 slack.
+	agentToolsetBudgetTokens = 6805
 	// sessionOpenBudgetTokens is the two parts summed: what a host pays
 	// per session for punk's server-owned guidance with the lean toolset.
 	sessionOpenBudgetTokens = instructionsBudgetTokens + agentToolsetBudgetTokens
@@ -282,8 +289,8 @@ func TestMessagingAdmissionPreservesExistingToolBudget(t *testing.T) {
 	}
 	t.Logf("existing lean tools: %d bytes, ~%d tokens; messaging admission: %d bytes, ~%d tokens",
 		existing.Len(), estTokens(existing.String()), messaging.Len(), estTokens(messaging.String()))
-	if got := estTokens(existing.String()); got > 6474 {
-		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443 + inbox-binding ratchet to 6474 (see the re-measurement note above)", got)
+	if got := estTokens(existing.String()); got > 6805 {
+		t.Errorf("existing lean tools = ~%d tokens, pre-messaging budget 6443 + inbox-binding ratchet to 6474 + join ratchet to 6805 (see the re-measurement note above)", got)
 	}
 	// M10/M11: lease/owner, sent view, count and full-ID recovery, plus
 	// message lease metadata add 883 bytes to M2's 4548-byte admission
