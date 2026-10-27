@@ -134,6 +134,49 @@ func (l *awaitLimiter) release(key string) {
 	}
 }
 
+// autoRegisterMember registers agent as a PLAIN member of ns when it is
+// not already one: the P4-B safety net behind send_message,
+// read_messages, await_messages and ack_messages, so a first
+// message-tool call from an unknown member makes it a discoverable peer
+// (and its sends pass the region's sender-membership check) without a
+// separate register round trip.
+//
+// Deliberate limits:
+//   - Plain membership only: empty role and NEVER an inbox binding.
+//     Binding stays join's explicit job, so the reworked-P4-A rule
+//     stands - a connection-pinned host identity (X-Punk-Agent /
+//     X-Punk-Subject) may ride here as membership metadata but can
+//     never become an inbox address through this path.
+//   - The anonymous "mcp" fallback is skipped, the same discipline the
+//     touch heartbeat applies: the shared placeholder never becomes a
+//     member.
+//   - Known members are never re-registered: Register's upsert would
+//     rewrite the role and joined/last-seen stamps, extra writes
+//     requirement 4 forbids; the Touch heartbeat already maintains
+//     last_seen for members.
+//   - Fail-open like touch: a check or register error is swallowed and
+//     the tool call proceeds. If membership truly gates the operation,
+//     the region call still answers with its own honest error (send's
+//     not-registered check) - auto-register never masks it, it only
+//     removes the first-call stumble.
+//   - Await caps (P3-A) are untouched: the limiter key stays the
+//     per-inbox subject+namespace+agent, computed independently below.
+func autoRegisterMember(ctx context.Context, d Deps, ns, agent string) {
+	if d.Region == nil || agent == "" || agent == "mcp" {
+		return
+	}
+	members, err := d.Region.Members(ctx, ns)
+	if err != nil {
+		return
+	}
+	for _, m := range members {
+		if m.Agent == agent {
+			return
+		}
+	}
+	_ = d.Region.Register(ctx, ns, agent, "")
+}
+
 // Messaging shares region persistence with HTTP. Agent addresses only route
 // messages; namespace grants, not caller-supplied agent names, authorize access.
 func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
@@ -157,6 +200,10 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Sender == "" {
 				in.Sender = nsr.identity(req)
 			}
+			// P4-B: a first send from an unknown sender registers it
+			// plain, so the region's sender-membership check below sees
+			// a member instead of refusing the first contact.
+			autoRegisterMember(ctx, d, ns, in.Sender)
 			msg, err := d.Region.SendMessage(ctx, region.MessageInput{
 				Namespace: ns, Sender: in.Sender, Recipient: in.Recipient, Body: in.Body,
 				TaskID: in.TaskID, ReplyTo: in.ReplyTo, IdempotencyKey: in.IdempotencyKey,
@@ -194,6 +241,10 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err := opts.Validate(ns, in.Agent); err != nil {
 				return nil, messagesOut{}, err
 			}
+			// P4-B: a reader unknown to the namespace becomes a plain
+			// member, so peers can address it (SendMessage checks the
+			// recipient's membership) without a register round trip.
+			autoRegisterMember(ctx, d, ns, in.Agent)
 			if in.CountOnly {
 				if in.Box == "sent" || in.ID != "" || in.LeaseSeconds != 0 {
 					return nil, messagesOut{}, fmt.Errorf("%w: count_only requires an unleased inbox", region.ErrMessageInvalid)
@@ -226,6 +277,7 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
+			autoRegisterMember(ctx, d, ns, in.Agent) // P4-B
 			acked, err := d.Region.AckMessagesWithLease(ctx, ns, in.Agent, in.IDs, in.LeasedBy)
 			if err != nil {
 				return nil, ackMessagesOut{}, err
@@ -249,6 +301,10 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
+			// P4-B: register before waiting, so a peer can answer this
+			// inbox while the wait holds. The limiter keying below is
+			// untouched by this.
+			autoRegisterMember(ctx, d, ns, in.Agent)
 			// Concurrent-await cap (P3-A rework): refuse rather than
 			// block when this inbox already holds the limit's worth of
 			// waits. The key is the per-inbox subject+namespace+agent -
