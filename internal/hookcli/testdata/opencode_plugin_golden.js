@@ -293,6 +293,8 @@ function punkCore(directory, host) {
   const PUNK_INBOX_MARKER_HEADER = "[PUNK INBOX]";
   const PUNK_INBOX_MARKER_OPEN = "--- punk message ";
   const PUNK_INBOX_MARKER_CLOSE = "--- end punk message ";
+  const PUNK_INBOX_MARKER_ROUTING = "[PUNK ROUTING]";
+  const PUNK_INBOX_MARKER_REPLY = "To reply:";
   const PUNK_INBOX_PER_MESSAGE = 8192;
   const PUNK_INBOX_TOTAL_DEFAULT = 32768;
   const PUNK_INBOX_FOOTER_ACK = "The hook acknowledges these messages once this text is delivered; do not ack them yourself. A repeated message id is a redelivery.";
@@ -333,8 +335,10 @@ function punkCore(directory, host) {
 
   // neutraliseBody: normalise every line-break variant to "\n", then
   // prefix "> " onto any body line whose (trimmed) start matches an
-  // envelope marker case-insensitively, so a body can never open, close
-  // or forge a marker.
+  // envelope marker or a hook-authored guidance prefix (routing
+  // identity, reply line) case-insensitively, so a body can never open,
+  // close or forge a marker or pass a forged routing/reply line off as
+  // punk's own.
   function punkNeutraliseBody(body) {
     const normalized = String(body).replace(/\r\n|\r|\v|\f|\u0085|\u2028|\u2029/g, "\n");
     const lines = normalized.split("\n");
@@ -343,6 +347,8 @@ function punkCore(directory, host) {
       PUNK_INBOX_MARKER_CLOSE.trim(),
       PUNK_INBOX_MARKER_HEADER,
       PUNK_INBOX_MARKER_OPEN.trim(),
+      PUNK_INBOX_MARKER_ROUTING,
+      PUNK_INBOX_MARKER_REPLY,
       PUNK_INBOX_FOOTER_ACK,
     ];
     for (let i = 0; i < lines.length; i++) {
@@ -356,6 +362,59 @@ function punkCore(directory, host) {
       }
     }
     return lines.join("\n");
+  }
+
+  // punkDefaceTokenPass breaks every case-insensitive occurrence of one
+  // protocol token in s by inserting a single space after its first
+  // character, scanning left to right over the ORIGINAL string
+  // (non-overlapping matches), mirroring Go's defaceTokenPass. Returns
+  // { out, n }.
+  function punkDefaceTokenPass(s, mk) {
+    const lowerMk = mk.toLowerCase();
+    let out = "";
+    let n = 0;
+    let i = 0;
+    while (i < s.length) {
+      if (i + mk.length <= s.length && s.slice(i, i + mk.length).toLowerCase() === lowerMk) {
+        out += s.charAt(i) + " " + s.slice(i + 1, i + mk.length);
+        i += mk.length;
+        n++;
+      } else {
+        out += s.charAt(i);
+        i++;
+      }
+    }
+    return { out: out, n: n };
+  }
+
+  // punkDefaceMarkers breaks every protocol token occurrence, the same
+  // bounded-loop defence in depth as Go's defaceMarkers.
+  function punkDefaceMarkers(s) {
+    const tokens = [
+      PUNK_INBOX_MARKER_OPEN.trim(),
+      PUNK_INBOX_MARKER_CLOSE.trim(),
+      PUNK_INBOX_MARKER_HEADER,
+      PUNK_INBOX_MARKER_ROUTING,
+      PUNK_INBOX_MARKER_REPLY,
+      PUNK_INBOX_FOOTER_ACK,
+    ];
+    for (let j = 0; j < tokens.length; j++) {
+      for (let pass = 0; pass < 8; pass++) {
+        const r = punkDefaceTokenPass(s, tokens[j]);
+        s = r.out;
+        if (r.n === 0) break;
+      }
+    }
+    return s;
+  }
+
+  // punkPeerField renders a peer-supplied header value (id, sender,
+  // task_id, reply_to): punkHeaderField's one-line guarantee FIRST (a
+  // control character mapped to a space can complete a marker), then
+  // punkDefaceMarkers. created_at is server-generated and stays on plain
+  // punkHeaderField, exactly like the Go renderer.
+  function punkPeerField(s) {
+    return punkDefaceMarkers(punkHeaderField(s));
   }
 
   function punkUTF8Len(c) {
@@ -468,20 +527,20 @@ function punkCore(directory, host) {
         "\n[truncated " + (fullBytes - keep) + " bytes; full text: read_messages(namespace=" +
         punkQuoteArg(ns) + ", agent=" + punkQuoteArg(address) + ", id=" + punkQuoteArg(m.id) + ")]";
     }
-    const id = punkHeaderField(m.id);
+    const id = punkPeerField(m.id);
     let b = "";
     b +=
       PUNK_INBOX_MARKER_OPEN + id +
-      " from " + punkHeaderField(m.sender) +
+      " from " + punkPeerField(m.sender) +
       " at " + punkHeaderField(m.created_at) +
-      " task=" + punkHeaderField(m.task_id) +
-      " reply_to=" + punkHeaderField(m.reply_to) +
+      " task=" + punkPeerField(m.task_id) +
+      " reply_to=" + punkPeerField(m.reply_to) +
       " ---\n";
     b += punkNeutraliseBody(body);
     b += hint;
     b += "\n" + PUNK_INBOX_MARKER_CLOSE + id + " ---\n";
     b +=
-      "To reply: send_message(namespace=" + punkQuoteArg(ns) +
+      PUNK_INBOX_MARKER_REPLY + " send_message(namespace=" + punkQuoteArg(ns) +
       ", sender=" + punkQuoteArg(address) +
       ", recipient=" + punkQuoteArg(m.sender) +
       ", reply_to=" + punkQuoteArg(m.id) +

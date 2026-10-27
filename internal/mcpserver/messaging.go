@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hypervisor-io/punk-records/internal/authz"
+	"github.com/hypervisor-io/punk-records/internal/hookcli"
 	"github.com/hypervisor-io/punk-records/internal/region"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -48,10 +49,42 @@ type ackMessagesIn struct {
 type messagesOut struct {
 	Messages []region.Message `json:"messages"`
 	Unread   *int64           `json:"unread,omitempty"`
+	// UntrustedEnvelope renders Messages in the same untrusted envelope
+	// the punk hook inbox delivers (open/close markers, defaced peer
+	// header fields, neutralised body) with the MCP ack footer: reads
+	// never ACK, so the reader must ack itself. Populated for inbox
+	// results carrying at least one message; the sent box holds the
+	// caller's own text and gets none. The JSON fields above stay intact
+	// and authoritative (P3-B).
+	UntrustedEnvelope string `json:"untrusted_envelope,omitempty"`
 }
 
 type ackMessagesOut struct {
 	Acked int64 `json:"acked"`
+}
+
+// inboxMessagesFor converts storage rows into the hookcli envelope
+// renderer's shape.
+func inboxMessagesFor(msgs []region.Message) []hookcli.InboxMessage {
+	out := make([]hookcli.InboxMessage, len(msgs))
+	for i, m := range msgs {
+		out[i] = hookcli.InboxMessage{ID: m.ID, Namespace: m.Namespace, Sender: m.Sender,
+			Recipient: m.Recipient, Body: m.Body, TaskID: m.TaskID, ReplyTo: m.ReplyTo,
+			CreatedAt: m.CreatedAt}
+	}
+	return out
+}
+
+// untrustedEnvelope frames an inbox result as untrusted peer data with
+// the hook-identical envelope (P3-B): bodies and header fields rendered
+// through the same neutraliser and defacer the hook delivery uses. The
+// sent box is the caller's own text, so it is never framed as untrusted;
+// an empty result carries no envelope.
+func untrustedEnvelope(ns, agent string, msgs []region.Message, sentBox bool) string {
+	if len(msgs) == 0 || sentBox {
+		return ""
+	}
+	return hookcli.RenderUntrustedEnvelope(ns, agent, inboxMessagesFor(msgs))
 }
 
 // Messaging shares region persistence with HTTP. Agent addresses only route
@@ -122,7 +155,8 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 				return nil, messagesOut{}, err
 			}
 			touch(ctx, d, nsr, req, ns, in.Agent)
-			return nil, messagesOut{Messages: messages}, nil
+			return nil, messagesOut{Messages: messages,
+				UntrustedEnvelope: untrustedEnvelope(ns, in.Agent, messages, in.Box == "sent")}, nil
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "ack_messages", OutputSchema: openOutputSchema[ackMessagesOut](),
@@ -169,6 +203,7 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 				return nil, messagesOut{}, waitErr
 			}
 			touch(ctx, d, nsr, req, ns, in.Agent)
-			return nil, messagesOut{Messages: messages}, nil
+			return nil, messagesOut{Messages: messages,
+				UntrustedEnvelope: untrustedEnvelope(ns, in.Agent, messages, false)}, nil
 		})
 }

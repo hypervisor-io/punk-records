@@ -46,6 +46,13 @@ const (
 	InboxMarkerHeader = "[PUNK INBOX]"
 	InboxMarkerOpen   = "--- punk message "
 	InboxMarkerClose  = "--- end punk message "
+	// InboxMarkerRouting heads the hook-authored routing identity block
+	// and InboxMarkerReply heads every per-message reply line. Both read
+	// as punk-authored guidance, so peer bodies carrying them at a line
+	// start are neutralised and peer header values carrying them are
+	// defaced (P3-B message injection hardening).
+	InboxMarkerRouting = "[PUNK ROUTING]"
+	InboxMarkerReply   = "To reply:"
 )
 
 const (
@@ -533,14 +540,16 @@ var inboxLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\v", "\n", 
 
 // neutraliseBody prefixes "> " to any body line that, after leading
 // whitespace and invisible format characters, starts with an envelope
-// marker (case-insensitive), so a body can never open, close or forge
-// a marker. Every line-break variant is normalised to \n first.
+// marker or a hook-authored guidance prefix (routing identity, reply
+// line - P3-B), case-insensitively, so a body can never open, close or
+// forge a marker or pass a forged routing/reply line off as punk's own.
+// Every line-break variant is normalised to \n first.
 // codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=message-framing test=TestInboxNeutralisesForgedAckFooter
 func neutraliseBody(body string) string {
 	lines := strings.Split(inboxLineBreaks.Replace(body), "\n")
 	for i, l := range lines {
 		t := strings.TrimLeftFunc(l, func(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) })
-		for _, mk := range []string{InboxMarkerOpen, strings.TrimSpace(InboxMarkerClose), InboxMarkerHeader, strings.TrimSpace(InboxMarkerOpen), inboxFooterAck} {
+		for _, mk := range []string{InboxMarkerOpen, strings.TrimSpace(InboxMarkerClose), InboxMarkerHeader, strings.TrimSpace(InboxMarkerOpen), InboxMarkerRouting, InboxMarkerReply, inboxFooterAck} {
 			if len(t) >= len(mk) && strings.EqualFold(t[:len(mk)], mk) {
 				lines[i] = "> " + l
 				break
@@ -549,6 +558,72 @@ func neutraliseBody(body string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// inboxProtocolTokens are the protocol strings a peer must never smuggle
+// intact into a rendered header position. Trimmed forms: identifier
+// fields cannot carry surrounding whitespace (server validation), so the
+// trailing space of the open/close markers can never occur in one and the
+// trimmed token is the strictly stronger match.
+func inboxProtocolTokens() []string {
+	return []string{
+		strings.TrimSpace(InboxMarkerOpen),
+		strings.TrimSpace(InboxMarkerClose),
+		InboxMarkerHeader,
+		InboxMarkerRouting,
+		InboxMarkerReply,
+		inboxFooterAck,
+	}
+}
+
+// defaceTokenPass breaks every case-insensitive occurrence of one token
+// in s by inserting a single space after its first character, scanning
+// left to right over the ORIGINAL string (non-overlapping matches). None
+// of the tokens has a space at index 1 or a self-overlapping border, so
+// the inserted space can never complete a new occurrence and one pass
+// per token is sound; the bounded outer loop is defence in depth. The
+// transform is visible (a defaced value reads as tampered), deterministic
+// and byte-identical for every value that carries no token, so benign
+// renders never change.
+func defaceTokenPass(s, mk string) (string, int) {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(s); {
+		if i+len(mk) <= len(s) && strings.EqualFold(s[i:i+len(mk)], mk) {
+			b.WriteString(s[i : i+1])
+			b.WriteByte(' ')
+			b.WriteString(s[i+1 : i+len(mk)])
+			i += len(mk)
+			n++
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String(), n
+}
+
+// defaceMarkers breaks every protocol token occurrence in s.
+func defaceMarkers(s string) string {
+	for _, mk := range inboxProtocolTokens() {
+		for pass := 0; pass < 8; pass++ {
+			var n int
+			s, n = defaceTokenPass(s, mk)
+			if n == 0 {
+				break
+			}
+		}
+	}
+	return s
+}
+
+// peerField renders a peer-supplied header value (id, sender, task_id,
+// reply_to): headerField's one-line guarantee FIRST (a control character
+// mapped to a space can complete a marker, so defacement must run after
+// normalisation), then protocol-token defacement so an intact "--- end
+// punk message ..." or "[PUNK INBOX]" never rides along inside the open
+// or close line even though it can no longer start one. CreatedAt stays
+// on plain headerField: it is server-generated, never peer-supplied.
+func peerField(s string) string { return defaceMarkers(headerField(s)) }
 
 // clipBytes cuts s to at most n bytes on a rune boundary.
 func clipBytes(s string, n int) string {
@@ -576,15 +651,15 @@ func renderBlockCut(ns, address string, m InboxMessage, keep int) string {
 		hint = fmt.Sprintf("\n[truncated %d bytes; full text: read_messages(namespace=%s, agent=%s, id=%s)]",
 			len(m.Body)-keep, quoteArg(ns), quoteArg(address), quoteArg(m.ID))
 	}
-	id := headerField(m.ID)
+	id := peerField(m.ID)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%s from %s at %s task=%s reply_to=%s ---\n", InboxMarkerOpen, id,
-		headerField(m.Sender), headerField(m.CreatedAt), headerField(m.TaskID), headerField(m.ReplyTo))
+		peerField(m.Sender), headerField(m.CreatedAt), peerField(m.TaskID), peerField(m.ReplyTo))
 	b.WriteString(neutraliseBody(body))
 	b.WriteString(hint)
 	fmt.Fprintf(&b, "\n%s%s ---\n", InboxMarkerClose, id)
-	fmt.Fprintf(&b, "To reply: send_message(namespace=%s, sender=%s, recipient=%s, reply_to=%s, body=\"...\").\n",
-		quoteArg(ns), quoteArg(address), quoteArg(m.Sender), quoteArg(m.ID))
+	fmt.Fprintf(&b, "%s send_message(namespace=%s, sender=%s, recipient=%s, reply_to=%s, body=\"...\").\n",
+		InboxMarkerReply, quoteArg(ns), quoteArg(address), quoteArg(m.Sender), quoteArg(m.ID))
 	return b.String()
 }
 
@@ -606,7 +681,7 @@ const inboxFooterAck = "The hook acknowledges these messages once this text is d
 // in its header and reply line, so guidance is never stacked on top of
 // it. One line per fact, headerField-safe inputs only.
 func inboxRoutingIdentity(ns, address string) string {
-	return "[PUNK ROUTING] Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
+	return InboxMarkerRouting + " Your punk messaging address is " + headerField(address) + " in namespace " + headerField(ns) + ".\n" +
 		"Send: send_message(namespace=" + quoteArg(ns) + ", sender=" + quoteArg(address) + ", recipient=\"<their address>\", body=\"...\"). " +
 		"Read/ack: read_messages/ack_messages(namespace=" + quoteArg(ns) + ", agent=" + quoteArg(address) + ").\n" +
 		"Use exactly this address and namespace; never invent aliases or namespaces. "
@@ -694,13 +769,22 @@ func perMessageKeep(m InboxMessage, per int) int {
 //
 // Total <= 0 disables the cap.
 func renderInbox(ns, address string, msgs []InboxMessage, budget inboxRenderBudget) inboxRender {
+	return renderInboxWithFooter(ns, address, msgs, budget, renderFooter)
+}
+
+// renderInboxWithFooter is renderInbox with the footer factored out: the
+// hook delivery uses renderFooter (the hook ACKs, the reader must not)
+// and the MCP tool-result envelope uses renderFooterMCP (reads never ACK,
+// the reader must). The budget algorithm - which measures footer bytes -
+// is shared, so both envelopes clip and defer identically.
+func renderInboxWithFooter(ns, address string, msgs []InboxMessage, budget inboxRenderBudget, footer func(deferred int) string) inboxRender {
 	var r inboxRender
 	var blocks strings.Builder
 	fits := func(n, blocksLen, deferred int) bool {
 		if budget.Total <= 0 {
 			return true
 		}
-		return len(renderHeader(ns, address, n))+blocksLen+len(renderFooter(deferred)) <= budget.Total
+		return len(renderHeader(ns, address, n))+blocksLen+len(footer(deferred)) <= budget.Total
 	}
 	for i, m := range msgs {
 		n, rest := i+1, len(msgs)-(i+1)
@@ -713,7 +797,7 @@ func renderInbox(ns, address string, msgs []InboxMessage, budget inboxRenderBudg
 			}
 			empty := renderBlockCut(ns, address, m, 0)
 			if !fits(1, len(empty), rest) {
-				r.MinBytes = len(renderHeader(ns, address, 1)) + len(empty) + len(renderFooter(rest))
+				r.MinBytes = len(renderHeader(ns, address, 1)) + len(empty) + len(footer(rest))
 				r.Deferred = len(msgs)
 				return r
 			}
@@ -739,7 +823,7 @@ func renderInbox(ns, address string, msgs []InboxMessage, budget inboxRenderBudg
 	if len(r.Used) == 0 {
 		return r
 	}
-	r.Text = renderHeader(ns, address, len(r.Used)) + blocks.String() + renderFooter(r.Deferred)
+	r.Text = renderHeader(ns, address, len(r.Used)) + blocks.String() + footer(r.Deferred)
 	return r
 }
 
@@ -748,6 +832,31 @@ func renderInbox(ns, address string, msgs []InboxMessage, budget inboxRenderBudg
 // must match.
 func RenderInbox(namespace, address string, msgs []InboxMessage) string {
 	return renderInbox(namespace, address, msgs, defaultInboxRenderBudget()).Text
+}
+
+// inboxFooterMCPAck is the MCP tool-result footer. read_messages and
+// await_messages never ACK, so the reader MUST ack itself - the exact
+// opposite of the hook footer's rule, and the only difference between the
+// hook envelope and the MCP one. The hook's "do not ack them yourself"
+// must never leak into a tool result.
+const inboxFooterMCPAck = "Reading does not ACK these messages; ACK them yourself with ack_messages(namespace, agent, ids) once processed. A repeated message id is a redelivery."
+
+func renderFooterMCP(deferred int) string {
+	if deferred > 0 {
+		return fmt.Sprintf("At least %d more message(s) are waiting; read again to fetch them.\n", deferred) + inboxFooterMCPAck
+	}
+	return inboxFooterMCPAck
+}
+
+// RenderUntrustedEnvelope renders msgs for MCP read_messages/await_messages
+// results with the same untrusted envelope punk hook inbox delivers - the
+// same header, the same per-message blocks (open/close markers, defaced
+// peer header fields, neutralised body, reply line) and the same default
+// budget - with only the footer swapped for the MCP ack rule. The JSON
+// message fields stay intact and authoritative beside it; this text is
+// the framing that marks the content untrusted peer data.
+func RenderUntrustedEnvelope(namespace, address string, msgs []InboxMessage) string {
+	return renderInboxWithFooter(namespace, address, msgs, defaultInboxRenderBudget(), renderFooterMCP).Text
 }
 
 // ---- configuration ---------------------------------------------------
