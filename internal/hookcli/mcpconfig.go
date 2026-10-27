@@ -87,22 +87,54 @@ func upsertServerEntry(path, section string, entry map[string]any, isOurs func(a
 // headers the server reads (X-Punk-Namespace, X-Punk-Agent).
 type MCPEntryOpts struct {
 	ServerURL string
-	APIKey    string // literal token, written as-is
+	APIKey    string // literal token, written as-is unless ProjectScoped
 	APIKeyEnv string // when set, written in the target host's env-reference syntax; wins over APIKey
 	Namespace string
 	Agent     string
+
+	// ProjectScoped marks a target config that lives INSIDE the user's
+	// repository (the --project scope: .mcp.json, ./.cursor/mcp.json,
+	// ./opencode.json, ./.agents/mcp_config.json, ./.copilot/mcp-config.json,
+	// ./.codex/config.toml). Such a file is routinely committed, so a
+	// literal token must never be embedded in it: a literal key degrades to
+	// the host's env-var reference (defaultMCPKeyEnv) and the file is never
+	// tightened to owner-only for a token it does not hold.
+	ProjectScoped bool
 }
 
+// defaultMCPKeyEnv is the environment variable a project-scoped config
+// references when punk refuses to embed the selected literal key.
+const defaultMCPKeyEnv = "PUNK_API_KEY"
+
+// mcpKeyEnv is the ONE rule behind "never embed a literal key in a
+// project-scoped config": it returns the environment variable name an
+// entry's Authorization header must reference, and true, whenever the
+// credential has to be an env reference rather than a literal. An explicit
+// --api-key-env always wins (the operator chose it); otherwise a
+// project-scoped entry degrades a literal key to defaultMCPKeyEnv.
+// Callers write the returned name in their own host's env syntax.
+func mcpKeyEnv(o MCPEntryOpts) (string, bool) {
+	if o.APIKeyEnv != "" {
+		return o.APIKeyEnv, true
+	}
+	if o.ProjectScoped && o.APIKey != "" {
+		return defaultMCPKeyEnv, true
+	}
+	return "", false
+}
+
+// hasLiteralMCPToken reports whether this entry will actually carry the
+// literal token, which is what decides whether the written file must be
+// owner-only. A project-scoped entry never does.
 func hasLiteralMCPToken(o MCPEntryOpts) bool {
-	return o.APIKeyEnv == "" && o.APIKey != ""
+	return !o.ProjectScoped && o.APIKeyEnv == "" && o.APIKey != ""
 }
 
 func mcpHeaders(o MCPEntryOpts) map[string]any {
 	h := map[string]any{}
-	switch {
-	case o.APIKeyEnv != "":
-		h["Authorization"] = "Bearer ${" + o.APIKeyEnv + "}"
-	case o.APIKey != "":
+	if env, ok := mcpKeyEnv(o); ok {
+		h["Authorization"] = "Bearer ${" + env + "}"
+	} else if o.APIKey != "" {
 		h["Authorization"] = "Bearer " + o.APIKey
 	}
 	if o.Namespace != "" {
@@ -146,8 +178,8 @@ func ConnectClineMCP(configPath string, o MCPEntryOpts, force bool) (bool, error
 		return m["type"] == "streamableHttp" && strings.Contains(u, "/mcp")
 	}
 	entry := withHeaders(map[string]any{"type": "streamableHttp", "url": mcpEndpoint(o.ServerURL), "disabled": false, "autoApprove": []string{}}, o)
-	if o.APIKeyEnv != "" {
-		entry["headers"].(map[string]any)["Authorization"] = "Bearer ${env:" + o.APIKeyEnv + "}"
+	if env, ok := mcpKeyEnv(o); ok {
+		entry["headers"].(map[string]any)["Authorization"] = "Bearer ${env:" + env + "}"
 	}
 	return upsertServerEntry(configPath, "mcpServers", entry, ours, nil, force, hasLiteralMCPToken(o))
 }
@@ -368,8 +400,8 @@ func connectOpenCodeMCPJSONC(configPath string, o MCPEntryOpts, entry map[string
 func ConnectOpenCodeMCP(configPath string, o MCPEntryOpts, force bool) (bool, error) {
 	entry := withHeaders(map[string]any{"type": "remote", "url": mcpEndpoint(o.ServerURL), "enabled": true}, o)
 	// codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/CONFIG.md plan=client-auth test=TestConnectOpenCodeMCPUsesOpenCodeEnvSyntax
-	if o.APIKeyEnv != "" {
-		entry["headers"].(map[string]any)["Authorization"] = "Bearer {env:" + o.APIKeyEnv + "}"
+	if env, ok := mcpKeyEnv(o); ok {
+		entry["headers"].(map[string]any)["Authorization"] = "Bearer {env:" + env + "}"
 	}
 	if err := PreflightOpenCodeMCP(configPath, force); err != nil {
 		return false, err

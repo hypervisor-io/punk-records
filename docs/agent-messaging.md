@@ -771,11 +771,14 @@ Recipe:
    Codex itself (the "Hooks need review" gate, "Trust all and
    continue"). Codex Desktop may run under a different `CODEX_HOME` than
    the CLI; `punk doctor codex` reports which home it inspected. The MCP
-   entry carries the credential in a form Desktop reads: a literal key is
-   embedded as a static `Authorization` header inside the punk-managed
-   `config.toml` block (mode 0600), so Desktop authenticates without
-   inheriting a shell environment. An explicit `--api-key-env NAME` still
-   writes an env-var reference, which a GUI launch cannot see.
+   entry carries the credential in a form Desktop reads: with the GLOBAL
+   connect, a literal key is embedded as a static `Authorization` header
+   inside the punk-managed `config.toml` block (mode 0600), so Desktop
+   authenticates without inheriting a shell environment. `--project` never
+   embeds a key - that file lives in the repository - so it writes
+   `bearer_token_env_var = "PUNK_API_KEY"` and prints one note instead. An
+   explicit `--api-key-env NAME` still writes an env-var reference, which a
+   GUI launch cannot see.
 2. In Codex Desktop, attach a scheduled task to the chat whose prompt
    runs the punk-inbox recipe on a fixed cadence - `/punk-inbox` (or
    `$punk-inbox`): fetch pending punk messages with the `read_messages`

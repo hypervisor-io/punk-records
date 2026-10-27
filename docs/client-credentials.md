@@ -107,12 +107,27 @@ hosts. Preserve existing host-specific environment-reference syntax,
 for literal-token configuration. A selected `--api-key-env NAME` keeps the
 host's env-var reference (Codex's `bearer_token_env_var`) and requires an
 actionable diagnostic when that named variable is unavailable; a probe with a
-different saved key must not masquerade as host-auth verification. A literal
-key must instead be readable by a GUI launch, which inherits no shell
-environment: Codex embeds it as a static `Authorization` header inside the
-punk-managed `config.toml` block (written owner-only, matching every other
+different saved key must not masquerade as host-auth verification. For a
+GLOBAL config a literal key must be readable by a GUI launch, which inherits no
+shell environment: Codex embeds it as a static `Authorization` header inside
+the punk-managed `config.toml` block (written owner-only, matching every other
 connector's literal token), and `--verify` reports that header credential as
 unverified rather than claiming an alignment it cannot compare.
+
+**CREDS-9.** Project scope is never a credential sink. A `--project` config
+lives inside the user's repository and is routinely committed, so a literal key
+is never written there, for any connector. In project scope a selected literal
+key degrades to the host's env-var reference (`Bearer ${PUNK_API_KEY}`,
+Cline's `Bearer ${env:PUNK_API_KEY}`, OpenCode's `Bearer {env:PUNK_API_KEY}`,
+or Codex's `bearer_token_env_var = "PUNK_API_KEY"`), the file is never
+tightened to owner-only for a token it does not hold, and connect prints one
+note saying the key was not embedded, how to export it, and that the global
+connect is the GUI/Desktop path. The affected connectors are Claude Code
+(`.mcp.json`), Cursor (`./.cursor/mcp.json`), OpenCode (`./opencode.json`),
+Antigravity (`./.agents/mcp_config.json`), Copilot CLI
+(`./.copilot/mcp-config.json`) and Codex (`./.codex/config.toml`). An explicit
+`--api-key-env NAME` is unaffected in either scope, and Cline is unaffected
+because its MCP settings are global even with `--project`.
 
 ## OpenCode configuration ownership
 

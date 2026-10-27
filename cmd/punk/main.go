@@ -3533,12 +3533,16 @@ func cmdConnectClaudeCode(args []string) error {
 	}
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectClaudeCodeMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName, ProjectScoped: *project}, *force)
 		if err != nil {
 			return fmt.Errorf("connect claude-code mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			if *project {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			}
 		}
 		permChanged, err := hookcli.EnsureClaudePermission(settingsPath, hookcli.ClaudeMCPRule)
 		if err != nil {
@@ -3730,12 +3734,16 @@ func cmdConnectCursor(args []string) error {
 	mcpPath := filepath.Join(cursorDir, "mcp.json")
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectCursorMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName, ProjectScoped: *project}, *force)
 		if err != nil {
 			return fmt.Errorf("connect cursor mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			if *project {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart Cursor or start a new session to pick up the MCP server")
@@ -3862,12 +3870,16 @@ func cmdConnectOpenCode(args []string) error {
 	if !*noMCP {
 		mcpPath := configPath
 		mcpChanged, err := hookcli.ConnectOpenCodeMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName, ProjectScoped: *project}, *force)
 		if err != nil {
 			return fmt.Errorf("connect opencode mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			if *project {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 		fmt.Println("punk: restart OpenCode or reload plugins to pick up the MCP server")
@@ -4104,12 +4116,16 @@ func cmdConnectAntigravity(args []string) error {
 	}
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectAntigravityMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: projNS, Agent: *agentName, ProjectScoped: *project}, *force)
 		if err != nil {
 			return fmt.Errorf("connect antigravity mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			if *project {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 	}
@@ -4245,12 +4261,16 @@ func cmdConnectCopilot(args []string) error {
 	}
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectCopilotMCP(mcpPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName, ProjectScoped: *project}, *force)
 		if err != nil {
 			return fmt.Errorf("connect copilot mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			if *project {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", mcpPath)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", mcpPath, changedWord(mcpChanged))
 	}
@@ -4650,7 +4670,7 @@ func cmdConnectCodex(args []string) error {
 		}
 	}
 	if !*noMCP {
-		opts := hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: ns, Agent: *agent}
+		opts := hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Namespace: ns, Agent: *agent, ProjectScoped: *project}
 		changed, err := hookcli.ConnectCodexConfig(configPath, opts, !*noHooks, *force)
 		if err != nil {
 			return fmt.Errorf("connect codex config: %w", err)
@@ -4659,9 +4679,12 @@ func cmdConnectCodex(args []string) error {
 		if aliases, err := hookcli.DetectCodexMCPAliases(configPath, serverURL); err == nil && len(aliases) > 1 {
 			fmt.Printf("punk: warning - %s registers more than one MCP alias for the same punk server (%s); codex will connect twice - remove the extra [mcp_servers.*] table by hand\n", configPath, strings.Join(aliases, ", "))
 		}
-		if *apiKeyEnv != "" {
+		switch {
+		case *apiKeyEnv != "":
 			fmt.Printf("punk: note - Codex reads the bearer token from $%s; export it in the shell that starts codex (a GUI launch inherits no shell environment - use a literal key, or a saved login, for Codex Desktop)\n", *apiKeyEnv)
-		} else if apiKey != "" {
+		case apiKey != "" && *project:
+			projectKeyNotEmbeddedNote()
+		case apiKey != "":
 			fmt.Printf("punk: note - the bearer token is written into the punk block of %s (mode 0600), so Codex Desktop and CLI launches both authenticate; that file holds a secret, keep it private\n", configPath)
 		}
 	}
@@ -4766,6 +4789,15 @@ func resolveServerForCommand(flagURL string) (string, string, error) {
 		fmt.Fprintln(os.Stderr, "punk: warning -", resolved.Diagnostic)
 	}
 	return resolved.URL, resolved.APIKey, nil
+}
+
+// projectKeyNotEmbeddedNote is the one line a connector owes when a literal
+// key was available but the target config lives inside the user's
+// repository (--project). The key is deliberately not embedded there: the
+// file is routinely committed. It names both ways to supply the credential
+// instead.
+func projectKeyNotEmbeddedNote() {
+	fmt.Println("punk: note - the API key was NOT embedded: this config lives in your repository and may be committed. Export PUNK_API_KEY in the environment that starts the client, or run the global connect for a GUI/Desktop launch")
 }
 
 func cmdLogin(args []string) error {

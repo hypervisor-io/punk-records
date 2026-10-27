@@ -105,7 +105,12 @@ punk-managed `config.toml` block instead - a GUI launch (Codex Desktop)
 inherits no shell environment, so a `PUNK_API_KEY` reference would resolve to
 nothing there. The embedding is safe because `punk connect codex` writes
 `config.toml` mode 0600; `--verify` reports that header credential as
-unverified, since a header credential is not one it can compare safely.
+unverified, since a header credential is not one it can compare safely. With
+`--project` the key is never embedded, because that file lives in the
+repository: Codex gets `bearer_token_env_var = "PUNK_API_KEY"` and connect
+prints one note. The same project-scope rule applies to every connector whose
+MCP config lands in the repo (Claude Code, Cursor, OpenCode, Antigravity,
+Copilot CLI).
 
 The named variable selects MCP authentication only. Generated plugin capture,
 context and inbox requests still read `PUNK_API_KEY`; subprocess hooks can also
