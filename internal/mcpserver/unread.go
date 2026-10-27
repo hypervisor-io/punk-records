@@ -26,11 +26,13 @@ import (
 
 // messageToolNames are the message tools themselves: their results are
 // the mail flow, so a trailer there would be noise (read/await return
-// the messages; send/ack change the unread state mid-call).
+// the messages; send/ack change the unread state mid-call). join is
+// here too: it creates the inbox mid-call, and a count taken then would
+// cache a zero for the address the very next call should report.
 // list_region_members is discovery, not messaging, and keeps the trailer.
 var messageToolNames = map[string]bool{
 	"send_message": true, "read_messages": true,
-	"ack_messages": true, "await_messages": true,
+	"ack_messages": true, "await_messages": true, "join": true,
 }
 
 // unreadTrailerTTL bounds how stale the trailer's count may be: one
@@ -109,12 +111,21 @@ func (t *unreadTrailer) line(ctx context.Context, req *mcp.CallToolRequest) stri
 	}
 	args := toolCallArgs(req)
 	// The address whose unread the trailer reports: the call's own
-	// explicit agent/sender argument when it has one, else the session
-	// identity (X-Punk-Agent, then the verified subject). Anonymous
-	// "mcp" callers get no trailer, mirroring touch's heartbeat policy.
+	// explicit agent/sender argument when it has one, else the inbox this
+	// session joined as (most tools take no agent argument, and a joined
+	// desktop session's minted address is exactly the one that needs the
+	// nudge), else the session identity (X-Punk-Agent, then the verified
+	// subject). Anonymous "mcp" callers get no trailer, mirroring touch's
+	// heartbeat policy.
 	address := strings.TrimSpace(args.Agent)
 	if address == "" {
 		address = strings.TrimSpace(args.Sender)
+	}
+	joinedNS := ""
+	if address == "" {
+		if j, ok := t.nsr.joinedAs(req.Session); ok {
+			address, joinedNS = j.address, j.ns
+		}
 	}
 	if address == "" {
 		address = t.nsr.identity(req)
@@ -122,9 +133,13 @@ func (t *unreadTrailer) line(ctx context.Context, req *mcp.CallToolRequest) stri
 	if address == "" || address == "mcp" {
 		return ""
 	}
-	// The namespace the tool call itself resolved: the same resolution
+	// The namespace: a joined inbox lives where join bound it; otherwise
+	// the namespace the tool call itself resolved, by the same resolution
 	// every tool runs (explicit argument > header > roots > default).
-	ns, _ := t.nsr.resolve(ctx, req, args.Namespace)
+	ns := joinedNS
+	if ns == "" {
+		ns, _ = t.nsr.resolve(ctx, req, args.Namespace)
+	}
 	// The trailer discloses read-class information (the same fact
 	// read_messages count_only returns), so a caller whose grant on the
 	// resolved namespace does not include read gets nothing. The denial

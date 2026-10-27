@@ -195,6 +195,7 @@ func registerJoinTool(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if err := d.Region.SetInboxBinding(ctx, ns, address); err != nil {
 				return nil, joinOut{}, err
 			}
+			nsr.setJoined(req.Session, ns, address)
 			out := joinOut{Address: address, Namespace: ns, Minted: minted,
 				Peers: []joinPeerOut{}, Delivery: joinDeliveryNote}
 			if minted {

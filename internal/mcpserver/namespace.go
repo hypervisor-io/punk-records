@@ -23,7 +23,15 @@ type nsResolver struct {
 	defaultNS    string
 	mu           sync.Mutex
 	bySession    map[*mcp.ServerSession]rootInfo
+	// joined records, per session, the inbox the join tool last bound
+	// (namespace + address). Calls that name no agent/sender of their own
+	// (list_keys, recall, whoami...) still belong to that inbox, so the
+	// unread trailer reads it before falling back to the host identity.
+	joined map[*mcp.ServerSession]joinedInbox
 }
+
+// joinedInbox is the namespace and address a session joined as.
+type joinedInbox struct{ ns, address string }
 
 // maxCachedSessions bounds the roots cache; see rootPath.
 const maxCachedSessions = 1024
@@ -48,7 +56,33 @@ func newNSResolver(namespaceFor func(string) string, defaultNS string) *nsResolv
 	if defaultNS == "" {
 		defaultNS = "agent-default"
 	}
-	return &nsResolver{namespaceFor: namespaceFor, defaultNS: defaultNS, bySession: map[*mcp.ServerSession]rootInfo{}}
+	return &nsResolver{namespaceFor: namespaceFor, defaultNS: defaultNS,
+		bySession: map[*mcp.ServerSession]rootInfo{}, joined: map[*mcp.ServerSession]joinedInbox{}}
+}
+
+// setJoined records the inbox a session's join bound; the latest join
+// wins, matching the binding rule. Bounded like the roots cache.
+func (r *nsResolver) setJoined(ss *mcp.ServerSession, ns, address string) {
+	if ss == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.joined) >= maxCachedSessions {
+		r.joined = map[*mcp.ServerSession]joinedInbox{}
+	}
+	r.joined[ss] = joinedInbox{ns: ns, address: address}
+}
+
+// joinedAs reports the inbox this session joined as, if it called join.
+func (r *nsResolver) joinedAs(ss *mcp.ServerSession) (joinedInbox, bool) {
+	if ss == nil {
+		return joinedInbox{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.joined[ss]
+	return j, ok
 }
 
 // rootPath returns the first file:// root of the session as a local path.

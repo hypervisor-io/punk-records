@@ -253,3 +253,33 @@ func TestUnreadTrailerCache(t *testing.T) {
 		t.Fatalf("expiry past TTL did not recount: counts = %v", counts)
 	}
 }
+
+// TestUnreadTrailerFollowsJoinedInbox: a session that joined with a
+// minted address (no hook, no agent argument on ordinary tools) gets the
+// trailer for that joined inbox, in the joined namespace - not for the
+// host-wide X-Punk-Agent identity, which owns no mailbox.
+func TestUnreadTrailerFollowsJoinedInbox(t *testing.T) {
+	cs, reg := unreadSession(t, "user@host", "")
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "join", Arguments: map[string]any{"namespace": "ns-j"}})
+	if err != nil || res.IsError {
+		t.Fatalf("join: %v %s", err, text(t, res))
+	}
+	var joined struct {
+		Address string `json:"address"`
+	}
+	if b, _ := json.Marshal(res.StructuredContent); json.Unmarshal(b, &joined) != nil || joined.Address == "" {
+		t.Fatalf("join output %v", res.StructuredContent)
+	}
+	seedUnread(t, reg, "ns-j", "peer", joined.Address, 2)
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
+	if err != nil || res.IsError {
+		t.Fatalf("whoami: %v %s", err, text(t, res))
+	}
+	items := textItems(res)
+	want := "2 unread for " + joined.Address + " in ns-j: call read_messages"
+	if len(items) != 2 || items[1] != want {
+		t.Fatalf("items = %q, want trailer %q", items, want)
+	}
+}
