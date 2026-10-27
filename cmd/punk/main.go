@@ -108,6 +108,7 @@ Usage:
                       --from hermes translates Hermes Agent's native shell-hook payload (self-identifies its event; first-turn pre_llm_call injects via Hermes' own {"context":...} shape)
                       hook inbox --client NAME --mode context|continue|wait [--wait-seconds N] [--messaging]: deliver agent messages (opt-in PUNK_MESSAGING=1, docs/agent-messaging.md)
   punk      connect   wire punk as agent memory (connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex|cline [--project] [--url URL])
+  punk      doctor    check one client's punk connection, one PASS/FAIL/WARN line per check (doctor hermes [--config path] [--url URL]); exits non-zero on any FAIL
   punk      skill     punk usage skill in the agent's skill directory (skill install|print|paths --agent NAME [--project] [--url URL] [--ns NS])
   punk      --version print version
 `
@@ -177,6 +178,8 @@ func run(args []string) error {
 		return cmdHook(args[1:])
 	case "connect":
 		return cmdConnect(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
 	case "skill":
 		return cmdSkill(args[1:])
 	case "help", "--help", "-h":
@@ -4256,10 +4259,27 @@ func cmdConnectHermes(args []string) error {
 	} else {
 		fmt.Printf("punk: %s already has punk's Hermes hooks up to date\n", path)
 	}
-	// hooks_auto_accept is Hermes' own consent switch and punk deliberately
-	// never sets it: flipping a user's consent default from a connect
-	// command is not punk's call to make.
-	fmt.Println("punk: note - Hermes prompts for consent the first time a shell hook runs, unless hooks_auto_accept is true in the same config")
+	// Hermes checks a shell-hook allowlist ($HERMES_HOME/
+	// shell-hooks-allowlist.json, or the platform default home) before
+	// running a hook without a consent prompt, matching approvals by
+	// EXACT (event, command) equality - so the merge below approves
+	// byte-for-byte the commands just wired into config.yaml. Failure is
+	// best-effort by design: the config half is already done, and the
+	// fallback is the guidance Hermes itself documents. hooks_auto_accept
+	// is Hermes' own consent switch and punk deliberately never sets it:
+	// flipping a user's consent default from a connect command is not
+	// punk's call to make.
+	allowlistPath := hookcli.HermesAllowlistPath()
+	if allowlistChanged, allowlistErr := hookcli.ConnectHermesAllowlist(allowlistPath, punkPath, serverURL, *messaging); allowlistErr != nil {
+		fmt.Printf("punk: warning - could not update the Hermes shell-hook allowlist at %s: %v\n", allowlistPath, allowlistErr)
+		fmt.Printf("punk: note - to skip Hermes' consent prompts for punk's hooks, set the top-level key hooks_auto_accept: true in %s, or run hermes with --accept-hooks or HERMES_ACCEPT_HOOKS=1 (punk never sets hooks_auto_accept itself)\n", path)
+	} else {
+		fmt.Printf("punk: pre-approved punk's hook entries in %s (%s)\n", allowlistPath, changedWord(allowlistChanged))
+	}
+	// Verified against hermes-agent's source (P4-D spike): shell hooks run
+	// in the Hermes CLI and Gateway only - the Desktop backend never
+	// registers them, and the output must never promise otherwise.
+	fmt.Println("punk: note - shell hooks run in Hermes CLI and Gateway sessions only; the Hermes Desktop backend does not register them")
 	fmt.Println("punk: note - restart Hermes (hooks are registered at CLI and gateway startup) to pick up these entries")
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectHermesMCP(path,
@@ -4281,6 +4301,42 @@ func cmdConnectHermes(args []string) error {
 		installSkillFor("hermes", false, serverURL, "", *messaging)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
+	return nil
+}
+
+// cmdDoctor prints one client's punk connection health report (see
+// hookcli.Doctor): one PASS/FAIL/WARN line per check - config present and
+// parseable, punk hook entries wired, (hermes) shell-hook allowlist
+// approvals, credentials resolvable, server reachable, messaging tools
+// advertised when --messaging is wired, and the last hook diagnostic the
+// server recorded for the client. Read-only: it diagnoses, it never
+// repairs. Any FAIL line exits non-zero; WARN lines (an honest
+// degradation - no diagnostic yet, a consent prompt to expect) do not.
+func cmdDoctor(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: punk doctor hermes [--config path] [--url URL]")
+	}
+	client := args[0]
+	fs := flag.NewFlagSet("doctor "+client, flag.ContinueOnError)
+	configPath := fs.String("config", "", "client config file to inspect (default the client's own, e.g. ~/.hermes/config.yaml)")
+	urlFlag := fs.String("url", "", "punk-records server URL (default $PUNK_URL, the credentials file from 'punk login', or http://localhost:9090)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: punk doctor hermes [--config path] [--url URL]")
+	}
+	rep, err := hookcli.Doctor(context.Background(), client, hookcli.DoctorOptions{
+		ConfigPath: *configPath,
+		URLFlag:    *urlFlag,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Print(rep.Render())
+	if rep.Failed() {
+		return fmt.Errorf("%d of %d checks failed", rep.FailCount(), len(rep.Checks))
+	}
 	return nil
 }
 
