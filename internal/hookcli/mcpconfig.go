@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -105,6 +106,88 @@ type MCPEntryOpts struct {
 // defaultMCPKeyEnv is the environment variable a project-scoped config
 // references when punk refuses to embed the selected literal key.
 const defaultMCPKeyEnv = "PUNK_API_KEY"
+
+// RepoScopedTarget reports whether path is a target config that lives
+// inside a git work tree and is NOT gitignored - a file the user's
+// repository may commit, so the project-scoped credential rule
+// (MCPEntryOpts.ProjectScoped) has to apply even though the caller has no
+// --project flag to say so. Hermes (--config) and OpenClaw (--home) take
+// arbitrary paths, so they ask git instead of a flag.
+//
+// Failure-tolerant by design: a missing git binary, no repository, an
+// unreadable directory or any git error means "not repo-scoped" - the
+// conservative direction, because it leaves the ordinary global behaviour
+// (embed the key, write the file owner-only) untouched. Only a definitive
+// "inside a work tree AND not ignored" flips it.
+func RepoScopedTarget(path string) bool {
+	if path == "" {
+		return false
+	}
+	// The target's own directory may not exist yet (a fresh --home or
+	// --config), so probe from the nearest existing ancestor: git can only
+	// be run from a directory that is there.
+	dir := nearestExistingDir(filepath.Dir(path))
+	if dir == "" {
+		return false
+	}
+	// Inside a work tree? git exits non-zero for "not a git repository" and
+	// for a missing binary, both of which mean no.
+	if err := runGitQuiet(dir, "rev-parse", "--show-toplevel"); err != nil {
+		return false
+	}
+	// A gitignored file is never committed, so it is the ordinary global
+	// case. check-ignore exits 0 when the path IS ignored and 1 when it is
+	// not; any other exit is an error, not a verdict, and stays "not
+	// repo-scoped". The path is passed absolute so the answer cannot depend
+	// on how it was spelled relative to dir.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	switch err := runGitQuiet(dir, "check-ignore", "-q", "--", abs); {
+	case err == nil:
+		return false // ignored: never committed
+	case gitExitCode(err) == 1:
+		return true // inside the work tree and not ignored
+	default:
+		return false
+	}
+}
+
+// nearestExistingDir returns dir itself when it is an existing directory,
+// else the closest existing ancestor, else "".
+func nearestExistingDir(dir string) string {
+	for {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// runGitQuiet runs one git probe with both streams discarded: the guard
+// only cares about the exit status, and git's diagnostics must never reach
+// the user's terminal as noise.
+func runGitQuiet(dir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
+// gitExitCode returns the process exit status, or -1 when err is not an
+// ExitError (a missing binary, for instance).
+func gitExitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
 
 // mcpKeyEnv is the ONE rule behind "never embed a literal key in a
 // project-scoped config": it returns the environment variable name an

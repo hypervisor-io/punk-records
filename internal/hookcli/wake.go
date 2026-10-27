@@ -298,9 +298,9 @@ func wakeEnsure(client string, opts WakeOpts, stdin io.Reader, errw io.Writer) {
 		// asks the runner for the shared default (5 per window), an
 		// explicit 0 disables wakes (monitor and report only). The env
 		// fallback must therefore be -1, never 0.
-		MaxWakes:       envInt("PUNK_MESSAGING_MAX_CONTINUE", -1),
-		Window:         time.Duration(envInt("PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS", 0)) * time.Second,
-		SenderPrefixes: inboxAllowlist(),
+		MaxWakes:        envInt("PUNK_MESSAGING_MAX_CONTINUE", -1),
+		Window:          time.Duration(envInt("PUNK_MESSAGING_CONTINUE_WINDOW_SECONDS", 0)) * time.Second,
+		SenderAllowlist: inboxAllowlist(),
 	}, Endpoint: endpoint, Token: token, Binary: binary}
 	fingerprint := wakeFingerprint(cc)
 

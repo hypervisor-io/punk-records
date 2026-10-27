@@ -191,7 +191,7 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	awaits := newAwaitLimiter(d.AwaitLimit)
 
 	mcp.AddTool(s, &mcp.Tool{Name: "send_message", OutputSchema: openOutputSchema[region.Message](),
-		Description: "Send a durable message to a registered agent. Register both addresses first; use idempotency_key for retries."},
+		Description: "Send a durable message to a registered recipient; the sender is auto-registered as a plain member on first use. Use idempotency_key for retries."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in sendMessageIn) (*mcp.CallToolResult, *region.Message, error) {
 			ns, err := nsr.resolveAuthed(ctx, req, in.Namespace, authz.OpWrite)
 			if err != nil {

@@ -600,7 +600,7 @@ func TestRunAllowlistFilters(t *testing.T) {
 	f.put("m1", "stranger", "held back")
 	tr := newFakeTransport()
 	cfg := testConfig(t, f.srv.URL)
-	cfg.SenderPrefixes = []string{"planner"}
+	cfg.SenderAllowlist = []string{"planner"}
 	cancel, _ := runInBackground(t, cfg, tr)
 	defer cancel()
 
@@ -1207,7 +1207,7 @@ func TestRunAllowlistStarvationLogScan(t *testing.T) {
 	f.put("allowed-1", "planner", "wake for this")
 	tr := newFakeTransport()
 	cfg := testConfig(t, f.srv.URL)
-	cfg.SenderPrefixes = []string{"planner"}
+	cfg.SenderAllowlist = []string{"planner"}
 	cancel, _ := runInBackground(t, cfg, tr)
 	defer cancel()
 
@@ -1263,7 +1263,7 @@ func TestRunLogScanBudgetLimit(t *testing.T) {
 	}
 	tr := newFakeTransport()
 	cfg := testConfig(t, f.srv.URL)
-	cfg.SenderPrefixes = []string{"planner"}
+	cfg.SenderAllowlist = []string{"planner"}
 	cancel, _ := runInBackground(t, cfg, tr)
 	defer cancel()
 

@@ -1,5 +1,133 @@
 # Changelog
 
+## v1.15.0 (2026-10-28)
+
+The coordination phase. Agent messaging now gives every context-capable
+client a routing identity, joins a region in one call, bounds the
+long-lived operations per inbox, and treats a credential as something
+that must be earned by the transport and the file it lands in.
+
+### Added
+
+- **Routing block for every context-capable client (P1-A).** Every
+  client whose hook reply can carry text - Claude Code, Codex, Cursor,
+  Copilot CLI, Antigravity, Hermes, Cline, and the OpenCode/Pi/OpenClaw
+  bridges - receives a `[PUNK ROUTING]` identity block naming its real
+  session address and namespace, on an empty inbox too (it is identity,
+  not delivery: it ACKs nothing and is never stacked onto a delivered
+  envelope). Wake wording stays with the two clients that have a native
+  wake transport.
+- **One-call join (P4-A).** The `join` MCP tool registers the session's
+  address, binds its inbox and reports the address, namespace and active
+  peers with a delivery tier each (`live` = a stream is listening now,
+  `catch_up` = delivery waits for that peer's next hook/read/await),
+  replacing the whoami + `register(inbox:true)` + `list_region_members`
+  walk. An explicit `address` (the `[PUNK ROUTING]` one) is used when
+  given; with none, a stable `<client>:<random>` address is minted per
+  MCP session and returned with `minted_note`. The pinned host identity
+  is never an address - it would fuse every session on a host into one
+  mailbox - and survives as role metadata instead. The register+bind half
+  needs a write grant; the peer listing rides the read grant and degrades
+  to `peers_note` without one.
+- **Auto-register (P4-B).** `send_message`, `read_messages`,
+  `await_messages` and `ack_messages` register the calling identity as a
+  **plain member** of the resolved namespace on its first call when it is
+  not one already, so a first contact makes the caller a discoverable peer
+  and its own sends pass the sender-membership check without a separate
+  register round trip. Identity is the tool's explicit `agent`/`sender`
+  argument, else the pinned `X-Punk-Agent`/`X-Punk-Subject` as membership
+  metadata only. It never writes an inbox binding (that stays `join`'s
+  explicit job), never mints an address, skips the anonymous `mcp`
+  fallback, leaves known members untouched, and is fail-open - sending
+  **to** a recipient still requires that recipient to be a member.
+- **MCP prompts and native command files (P2-A/B/C).** The five punk
+  commands - `punk-join`, `punk-peers`, `punk-send`, `punk-inbox`,
+  `punk-handoff` - ship as skills, as MCP prompts, and as each client's
+  native command file (OpenCode, Cline, Antigravity), all rendered from
+  one shared body so the prose cannot drift. The render is client-neutral
+  (`punk-join (/punk-join; $punk-join in Codex)`), which is what lets
+  Codex dedupe the shared-root copy against its own.
+- **Unread trailer (P1-C).** Non-message tool results carry a one-line
+  unread count so an agent notices waiting mail without polling.
+- **Hermes allowlist and doctor (P1-D).** `punk connect hermes`
+  pre-approves its own shell hooks in
+  `$HERMES_HOME/shell-hooks-allowlist.json`, and `punk doctor <client>`
+  reports config, wiring, allowlist, credentials, reachability, messaging
+  tools and the last hook diagnostic, one PASS/FAIL/WARN line each.
+- **Request limits (P3-A).** Long-lived operations are capped per
+  **inbox** (verified subject + namespace + address;
+  `messaging.stream_limit`, default 4) with a loose per-IP backstop
+  (`messaging.stream_ip_limit`, default 256) that honors
+  `http.trusted_proxies`. Every JSON POST/PUT/PATCH body is capped
+  (`http.max_body_bytes`, default 8 MiB), and the send/register endpoints
+  are rate limited per IP. Overflow is 429 + `Retry-After` (HTTP) or a
+  named tool error (MCP); a slot is released the moment a holder
+  disconnects, is revoked, or its wait ends.
+- **Namespace allowlist and binding visibility (P3-D).** A followed
+  binding reports its setter and time (`Inbox bound to <ns> by <setter>
+  at <time>`, `by` omitted when unknown) and the `cwd_namespace` it
+  overrode. `PUNK_NAMESPACES` is the optional client-local allowlist of
+  namespaces a hook may follow a binding into.
+- **Codex Desktop recipe and probe (P4-C).** `docs/agent-messaging.md`
+  documents the chat-attached scheduled-task delivery path for Codex
+  Desktop (no hooks execute there), and `punk doctor codex` inspects the
+  installed hook and MCP scopes, including the shared app-server control
+  socket.
+- **Hermes Desktop plugin (P4-F).** `punk connect hermes` also writes and
+  enables a Hermes plugin (`$HERMES_HOME/plugins/punk-memory`) so punk
+  runs in the Hermes Desktop backend, which never registers shell hooks.
+  The plugin shells out to the same binary with the same argv and stands
+  down per event wherever a punk shell hook is registered, so a CLI or
+  Gateway turn neither injects nor captures twice.
+- **OpenCode 2.x (OC2).** The one generated OpenCode plugin loads on both
+  1.x (`PunkMemoryPlugin`) and 2.x (`default.setup(ctx)`), sharing one
+  core.
+- **Codex Desktop credentials.** A global Codex MCP entry embeds a
+  literal key as a static `Authorization` header (config.toml is mode
+  0600), so a GUI launch authenticates without inheriting a shell
+  environment.
+
+### Changed
+
+- **Exact-match sender allowlist (P3-C).** `PUNK_MESSAGING_FROM` entries
+  now match a sender exactly; a trailing `*` opts into prefix matching
+  (`planner*`). A bare `*` still allows everyone, and an unset or empty
+  allowlist is unchanged.
+- **Message injection hardening (P3-B).** Peer bodies can no longer open,
+  close or forge an envelope marker or a hook-authored guidance prefix,
+  and peer-supplied header values are defaced when they carry a protocol
+  token, so a peer cannot smuggle framing into a header position.
+- **Saved credentials drive every connector (P3-E).** `punk login`'s URL
+  and key now reach all ten connectors through one resolver with one
+  boundary: a saved key is used only when the selected server's canonical
+  base URL matches, path included. Reconnect refreshes every
+  already-enabled punk-managed capture, inbox and wake command without
+  flipping opt-ins.
+- **Credential safety (P3-E + rework).** A saved key is never sent over
+  plain `http` to a non-loopback host (resolution refuses with a
+  sanitized error; loopback http and https anywhere stay allowed, and an
+  explicit `PUNK_API_KEY` is never refused). A literal key is never
+  embedded in a project-scoped config: `--project` (Claude Code, Cursor,
+  OpenCode, Antigravity, Copilot CLI, Codex) and, via a git work-tree +
+  `git check-ignore` probe, a `--config`/`--home` target inside a repo
+  (Hermes, OpenClaw) get the host's `PUNK_API_KEY` env reference plus one
+  printed note instead. Global configs still embed the key at mode 0600,
+  which is what makes a GUI launch authenticate. Cline is unaffected (its
+  MCP settings are global even with `--project`).
+
+### Fixed
+
+- **Client-neutral command text.** The shared command render carried a
+  per-client invocation token, so the Codex copy under `$CODEX_HOME` and
+  the copy at the shared `~/.agents/skills` root differed and Codex listed
+  every command twice.
+- **Loud open-bind warning (P3-F).** `punk serve` warns before listening
+  on a non-loopback address with zero API keys - bootstrap pass-through
+  for anyone who can reach the host. Warning only: it never refuses to
+  start and never changes the authz mode.
+- **Join identity.** `join` never binds the host identity and mints per
+  MCP session, so two sessions on one machine no longer share a mailbox.
+
 ## v1.14.2 (2026-10-10)
 
 ### Added

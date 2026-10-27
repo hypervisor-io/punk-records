@@ -49,7 +49,7 @@ func TestRunAllowlistPrefixStarOptIn(t *testing.T) {
 	f.put("m1", "stranger", "held back")
 	tr := newFakeTransport()
 	cfg := testConfig(t, f.srv.URL)
-	cfg.SenderPrefixes = []string{"planner*"}
+	cfg.SenderAllowlist = []string{"planner*"}
 	cancel, _ := runInBackground(t, cfg, tr)
 	defer cancel()
 
