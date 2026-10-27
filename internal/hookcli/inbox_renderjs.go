@@ -637,9 +637,16 @@ const inboxBridgeCoreJS = `
   }
 
   function punkInboxSenderAllowed(allow, sender) {
+    // Mirrors nativewake.SenderAllowed / hookcli senderAllowed: exact
+    // match by default, an entry ending in '*' opts into prefix
+    // matching, empty allowlist passes every sender.
     if (!allow.length) return true;
-    for (const p of allow) {
-      if (sender && sender.indexOf(p) === 0) return true;
+    for (const entry of allow) {
+      if (entry.endsWith("*")) {
+        if (sender && sender.indexOf(entry.slice(0, -1)) === 0) return true;
+      } else if (sender === entry) {
+        return true;
+      }
     }
     return false;
   }

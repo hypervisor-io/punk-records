@@ -472,7 +472,7 @@ func TestOpenClawMessagingAllowlist(t *testing.T) {
   console.log("PASS allowlist")
   process.exit(0)
 `, jsStringLiteral(expectedOpenClawEnvelope("openclaw:s1", "m-allow", "planner-agent", "from the planner")))
-	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS allowlist") {
 		t.Fatalf("driver did not report PASS allowlist:\n%s", out)
 	}
@@ -602,7 +602,7 @@ func TestOpenClawMessagingDeniedFirst50Allowed51(t *testing.T) {
   console.log("PASS denied-first50-allowed51")
   process.exit(0)
 `, jsStringLiteral(expectedOpenClawEnvelope("openclaw:s1", "m-allow", "planner-agent", "the one allowed message")))
-	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS denied-first50-allowed51") {
 		t.Fatalf("driver did not report PASS denied-first50-allowed51:\n%s", out)
 	}
@@ -689,7 +689,7 @@ func TestOpenClawMessagingDenied130BatchedRelease(t *testing.T) {
   console.log("PASS denied-130-batched-release")
   process.exit(0)
 `, jsStringLiteral(expectedOpenClawEnvelope("openclaw:s1", "m-allow", "planner-agent", "the one allowed message")))
-	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runOpenClawMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS denied-130-batched-release") {
 		t.Fatalf("driver did not report PASS denied-130-batched-release:\n%s", out)
 	}

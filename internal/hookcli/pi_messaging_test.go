@@ -917,7 +917,7 @@ func TestPiMessagingAllowlist(t *testing.T) {
   console.log("PASS allowlist")
   process.exit(0)
 `, jsStringLiteral(expectedPiEnvelope("pi:s1", "m-allow", "planner-agent", "from the planner")))
-	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS allowlist") {
 		t.Fatalf("driver did not report PASS allowlist:\n%s", out)
 	}
@@ -983,7 +983,7 @@ func TestPiMessagingDeniedFirst50Allowed51(t *testing.T) {
   console.log("PASS denied-first50-allowed51")
   process.exit(0)
 `, jsStringLiteral(expectedPiEnvelope("pi:s1", "m-allow", "planner-agent", "the one allowed message")))
-	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS denied-first50-allowed51") {
 		t.Fatalf("driver did not report PASS denied-first50-allowed51:\n%s", out)
 	}
@@ -1125,7 +1125,7 @@ func TestPiMessagingDenied130BatchedRelease(t *testing.T) {
   console.log("PASS denied-130-batched-release")
   process.exit(0)
 `, jsStringLiteral(expectedPiEnvelope("pi:s1", "m-allow", "planner-agent", "the one allowed message")))
-	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS denied-130-batched-release") {
 		t.Fatalf("driver did not report PASS denied-130-batched-release:\n%s", out)
 	}
@@ -1208,7 +1208,7 @@ func TestPiMessagingFailedSecondPageCleanup(t *testing.T) {
   console.log("PASS failed-second-page-cleanup")
   process.exit(0)
 `, jsStringLiteral(expectedPiEnvelope("pi:s1", "m-allow", "planner-agent", "delivered after the failed page")))
-	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner"}, driver)
+	out := runPiMessagingHarness(t, map[string]string{"PUNK_MESSAGING_FROM": "planner*"}, driver)
 	if !strings.Contains(out, "PASS failed-second-page-cleanup") {
 		t.Fatalf("driver did not report PASS failed-second-page-cleanup:\n%s", out)
 	}

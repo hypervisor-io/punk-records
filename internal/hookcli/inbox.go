@@ -20,6 +20,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/hypervisor-io/punk-records/internal/nativewake"
 )
 
 // punk hook inbox (task M5) is the single client-side delivery path for
@@ -906,16 +908,14 @@ func inboxAllowlist() []string {
 	return out
 }
 
+// senderAllowed applies the PUNK_MESSAGING_FROM rule via the shared
+// nativewake.SenderAllowed matcher - the same rule the idle-wake
+// runner (internal/nativewake/runner.go) and the embedded client
+// bridges (punkInboxSenderAllowed in inbox_renderjs.go) enforce. P3-C:
+// entries match exactly by default; an entry ending in '*' opts into
+// prefix matching; an empty allowlist passes every sender (unchanged).
 func senderAllowed(allow []string, sender string) bool {
-	if len(allow) == 0 {
-		return true
-	}
-	for _, p := range allow {
-		if strings.HasPrefix(sender, p) {
-			return true
-		}
-	}
-	return false
+	return nativewake.SenderAllowed(allow, sender)
 }
 
 // inboxWaitDuration clamps --wait-seconds: default 60, max 300.
