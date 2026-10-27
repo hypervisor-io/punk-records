@@ -931,10 +931,12 @@ unchanged capture group:
 
 ## Codex Desktop
 
-Codex Desktop has no hook-driven delivery path: trusted `SessionStart`
-command hooks never execute there (openai/codex#35863), and Codex offers
-no MCP prompts (openai/codex#5059), so neither the `punk hook inbox`
-command nor an MCP prompt can inject the envelope. The Desktop delivery
+Codex Desktop has no reliable hook-driven delivery path: trusted
+`SessionStart` command hooks do not execute there (openai/codex#35863,
+open as of 2026-10-27; whether other hook events fire in Desktop is not
+verified), and Codex offers no MCP prompts (openai/codex#5059), so
+neither the `punk hook inbox` command nor an MCP prompt can be relied on
+to inject the envelope. The Desktop delivery
 path is a **chat-attached scheduled task** that runs the punk-inbox
 recipe periodically.
 

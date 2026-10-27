@@ -11,8 +11,7 @@ that must be earned by the transport and the file it lands in.
 
 - **Routing block for every context-capable client (P1-A).** Every
   client whose hook reply can carry text - Claude Code, Codex, Cursor,
-  Copilot CLI, Antigravity, Hermes, Cline, and the OpenCode/Pi/OpenClaw
-  bridges - receives a `[PUNK ROUTING]` identity block naming its real
+  Copilot CLI, Antigravity, Hermes and Cline - receives a `[PUNK ROUTING]` identity block naming its real
   session address and namespace, on an empty inbox too (it is identity,
   not delivery: it ACKs nothing and is never stacked onto a delivered
   envelope). Wake wording stays with the two clients that have a native
@@ -51,7 +50,7 @@ that must be earned by the transport and the file it lands in.
   unread count so an agent notices waiting mail without polling.
 - **Hermes allowlist and doctor (P1-D).** `punk connect hermes`
   pre-approves its own shell hooks in
-  `$HERMES_HOME/shell-hooks-allowlist.json`, and `punk doctor <client>`
+  `$HERMES_HOME/shell-hooks-allowlist.json`, and `punk doctor hermes`
   reports config, wiring, allowlist, credentials, reachability, messaging
   tools and the last hook diagnostic, one PASS/FAIL/WARN line each.
 - **Request limits (P3-A).** Long-lived operations are capped per
@@ -70,7 +69,8 @@ that must be earned by the transport and the file it lands in.
   namespaces a hook may follow a binding into.
 - **Codex Desktop recipe and probe (P4-C).** `docs/agent-messaging.md`
   documents the chat-attached scheduled-task delivery path for Codex
-  Desktop (no hooks execute there), and `punk doctor codex` inspects the
+  Desktop (trusted `SessionStart` command hooks do not execute there,
+  openai/codex#35863), and `punk doctor codex` inspects the
   installed hook and MCP scopes, including the shared app-server control
   socket.
 - **Hermes Desktop plugin (P4-F).** `punk connect hermes` also writes and
