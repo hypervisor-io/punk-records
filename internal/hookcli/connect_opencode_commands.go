@@ -17,9 +17,11 @@ import (
 // prompt template.
 //
 // punk renders the five command bodies from the shared P2-A source
-// (CommandBody) with OpenCode's own tool prefix (punk_) and invocation
-// syntax (/punk-<name>), so a command file and its skill file always
-// carry identical prose - only the wrapper differs.
+// (CommandBody) with OpenCode's own tool prefix (punk_). The invocation
+// syntax is client-neutral (see commandRef): the bare name, the slash
+// form and the Codex dollar form all appear in every render, so a command
+// file and its skill file always carry identical prose - only the wrapper
+// differs.
 
 // openCodeCommandTmpl wraps one shared command body in the OpenCode
 // command-file shape. Unlike the SKILL.md wrapper (commandFileTmpl) the

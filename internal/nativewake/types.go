@@ -34,16 +34,22 @@ type Transport interface {
 // Config is local worker configuration. APIKey is private and must not appear in
 // persistent state, command-line arguments, diagnostics or log output.
 type Config struct {
-	Client         string        `json:"client"`
-	SessionID      string        `json:"session_id"`
-	Namespace      string        `json:"namespace"`
-	URL            string        `json:"url"`
-	APIKey         string        `json:"api_key,omitempty"`
-	StateDir       string        `json:"state_dir"`
-	ControlPath    string        `json:"control_path,omitempty"`
-	Generation     string        `json:"generation,omitempty"`
-	MaxWakes       int           `json:"max_wakes"`
-	Window         time.Duration `json:"window"`
-	Cooldown       time.Duration `json:"cooldown"`
-	SenderPrefixes []string      `json:"sender_prefixes,omitempty"`
+	Client      string        `json:"client"`
+	SessionID   string        `json:"session_id"`
+	Namespace   string        `json:"namespace"`
+	URL         string        `json:"url"`
+	APIKey      string        `json:"api_key,omitempty"`
+	StateDir    string        `json:"state_dir"`
+	ControlPath string        `json:"control_path,omitempty"`
+	Generation  string        `json:"generation,omitempty"`
+	MaxWakes    int           `json:"max_wakes"`
+	Window      time.Duration `json:"window"`
+	Cooldown    time.Duration `json:"cooldown"`
+	// SenderAllowlist is the PUNK_MESSAGING_FROM rule (SenderAllowed): an
+	// entry matches a sender EXACTLY by default, and an entry ending in '*'
+	// opts into prefix matching. The JSON tag keeps the historical wire name
+	// `sender_prefixes`: this struct crosses the parent->child stdin
+	// document boundary (hookcli.wakeChildConfig), so the wire spelling is
+	// pinned even though the Go name now matches the P3-C semantics.
+	SenderAllowlist []string `json:"sender_prefixes,omitempty"`
 }

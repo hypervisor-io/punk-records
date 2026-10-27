@@ -257,7 +257,7 @@ func fingerprint(msgs []messageMeta) string {
 
 // SenderAllowed is the PUNK_MESSAGING_FROM matching rule, shared by
 // both Go consumption sites: this runner (fed by hookcli's
-// inboxAllowlist via Config.SenderPrefixes) and the hook inbox gate in
+// inboxAllowlist via Config.SenderAllowlist) and the hook inbox gate in
 // internal/hookcli (its senderAllowed delegates here). The embedded
 // client bridges mirror the same rule in punkInboxSenderAllowed
 // (internal/hookcli/inbox_renderjs.go).
@@ -872,7 +872,7 @@ func (r *runner) fetchUnread(ctx context.Context) (inboxScan, error) {
 
 // classify routes one eligible row into allowed or denied.
 func (r *runner) classify(scan *inboxScan, m messageMeta) {
-	if SenderAllowed(r.cfg.SenderPrefixes, m.Sender) {
+	if SenderAllowed(r.cfg.SenderAllowlist, m.Sender) {
 		scan.allowed = append(scan.allowed, m)
 	} else {
 		scan.denied++

@@ -118,10 +118,10 @@ No extension-only client is simulated as a subprocess hook.
 | Cursor | Catch-up: `sessionStart`; continuation/wait: `stop` | `additional_context`; `followup_message` | Punk cap plus client default loop limit 5; **no inbox context on beforeSubmitPrompt** | [hooks](https://cursor.com/docs/agent/hooks); minimum not established |
 | Copilot CLI | Catch-up: `SessionStart`; continuation/wait: `Stop` (PascalCase aliases) | flat `additionalContext`; `decision:block`, `reason` | Punk cap, `stop_hook_active`, client 8-block guard; command-hook UserPromptSubmit output is dropped, so no per-turn catch-up there | [hooks](https://docs.github.com/en/copilot/reference/hooks-reference); minimum not established |
 | Antigravity | Catch-up: every `PreInvocation`; continuation: `Stop` | `injectSteps[].ephemeralMessage`; `decision:continue` **with reason**; idle Stop `decision:allow` | Punk cap; event supplied through `--event`; no client cap or idle-wake API claimed | [hooks](https://antigravity.google/docs/hooks); minimum not established |
-| Hermes | Catch-up: every `pre_llm_call` | flat `context` | No continuation or wake; memory's first-turn gate does not gate inbox delivery | [hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks); minimum not established |
+| Hermes | Catch-up: every `pre_llm_call` | flat `context` | No continuation or wake; memory's first-turn gate does not gate inbox delivery. CLI/Gateway use shell hooks; the Desktop backend runs the generated plugin instead (P4-F) | [hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks); minimum not established |
 | Cline | Catch-up: `TaskStart`, `UserPromptSubmit` | one `cancel:false`, `contextModification` JSON, composed with memory | No stop/wake; native file hooks; combined context below 50,000 characters; Windows runtime not live-tested | **4.1.20+** fixes dropped context, [sources below](#cline-file-hooks-catch-up-only) |
 | Pi | Catch-up: `before_agent_start`; idle wake after SSE hint / `agent_settled` | custom `message`; object-form `pi.sendMessage(...,{deliverAs:"followUp",triggerTurn:true})` | Wake cap 5/10 min; synchronous enqueue ACK is host handoff, not model completion; context-return ACK deferred | [extension API](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md); minimum not established |
-| OpenCode | Idle wake / queued busy delivery via SSE and session status | `client.session.prompt` synthetic text | Wake cap, bounded retry/reconnect, ACK after successful prompt handoff; no guarantee completion | SDK/plugin **1.18.32** checked; minimum not established |
+| OpenCode | Idle wake / queued busy delivery via SSE and session status | `client.session.prompt` synthetic text | Wake cap, bounded retry/reconnect, ACK after successful prompt handoff; no guarantee completion. One generated plugin loads on **1.x and 2.x** (OC2) | SDK/plugin **1.18.32** checked; minimum not established |
 | OpenClaw | Catch-up only: `before_prompt_build` | `prependContext` | No turn-starting plugin API verified, so no SSE idle wake; ACK deferred; current manifest required | [plugin hooks](https://docs.openclaw.ai/plugins/hooks); installed-version compatibility needs final check |
 
 Subprocess delivery byte budgets: 8 KiB per body, 32 KiB default total;
@@ -197,6 +197,95 @@ capability by choosing `--mode wait`.
   arrive every 15s. Same namespace read authorization as
   `/messages/events`, rechecked before every delivery and on every
   keepalive, so a mid-stream grant or key revocation ends the stream.
+
+## Joining a region
+
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=phase-4/p4-a impl=internal/mcpserver/join.go test=internal/mcpserver/messaging_test.go doc=docs/agent-messaging.md -->
+
+`join` is the one-call entry point: it registers this session's address in
+the resolved namespace, binds that address's inbox, and answers the
+who-am-I question (address, namespace, active peers with a delivery tier
+each). It replaces the `whoami` + `register(inbox:true)` +
+`list_region_members` sequence the `punk-join` command used to walk.
+
+**Address resolution.**
+
+1. An explicit `address` argument. Hook-capable clients pass the address
+   from their `[PUNK ROUTING]` block so the hook keeps reading that
+   `<client>:<session>` inbox.
+2. No `address`: a minted `<clientInfo.name>:<16 hex>` address, stable for
+   this MCP session (repeat joins reuse it) and never shared across
+   sessions. The mint lives in server memory for the session's lifetime;
+   what persists is the ordinary membership and inbox binding. The result
+   carries `minted: true` and `minted_note` - that address has **no hook
+   reader**, so receive on the MCP tools (`read_messages` /
+   `await_messages`) instead.
+
+The identity the connection pins (`X-Punk-Agent`, else the API-key
+subject) is never an address candidate: `punk connect` writes one
+`user@host` value for every client on the host, so treating it as an
+address would fuse every HTTP MCP session on the machine into one mailbox
+whose binding the last join moves. It survives as metadata only, appended
+to the registered role as `(host identity <pinned>)`.
+
+**Grants.** The register+bind half needs a write grant for the resolved
+namespace. The peer listing is read-classified: without a read grant the
+call still succeeds with an empty `peers` and a `peers_note` naming the
+denial, so a write-only grant never leaks read-classified data and never
+fails the durable half.
+
+**Peers and delivery tiers.** `peers` lists only active members (the same
+window `list_region_members active_only` uses), listening first, then most
+recently seen, then by name. Each peer carries `delivery`: `live` when an
+inbox stream is open for that address right now, `catch_up` when delivery
+waits for that client's next hook, read or await. `join` always binds -
+joining **is** the explicit bind intent, the same rule
+`register(inbox:true)` applies, and the latest join wins. The result's
+`delivery` states both halves of the receive rule for this address.
+
+**MCP instructions lead (P1-B).** With `messaging.enabled`, the MCP server
+instructions open with the join rules (call `join`; pass the
+`[PUNK ROUTING]` address when one is present; otherwise expect a minted
+address with no hook reader) before the rest of the guidance. Codex
+Desktop, which has no hook-driven delivery, relies on that prefix: it sits
+inside the first 512 characters, the part Codex reliably reads (see [Codex
+Desktop](#codex-desktop)).
+
+## Auto-register (P4-B) — TODO
+
+> **TODO(P4-B).** This section is deliberately empty. P4-B
+> (auto-register) is being implemented in parallel on `mcpserver`; its
+> documentation will be written from the landed behaviour after the
+> planner merges P4-B and this branch rebases onto the new tip. Nothing
+> here describes behaviour that is not in the tree yet.
+
+## Routing block
+
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=phase-1/p1-a impl=internal/hookcli/inbox.go test=internal/hookcli/inbox_routing_test.go doc=docs/agent-messaging.md -->
+
+Every context-capable client receives a `[PUNK ROUTING]` identity block
+ahead of (or alongside) delivered content, naming the session's real
+address and namespace. It is the model's only reliable source for "who am
+I": `whoami` reports the MCP identity, which is not the session address,
+so `join`, `send_message` and every command skill take the address from
+this block.
+
+Context-capable means the client's hook reply can carry text: Claude Code
+(`SessionStart`, `UserPromptSubmit`), Codex (same events), Cursor
+(`sessionStart`), Copilot CLI (`SessionStart`), Antigravity
+(`PreInvocation`), Hermes (`pre_llm_call`) and Cline (`TaskStart`,
+`UserPromptSubmit`). The extension bridges (OpenCode, Pi, OpenClaw) prepend
+the same block to the context they inject. A client whose event cannot
+carry context gets no block - `Stop`/continuation replies carry the
+envelope, never routing - and must run the `punk-join` command instead.
+
+Only clients with a native wake transport (Claude Code, Codex) see wake
+wording in the block; every other client gets the identity line alone. An
+**empty inbox still emits the block**: it is identity, not delivery, so it
+ACKs nothing and is never stacked onto a delivered envelope. The block is
+re-emitted on every eligible event, so it survives a rebind, and `--ns` /
+`PUNK_NAMESPACE` stay local overrides that win over any server binding and
+skip the binding query entirely.
 
 ## Delivery leases, backlog and receipt history
 
@@ -423,6 +512,24 @@ genuine store failure answering the binding lookup is a 500, not a
 silent cwd fallback, so a reader can tell "no binding" from "binding
 store unreachable".
 
+**Namespace allowlist and binding visibility (P3-D).** A followed binding
+carries its stored setter and time, and the routing block renders
+`Inbox bound to <ns> by <setter> at <time>` - the `by` clause is omitted
+when the setter is unknown (a binding written before migration `0028`, or
+by a setter-less call site) rather than naming anyone. The same answer
+carries `cwd_namespace`, the namespace the binding overrode, so a reader
+can see what it would otherwise have used.
+
+`PUNK_NAMESPACES` is the optional **client-local** allowlist: a
+comma-separated list of namespaces this hook is permitted to follow a
+server binding into. Unset (or empty after trimming) means no enforcement;
+a set-but-empty value admits nothing, so garbage can never widen what the
+hook follows. A refused binding is named in the routing block instead of
+being followed silently, and the hook falls back to the cwd-derived
+namespace. This is a local control on data the server already answered -
+it is not authorization and no server enforcement changes. The generated
+extension bridges honor the same variable.
+
 **Trust note.** Binding sits in the same trust domain as messaging
 itself: any peer with a write grant on a namespace can rebind an address
 it can register. A binding changes which namespace a reader polls; it
@@ -448,9 +555,9 @@ sender can rephrase around.
 <!-- codeops:trace repo=punk-records work_item=punk-sse-skill-guidance-20261011 spec=docs/agent-messaging.md#opencode-quickstart-enable-bind-verify plan=sse-skill-guidance impl=internal/hookcli/skill.go test=TestAgentGuidanceInboxBindingAndSSE doc=docs/agent-messaging.md -->
 
 Registration, inbox binding, and SSE listening are different states.
-`inbox:true` binds an inbox; it does **not** enable messaging or start a
-listener. `listening:true` is an observed server response, not a value you
-pass to registration.
+`join` registers **and** binds in one call; it does **not** enable
+messaging or start a listener. `listening:true` is an observed server
+response, not a value you pass to `join`.
 
 1. **Enable the client bridge.** Install the plugin with `punk connect
    opencode`, configure its Punk server URL and authentication, then start
@@ -459,26 +566,35 @@ pass to registration.
    Keep OpenCode running; an exited process cannot be woken. Leave
    `PUNK_NAMESPACE` unset for dynamic switching. If set, that local pin
    overrides the server's inbox binding.
-2. **Bind your session.** Copy your actual `opencode:<sessionID>` address
-   from the bridge's injected guidance, not the host identity from
-   `punk_whoami` or an invented friendly name. Call `punk_register` with:
+2. **Join the region.** Copy your actual `opencode:<sessionID>` address
+   from the bridge's injected `[PUNK ROUTING]` block - not the host
+   identity from `whoami` or an invented friendly name - and pass it as
+   `join`'s `address` argument:
 
    ```json
-   {"namespace":"team-work","agent":"opencode:<sessionID>","role":"sse-client","inbox":true}
+   {"namespace":"team-work","role":"sse-client","address":"opencode:<sessionID>"}
    ```
 
    Replace the namespace and session placeholder with your authorized
-   destination and actual address. The `role` is metadata only; naming it
-   `sse-client` does not enable SSE. A successful `status:"registered"`
-   response confirms registration, not an open listener. Plain registration
-   without `inbox:true` does not move the inbox.
+   destination and actual address. `join` registers that address, binds its
+   inbox, and returns the address, the namespace and the active peers with
+   a delivery tier each (`live` while that peer's bridge stream listens,
+   `catch_up` otherwise). Called with **no** address (no routing block) it
+   mints a stable `<client>:<random>` address for this MCP session, reuses
+   it on repeat calls, and returns `minted_note` - that address has no hook
+   reader, so receive on the MCP tools (`read_messages` / `await_messages`)
+   instead. The `role` is metadata only; naming it `sse-client` does not
+   enable SSE. Under enforced HTTP authorization the register+bind half
+   needs a write grant for the namespace; the peer listing rides the read
+   grant and degrades to `peers_note` without one. Do not pass `listening`
+   to `join`.
 3. **Let the enabled bridge refresh.** It follows the binding on a supported
    host event or SSE reconnect, closes the previous stream, and subscribes
    in the new namespace on the same server. A healthy, permanently idle
    stream does not receive an immediate binding-change signal. Each session
    follows one binding at a time; this does not subscribe to every namespace
    where the address is registered or change MCP defaults.
-4. **Verify the listener.** Call `punk_list_region_members` with
+4. **Verify the listener.** Call `list_region_members` with
    `namespace:"team-work", active_only:true` and inspect your exact address.
    A member response can contain this excerpt:
 
@@ -488,9 +604,9 @@ pass to registration.
 
    Punk computes that field from an open
    `GET /v1/namespaces/<ns>/messages/events?agent=<address>` stream on the
-   responding server process. Do not pass `listening` to `punk_register`.
-   `active_only:true` can also return recently seen members with
-   `listening:false`; registration or recency alone does not prove SSE.
+   responding server process. `active_only:true` can also return recently
+   seen members with `listening:false`; registration or recency alone does
+   not prove SSE.
 
 When sending to a role, select its matching live member and pass that
 member's `agent` value as `recipient`. A role label is not an inbox address;
@@ -599,11 +715,19 @@ The hook acknowledges these messages once this text is delivered; do not ack the
 - The reply line always names the namespace and the sender address
   explicitly. The model's MCP identity and default namespace usually
   differ from the session address.
-- Neutralisation: all line-break variants (`\r\n`, `\r`, U+2028 and so on)
-  become `\n`. Any body line that starts with an envelope marker, after
-  leading whitespace or invisible format characters and ignoring case,
-  gets a `> ` prefix. Header fields have control characters replaced by
-  spaces, so a sender or id can never add a line.
+- Neutralisation (P3-B). All line-break variants (`\r\n`, `\r`, U+2028 and
+  so on) become `\n`. Any body line that starts with an envelope marker or
+  a hook-authored guidance prefix (the routing identity line, a reply
+  line) - after leading whitespace or invisible format characters and
+  ignoring case - gets a `> ` prefix, so a peer body can never open, close
+  or forge a marker, nor pass a forged routing or reply line off as punk's
+  own. Peer-supplied header values (`id`, `sender`, `task_id`, `reply_to`)
+  get control characters replaced by spaces first, then every protocol
+  token occurrence is defaced by inserting a single space after its first
+  character, so a peer cannot smuggle a marker or guidance prefix into a
+  header position either. The defacement is visible (a tampered value reads
+  as tampered), deterministic, and byte-identical for any value that
+  carries no token, so benign renders never change.
 - Budgets: 8 KiB per message body and a hard 32 KiB whole-envelope default
   (`PUNK_MESSAGING_RENDER_BYTES` overrides the delivery total; an adapter
   may lower it further). The cap includes header, marker neutralisation,
@@ -808,6 +932,38 @@ availability still requires a CLI session launched by that shared
 daemon - see
 [Native wake bridge](#native-wake-bridge-opt-in-claude-code-and-codex).
 
+## Hermes Desktop plugin (P4-F)
+
+Hermes registers its **shell hooks** only at CLI and gateway startup
+(`hermes_cli/main.py`, `gateway/run.py`); the Desktop backend
+(`hermes serve`) never registers them, so a hook-only install delivers
+nothing in Hermes Desktop. Plugin hooks, by contrast, are discovered in
+every mode (the `model_tools.py` import side effect and
+`tui_gateway/server.py`), so `punk connect hermes` additionally writes a
+Hermes plugin (`$HERMES_HOME/plugins/punk-memory/{__init__.py,plugin.yaml}`)
+and enables it in `plugins.enabled`.
+
+The plugin does what the shell hooks do - `pre_llm_call` context injection
+(recalled memory plus, with `--messaging`, the routing block and inbox
+catch-up), `on_session_start`, `post_tool_call` and `post_llm_call`
+capture - by invoking the same punk binary with the same argv the shell
+hooks use, so the payload, translation and endpoints cannot drift. Every
+call is bounded at 2 s and fail-open.
+
+**Dedup.** Plugin and shell hooks fire through the same dispatcher, so the
+plugin stands down per event wherever a punk shell hook is registered in
+the current process (detected from the live plugin manager's callbacks,
+named `shell_hook[<event>:<command>]`). A CLI or Gateway turn therefore
+neither injects nor captures twice, while the Desktop backend - where no
+shell hook is ever registered - is fully covered.
+
+Both plugin files are marker-gated and refused if hand-authored, the write
+is atomic and mode/symlink preserving, and the plugin is written before the
+`config.yaml` merge so a refusal aborts without mutating config. For a
+`HERMES_HOME`-scoped install, pass `--config "$HERMES_HOME/config.yaml"` so
+the plugin directory, `plugins.enabled` and the hooks land together.
+`punk doctor hermes` does not yet report the plugin.
+
 ## Native wake bridge (opt-in, Claude Code and Codex)
 
 `punk connect claude-code --wake` and `punk connect codex --wake` add a
@@ -967,6 +1123,17 @@ events and injects project memory. The messaging bridge is part of that
 same generated file and activates **only when the OpenCode process runs
 with `PUNK_MESSAGING=1`**; without it the plugin behaves exactly as
 before.
+
+**OpenCode 1.x and 2.x (OC2).** The generated file is one artifact that
+loads on both major versions: it exports the 1.x entry point
+(`PunkMemoryPlugin`, a hooks object, which the 1.x loader also reads
+through its `default.server`) and the 2.x entry point (`default.setup(ctx)`,
+registering the same behaviour through the 2.x context API). Both entry
+points translate their host's event and hook payload shapes into one
+shared core, so capture, context injection and the messaging bridge are
+byte-identical whichever loader picks it up. `punk connect opencode`
+writes it once; the version in play is decided by the OpenCode process,
+not by a connect flag.
 
 Environment (read by the plugin at runtime, inside the OpenCode process):
 
@@ -1229,6 +1396,44 @@ manifest blocks config validation) and declares the entrypoint through
 package.json's `openclaw.extensions` - the retired `openclaw.pluginEntry`
 shape punk wrote before this change is migrated in place; hand-authored
 manifests, entry files or package.jsons are refused, never overwritten.
+
+## Request limits and bind safety
+
+<!-- codeops:trace repo=punk-records work_item=punk-agent-refresh-20261009 spec=docs/agent-messaging.md plan=phase-3/p3-a,p3-f impl=internal/api/limits.go,cmd/punk/serve_bindwarn.go test=internal/api/limits_test.go doc=docs/agent-messaging.md -->
+
+**Long-lived operations are capped per inbox (P3-A).** Message streams
+(`/messages/events`, `/messages/stream`) and `await_messages` waits share
+one concurrency pool keyed per **inbox** - verified subject + namespace +
+agent address - so distinct agent addresses never contend:
+`messaging.stream_limit` (default 4; enough for reconnect overlap).
+Overflow is 429 + `Retry-After` on HTTP and a named tool error on MCP, and
+a slot is released the moment the holder disconnects, is revoked, or its
+wait ends - the cap is a concurrency bound, never a ban.
+
+A second, deliberately loose **per-IP backstop**
+(`messaging.stream_ip_limit`, default 256) spans every inbox on the same
+long-lived operations. It exists to stop a runaway or hostile host, not
+coordination traffic, because many agents legitimately share one proxy IP.
+Behind a reverse proxy set `http.trusted_proxies` to the CIDRs whose peers
+may name the real client in `X-Forwarded-For`; the backstop then keys on
+the rightmost non-trusted XFF entry instead of pooling the whole fleet on
+the proxy's address. With `trusted_proxies` empty, `X-Forwarded-For` is
+never trusted.
+
+Every JSON POST/PUT/PATCH body is capped by `http.max_body_bytes` (default
+8 MiB; a declared body over it is 413), and the message-send and
+member-register endpoints share a per-IP token bucket
+(`http.rate_limit_rps` / `http.rate_limit_burst`, default 50/100; overflow
+is 429 + `Retry-After`). See [CONFIG.md](CONFIG.md) for every key.
+
+**Open-bind warning (P3-F).** On startup `punk serve` counts the active
+API keys and, when the listener is bound to a non-loopback address with
+zero keys, prints one loud banner before accepting traffic: the HTTP API
+is reachable from other machines and, with no key in the database, runs in
+bootstrap pass-through - anyone who can reach the host can read and write
+it. The banner names both ways out (create a key; or bind loopback). It is
+**warning only**: punk starts anyway, exactly as configured, and the
+warning never changes the authz mode.
 
 ## Operator console
 

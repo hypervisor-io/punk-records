@@ -4441,13 +4441,22 @@ func cmdConnectHermes(args []string) error {
 	fmt.Println("punk: note - shell hooks run in Hermes CLI and Gateway sessions only; the plugin above covers the Hermes Desktop backend, which never registers them")
 	fmt.Println("punk: note - restart Hermes (hooks and plugins are registered at startup) to pick these up")
 	if !*noMCP {
+		// Hermes takes an arbitrary --config path, so the repo-scope rule
+		// comes from the path itself: a config inside a git work tree that
+		// is not gitignored gets the env reference instead of an embedded
+		// key (see hookcli.RepoScopedTarget).
+		hermesProjectScoped := hookcli.RepoScopedTarget(path)
 		mcpChanged, err := hookcli.ConnectHermesMCP(path,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName, ProjectScoped: hermesProjectScoped}, *force)
 		if err != nil {
 			return fmt.Errorf("connect hermes mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", path)
+			if hermesProjectScoped {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", path)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", path, changedWord(mcpChanged))
 	}
@@ -4572,13 +4581,20 @@ func cmdConnectOpenClaw(args []string) error {
 	}
 	fmt.Println("punk: note - restart the OpenClaw gateway (plugins load at startup) to pick this up")
 	if !*noMCP {
+		// OpenClaw takes an arbitrary --home, so the repo-scope rule comes
+		// from the resolved config path itself (hookcli.RepoScopedTarget).
+		openClawProjectScoped := hookcli.RepoScopedTarget(configPath)
 		mcpChanged, err := hookcli.ConnectOpenClawMCP(configPath,
-			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
+			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName, ProjectScoped: openClawProjectScoped}, *force)
 		if err != nil {
 			return fmt.Errorf("connect openclaw mcp: %w", err)
 		}
 		if *apiKeyEnv == "" && apiKey != "" {
-			fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", configPath)
+			if openClawProjectScoped {
+				projectKeyNotEmbeddedNote()
+			} else {
+				fmt.Printf("punk: note - the API key is stored in %s; keep that file private\n", configPath)
+			}
 		}
 		fmt.Printf("punk: MCP server entry in %s (%s)\n", configPath, changedWord(mcpChanged))
 	}
