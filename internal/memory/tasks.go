@@ -6,11 +6,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // TaskCounts tallies the /tasks convention in one namespace: one fact per
 // task at /tasks/<id>, and a status fact at /tasks/<id>/status whose body
-// starts with "done:" or "blocked:". Pending is whatever has a task fact
+// starts with "done" or "blocked" (see ParseTaskState). Pending is whatever has a task fact
 // and no terminal status. It is a read-only digest for dashboards; the
 // planner protocol itself lives in the punk-memory skill.
 type TaskCounts struct {
@@ -32,7 +34,7 @@ func (s *Store) TaskCounts(ctx context.Context, ns string) (TaskCounts, error) {
 		return out, err
 	}
 	rows, err := s.db.QueryContext(ctx, s.db.Rebind(`
-		SELECT m.key, substr(m.body, 1, 8) FROM memories m
+		SELECT m.key, substr(m.body, 1, 40) FROM memories m
 		JOIN (
 		    SELECT key, MAX(created_at) AS mc FROM memories
 		    WHERE namespace_id = $1 AND key LIKE $2 ESCAPE '\'
@@ -55,10 +57,10 @@ func (s *Store) TaskCounts(ctx context.Context, ns string) (TaskCounts, error) {
 		case len(parts) == 1 && parts[0] != "":
 			out.Total++
 		case len(parts) == 2 && parts[1] == "status":
-			switch {
-			case strings.HasPrefix(head, "done:"):
+			switch bodyTaskState(firstLine(head)) {
+			case "done":
 				out.Done++
-			case strings.HasPrefix(head, "blocked:"):
+			case "blocked":
 				out.Blocked++
 			}
 		}
@@ -92,15 +94,52 @@ type TaskRow struct {
 // reports counts. Anything else is pending.
 var TaskStates = []string{"pending", "in_progress", "review", "blocked", "done"}
 
-// ParseTaskState reads the state of a status fact: the body prefix
-// ("done:", "blocked:", "review:", "in_progress:", case-insensitive) wins,
-// then a string attribute "state" naming a known state, else pending.
-func ParseTaskState(body string, attrs map[string]any) string {
-	head := strings.ToLower(firstLine(body))
+// taskStateWords are the spellings each state is recognised by at the
+// start of a status body, lowercase. in_progress also accepts the prose
+// forms "in progress" and "in-progress".
+var taskStateWords = map[string][]string{
+	"pending":     {"pending"},
+	"in_progress": {"in_progress", "in progress", "in-progress"},
+	"review":      {"review"},
+	"blocked":     {"blocked"},
+	"done":        {"done"},
+}
+
+// bodyTaskState reads the state word a status line opens with, or "".
+// The word must be followed by end of line or a separator (':', space,
+// '(', '-', '.', ',' or an en/em dash), so "done (benchmark ...)" is done
+// while "doneness", "blocked_by" and "reviewer" are not states at all.
+func bodyTaskState(head string) string {
+	head = strings.ToLower(head)
 	for _, st := range TaskStates {
-		if strings.HasPrefix(head, st+":") {
-			return st
+		for _, w := range taskStateWords[st] {
+			rest, ok := strings.CutPrefix(head, w)
+			if !ok {
+				continue
+			}
+			if rest == "" {
+				return st
+			}
+			r, _ := utf8.DecodeRuneInString(rest)
+			switch r {
+			case ':', '(', '-', '.', ',', '\u2014', '\u2013':
+				return st
+			}
+			if unicode.IsSpace(r) {
+				return st
+			}
 		}
+	}
+	return ""
+}
+
+// ParseTaskState reads the state of a status fact: the leading state word
+// of the body ("done:", "done (shipped)", "blocked - waiting",
+// "in progress", case-insensitive; see bodyTaskState) wins, then a string
+// attribute "state" naming a known state, else pending.
+func ParseTaskState(body string, attrs map[string]any) string {
+	if st := bodyTaskState(firstLine(body)); st != "" {
+		return st
 	}
 	if v, ok := attrs["state"].(string); ok {
 		for _, st := range TaskStates {

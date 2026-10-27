@@ -22,7 +22,7 @@ function makeEl() {
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     addEventListener() {}, appendChild() {}, setAttribute() {},
     querySelector: () => makeEl(), querySelectorAll: () => [],
-    closest: () => null, scrollIntoView() {},
+    closest: () => null, scrollIntoView() {}, focus() {},
   };
 }
 
@@ -233,4 +233,34 @@ test('fetchDiagnostics is safe against prototype-polluting addresses', async () 
   assert.equal({}.polluted, undefined, 'no prototype pollution');
   c.setNS('ns1');
   assert.equal(c.diagFor(map, 'ns1', 'hasOwnProperty'), undefined, 'unknown special keys stay undefined');
+});
+
+test('probeAuth falls back to /v1/namespaces when /v1/overview is missing', async () => {
+  const seen = [];
+  sandbox.fetch = async (path, opts) => {
+    seen.push([path, (opts && opts.headers && opts.headers.Authorization) || '']);
+    return path === '/v1/overview' ? { ok: false, status: 404 } : { ok: true, status: 200 };
+  };
+  assert.equal(await c.probeAuth('k1'), 200);
+  assert.deepEqual(seen, [['/v1/overview', 'Bearer k1'], ['/v1/namespaces', 'Bearer k1']]);
+  seen.length = 0;
+  sandbox.fetch = async path => { seen.push([path, '']); return { ok: false, status: 401 }; };
+  assert.equal(await c.probeAuth(''), 401, 'a rejected key is reported, not retried on the fallback');
+  assert.deepEqual(seen, [['/v1/overview', '']]);
+  sandbox.fetch = async () => { throw new Error('offline'); };
+  assert.equal(await c.probeAuth('k1'), 0, 'network failure is 0');
+});
+
+test('nsIsIdle treats missing and old activity as idle', () => {
+  assert.equal(c.nsIsIdle({ name: 'a' }), true);
+  assert.equal(c.nsIsIdle({ last_activity: new Date(Date.now() - 8 * 86400000).toISOString() }), true);
+  assert.equal(c.nsIsIdle({ last_activity: new Date(Date.now() - 3600000).toISOString() }), false);
+  assert.equal(c.nsIsIdle({ last_write: new Date().toISOString() }), false, 'last_write is the fallback for old servers');
+});
+
+test('taskBar counts open tasks and escapes nothing remote', () => {
+  const html = c.taskBar({ done: 2, pending: 1, in_progress: 1 }, 4);
+  assert.ok(html.includes('2 open'));
+  assert.ok(html.includes('done 2'));
+  assert.equal(c.taskBar({}, 0).includes('-'), true, 'no tasks renders a dash');
 });

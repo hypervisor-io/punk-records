@@ -26,9 +26,114 @@ async function api(path, opts) {
   opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   if (token()) opts.headers['Authorization'] = 'Bearer ' + token();
   const r = await fetch(path, opts);
+  if (r.status === 401 && authed) {
+    // The key was revoked or the server gained keys mid-session: back to
+    // the login screen instead of every view rendering the same error.
+    showLogin('Your API key was rejected. Sign in again.');
+  }
   if (!r.ok) throw new Error(path + ': ' + r.status + ' ' + await r.text());
   return r.json();
 }
+
+// ---------------------------------------------------------------------
+// Login gate. Nothing but the login screen renders until a key (or an
+// open, keyless server) is confirmed against an authenticated route.
+// ---------------------------------------------------------------------
+
+let authed = false;
+
+// probeAuth reports the HTTP status an authenticated route answers with
+// for the given key (empty key = no Authorization header). /v1/overview
+// is the cheap cached route; servers that predate it answer 404 there,
+// so /v1/namespaces is the fallback.
+async function probeAuth(key) {
+  const h = key ? { Authorization: 'Bearer ' + key } : {};
+  try {
+    let r = await fetch('/v1/overview', { headers: h });
+    if (r.status === 404) r = await fetch('/v1/namespaces', { headers: h });
+    return r.status;
+  } catch (e) {
+    return 0; // network failure
+  }
+}
+
+function loginError(msg) {
+  const el = $('#loginError');
+  el.textContent = msg || '';
+  el.classList.toggle('hidden', !msg);
+}
+
+function showLogin(msg) {
+  authed = false;
+  $('#loginSubmit').disabled = false;
+  $('#loginSubmit').textContent = 'Sign in';
+  if (VIEWS[current] && VIEWS[current].leave) VIEWS[current].leave();
+  $('#app').classList.add('hidden');
+  $('#app').classList.remove('flex');
+  $('#login').classList.remove('hidden');
+  loginError(msg);
+  $('#loginKey').value = '';
+  $('#loginKey').focus();
+}
+
+function enterApp() {
+  authed = true;
+  $('#login').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  $('#app').classList.add('flex');
+  loginError('');
+  namespaces = null;
+  overviewMissing = false;
+  refreshAll();
+}
+
+async function boot() {
+  const saved = token();
+  const st = await probeAuth(saved);
+  if (st >= 200 && st < 300) {
+    // A saved key that works, or no saved key on a keyless server: the
+    // latter still shows the login screen once so the open state is
+    // stated, not silently assumed.
+    if (saved) { enterApp(); return; }
+    showLogin('');
+    $('#loginOpen').classList.remove('hidden');
+    $('#loginOpen').classList.add('flex');
+    return;
+  }
+  if (saved) localStorage.removeItem('amk');
+  showLogin(st === 0 ? 'Cannot reach the server.' : saved ? 'Your saved API key was rejected. Sign in again.' : '');
+}
+
+$('#loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const key = $('#loginKey').value.trim();
+  if (!key) { loginError('Enter an API key.'); return; }
+  $('#loginSubmit').disabled = true;
+  loginError('');
+  $('#loginSubmit').textContent = 'Checking…';
+  const st = await probeAuth(key);
+  $('#loginSubmit').disabled = false;
+  $('#loginSubmit').textContent = 'Sign in';
+  if (st >= 200 && st < 300) {
+    localStorage.setItem('amk', key);
+    enterApp();
+  } else if (st === 401 || st === 403) {
+    loginError('That key was rejected.');
+  } else {
+    loginError(st ? 'Server error (' + st + '). Try again.' : 'Cannot reach the server.');
+  }
+});
+
+$('#loginContinue').addEventListener('click', () => {
+  localStorage.removeItem('amk');
+  enterApp();
+});
+
+$('#signOut').addEventListener('click', () => {
+  localStorage.removeItem('amk');
+  showLogin('');
+  boot();
+});
 
 // Colour reinforces the state word, it never replaces it (design plan
 // principle). Tokens only define --live (listening / done) and --wait
@@ -62,25 +167,106 @@ function setNS(name) {
   refreshCurrent();
 }
 
+// The rail is fed by GET /v1/overview (activity-sorted, with liveness and
+// unread counts). Servers that predate that route answer 404, so the rail
+// falls back to the plain /v1/namespaces index and the Overview tab says
+// the route is missing instead of rendering zeros.
+let overview = null;       // last /v1/overview payload
+let overviewMissing = false;
+let lastRefreshOK = 0;     // ms epoch of the last successful poll, for the top-bar pulse
+let lastRefreshErr = '';
+
+const IDLE_DAYS = 7;
+
+function nsLastActivity(n) {
+  return n.last_activity || n.last_write || '';
+}
+function nsIsIdle(n) {
+  const t = Date.parse(nsLastActivity(n));
+  return !t || Date.now() - t > IDLE_DAYS * 86400000;
+}
+
+async function loadOverview() {
+  if (overviewMissing) return null;
+  try {
+    overview = await api('/v1/overview');
+    markRefresh('');
+    return overview;
+  } catch (e) {
+    if (/: 404 /.test(e.message)) { overviewMissing = true; return null; }
+    markRefresh(e.message);
+    throw e;
+  }
+}
+
 async function loadNamespaces() {
-  const onlyTasks = $('#nsTasksOnly').checked;
-  const d = await api('/v1/namespaces' + (onlyTasks ? '?tasks=1' : ''));
-  namespaces = d.namespaces || [];
-  if (!namespaces.some(n => n.name === ns)) ns = namespaces.length ? namespaces[0].name : '';
+  let list;
+  const ov = await loadOverview();
+  if (ov) {
+    list = ov.namespaces || [];
+  } else {
+    const d = await api('/v1/namespaces');
+    markRefresh('');
+    list = (d.namespaces || []).slice().sort((a, b) => (Date.parse(b.last_write) || 0) - (Date.parse(a.last_write) || 0));
+  }
+  namespaces = list;
+  if (!namespaces.some(n => n.name === ns)) {
+    const first = namespaces.find(n => !nsIsIdle(n)) || namespaces[0];
+    ns = first ? first.name : '';
+  }
   if (ns) localStorage.setItem('ns', ns);
   renderNamespaces();
 }
 
+function markRefresh(err) {
+  lastRefreshErr = err || '';
+  if (!err) lastRefreshOK = Date.now();
+  renderPulse();
+}
+
+function renderPulse() {
+  const dot = $('#pulseDot'), text = $('#pulseText');
+  if (!dot || !text) return;
+  if (lastRefreshErr) {
+    dot.className = 'dot bg-brand';
+    text.textContent = 'offline';
+    $('#pulse').title = lastRefreshErr;
+    return;
+  }
+  if (!lastRefreshOK) return;
+  const secs = Math.max(0, Math.round((Date.now() - lastRefreshOK) / 1000));
+  dot.className = 'dot bg-live' + (secs < 6 ? ' live-dot' : '');
+  text.textContent = secs < 2 ? 'live' : 'updated ' + secs + 's ago';
+  $('#pulse').title = 'last refresh ' + new Date(lastRefreshOK).toLocaleTimeString();
+}
+setInterval(renderPulse, 1000);
+
 function renderNamespaces() {
   const q = $('#nsFilter').value.trim().toLowerCase();
-  const list = (namespaces || []).filter(n => !q || n.name.toLowerCase().includes(q));
+  const hideIdle = $('#nsHideIdle').checked;
+  const all = namespaces || [];
+  const list = all.filter(n => (!q || n.name.toLowerCase().includes(q)) && (!hideIdle || q || !nsIsIdle(n) || n.name === ns));
+  const hidden = all.length - list.length;
 
-  $('#nsList').innerHTML = list.length
-    ? list.map(n => `<button type="button" class="flex w-full cursor-pointer items-baseline gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-bg${n.name === ns ? ' bg-bg text-brand' : ' text-ink'}" data-ns="${esc(n.name)}">
-        <span class="min-w-0 flex-1 break-all">${esc(n.name)}</span>
-        <span class="shrink-0 font-mono text-xs text-dim">${n.tasks ? n.tasks + 't ' : ''}${n.facts}f</span>
-      </button>`).join('')
-    : '<div class="empty-state">no namespaces</div>';
+  $('#nsList').innerHTML = (list.length
+    ? list.map(n => {
+        const live = (n.members_live || 0) > 0, recent = (n.members_recent || 0) > 0;
+        const dot = live ? '<span class="dot live-dot bg-live" title="agent listening"></span>'
+          : recent ? '<span class="dot bg-live" title="agent seen in the last 10 minutes"></span>'
+          : '<span class="dot bg-line"></span>';
+        const open = n.task_counts ? (n.tasks || 0) - (n.task_counts.done || 0) : 0;
+        const meta = [
+          open ? open + ' open' : '',
+          n.unread ? '<span class="text-wait">' + n.unread + ' unread</span>' : '',
+          esc(relAge(nsLastActivity(n)) || ''),
+        ].filter(Boolean).join(' · ');
+        return `<button type="button" class="flex w-full cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-bg${n.name === ns ? ' bg-bg text-brand' : ' text-ink'}" data-ns="${esc(n.name)}">
+          <span class="mt-1.5 shrink-0">${dot}</span>
+          <span class="min-w-0 flex-1"><span class="block break-all">${esc(n.name)}</span><span class="block font-mono text-xs text-dim">${meta || '&nbsp;'}</span></span>
+        </button>`;
+      }).join('')
+    : '<div class="empty-state">no namespaces</div>') +
+    (hidden && !q ? `<div class="px-2 py-2 text-xs text-dim">${hidden} idle namespace${hidden === 1 ? '' : 's'} hidden</div>` : '');
 
   const sel = $('#nsSelect');
   sel.innerHTML = (namespaces || []).map(n => `<option value="${esc(n.name)}"${n.name === ns ? ' selected' : ''}>${esc(n.name)}</option>`).join('')
@@ -89,7 +275,7 @@ function renderNamespaces() {
 }
 
 $('#nsFilter').addEventListener('input', renderNamespaces);
-$('#nsTasksOnly').addEventListener('change', () => { namespaces = null; loadNamespacesAndRefresh(); });
+$('#nsHideIdle').addEventListener('change', renderNamespaces);
 $('#nsList').addEventListener('click', e => {
   const row = e.target.closest('[data-ns]');
   if (row) setNS(row.dataset.ns);
@@ -130,15 +316,214 @@ $('#railToggle').addEventListener('click', () => {
 $('#railScrim').addEventListener('click', closeRail);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRail(); });
 
+
 // ---------------------------------------------------------------------
-// Token field
+// Overview view: server-wide coordination picture from /v1/overview.
+// Global, so it renders without a selected namespace; clicking a row
+// selects that namespace and opens its Board.
 // ---------------------------------------------------------------------
 
-$('#token').value = token();
-$('#token').addEventListener('change', e => {
-  localStorage.setItem('amk', e.target.value);
-  namespaces = null;
-  refreshAll();
+const fmtNum = n => (n || 0).toLocaleString('en-US');
+
+function statTile(label, value, sub, tone) {
+  return `<div class="panel flex min-w-0 flex-col gap-0.5">
+    <span class="text-xs text-dim">${esc(label)}</span>
+    <span class="text-xl font-semibold tabular-nums ${tone || 'text-ink'}">${value}</span>
+    <span class="text-xs text-dim">${sub || '&nbsp;'}</span>
+  </div>`;
+}
+
+// taskBar draws one namespace's task states as a proportional strip; the
+// counts are repeated in the title so colour never carries meaning alone.
+function taskBar(tc, total) {
+  if (!total) return '<span class="text-dim">-</span>';
+  const parts = [['done', 'bg-live'], ['in_progress', 'bg-ink'], ['review', 'bg-wait'], ['blocked', 'bg-brand'], ['pending', 'bg-line']];
+  const title = parts.map(([k]) => k.replace('_', ' ') + ' ' + ((tc && tc[k]) || 0)).join(', ');
+  const open = total - ((tc && tc.done) || 0);
+  return `<div class="flex items-center gap-2" title="${esc(title)}">
+    <div class="flex h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-bg">${parts.map(([k, c]) => {
+      const v = (tc && tc[k]) || 0;
+      return v ? `<span class="${c}" style="width:${(v / total * 100).toFixed(1)}%"></span>` : '';
+    }).join('')}</div>
+    <span class="font-mono text-xs ${open ? 'text-ink' : 'text-dim'}">${open} open</span>
+  </div>`;
+}
+
+function mountOverview(el) {
+  el.innerHTML = `
+    <div id="ovRuntime" class="mb-3 flex flex-wrap items-center gap-2 text-xs"></div>
+    <div id="ovTiles" class="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6"></div>
+    <div class="mb-2 flex flex-wrap items-center gap-3">
+      <h2 class="text-md font-semibold">Namespaces</h2>
+      <input id="ovFilter" type="text" placeholder="filter" class="field w-48">
+      <label class="flex items-center gap-2 text-sm text-dim">
+        <input id="ovActiveOnly" type="checkbox" checked class="accent-brand">
+        active in the last 7 days
+      </label>
+      <span id="ovCount" class="text-xs text-dim"></span>
+    </div>
+    <div id="ovTable"></div>`;
+  $('#ovFilter', el).addEventListener('input', renderOverview);
+  $('#ovActiveOnly', el).addEventListener('change', renderOverview);
+}
+
+async function loadOverviewView() {
+  try {
+    await loadNamespaces(); // also refreshes `overview`
+  } catch (e) {
+    $('#ovTable').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
+    return;
+  }
+  renderOverview();
+}
+
+function renderOverview() {
+  if (!$('#ovTable')) return;
+  if (!overview) {
+    $('#ovRuntime').innerHTML = '';
+    $('#ovTiles').innerHTML = '';
+    $('#ovTable').innerHTML = '<div class="empty-state">This server does not serve /v1/overview yet. Upgrade punk to see namespace summaries; the Board, Memory, Messages and Agents tabs still work.</div>';
+    return;
+  }
+  const t = overview.totals || {}, rt = overview.runtime || {};
+  const flag = (on, label, onWord, offWord) => `<span class="pill ${on ? 'text-live' : 'text-dim'}">${esc(label)} ${on ? onWord : offWord}</span>`;
+  $('#ovRuntime').innerHTML = [
+    overview.version ? `<span class="pill">punk ${esc(overview.version)}</span>` : '',
+    flag(rt.messaging_enabled, 'messaging', 'on', 'off'),
+    `<span class="pill ${rt.authz === 'deny' ? 'text-live' : 'text-dim'}">authz ${esc(rt.authz || 'off')}</span>`,
+    flag(rt.ai_enabled, 'model', 'on', 'off'),
+  ].join('');
+
+  const nsActive = (overview.namespaces || []).filter(n => !nsIsIdle(n)).length;
+  $('#ovTiles').innerHTML = [
+    statTile('Agents live', fmtNum(t.members_live), fmtNum(t.members_recent) + ' recent of ' + fmtNum(t.members), t.members_live ? 'text-live' : ''),
+    statTile('Open tasks', fmtNum(t.tasks_open), fmtNum(t.tasks) + ' total', t.tasks_open ? 'text-ink' : 'text-dim'),
+    statTile('Unread messages', fmtNum(t.unread), fmtNum(t.messages_24h) + ' sent in 24h', t.unread ? 'text-wait' : 'text-dim'),
+    statTile('Active claims', fmtNum(t.claims), 'leased work items'),
+    statTile('Active namespaces', fmtNum(nsActive), 'of ' + fmtNum(t.namespaces) + ', last 7 days'),
+    statTile('Facts', fmtNum(t.facts), 'live memory'),
+  ].join('');
+
+  const q = ($('#ovFilter').value || '').trim().toLowerCase();
+  const activeOnly = $('#ovActiveOnly').checked;
+  const rows = (overview.namespaces || []).filter(n => (!q || n.name.toLowerCase().includes(q)) && (!activeOnly || q || !nsIsIdle(n)));
+  $('#ovCount').textContent = rows.length + ' of ' + (overview.namespaces || []).length;
+
+  $('#ovTable').innerHTML = rows.length
+    ? `<div class="table-wrap"><table class="data-table">
+        <colgroup><col style="width:28%"><col style="width:14%"><col style="width:16%"><col style="width:18%"><col style="width:12%"><col style="width:12%"></colgroup>
+        <thead><tr><th>Namespace</th><th>Last activity</th><th>Agents</th><th>Tasks</th><th class="num">Unread / 24h</th><th class="num">Facts</th></tr></thead>
+        <tbody>${rows.map(n => {
+          const live = n.members_live || 0, recent = n.members_recent || 0;
+          const agents = n.members
+            ? `<span class="${live ? 'text-live' : recent ? 'text-ink' : 'text-dim'}">${live ? '<span class="dot live-dot mr-1.5 bg-live"></span>' + live + ' live' : recent ? recent + ' recent' : 'idle'}</span> <span class="text-dim">/ ${n.members}</span>`
+            : '<span class="text-dim">none</span>';
+          return `<tr class="cursor-pointer" data-open-ns="${esc(n.name)}">
+            <td data-label="Namespace"><button type="button" class="break-all text-left font-semibold text-ink hover:text-brand hover:underline" data-open-ns="${esc(n.name)}">${esc(n.name)}</button></td>
+            <td class="mono" data-label="Last activity">${esc(relAge(nsLastActivity(n)) || '-')}</td>
+            <td data-label="Agents">${agents}</td>
+            <td data-label="Tasks">${taskBar(n.task_counts, n.tasks || 0)}</td>
+            <td class="num font-mono" data-label="Unread / 24h"><span class="${n.unread ? 'text-wait' : 'text-dim'}">${fmtNum(n.unread)}</span> <span class="text-dim">/ ${fmtNum(n.messages_24h)}</span></td>
+            <td class="num mono" data-label="Facts">${fmtNum(n.facts)}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>`
+    : '<div class="empty-state">No namespaces match. Agents create one when they connect or register.</div>';
+}
+
+$('#view').addEventListener('click', e => {
+  const row = e.target.closest('[data-open-ns]');
+  if (!row) return;
+  setNS(row.dataset.openNs);
+  switchView('board');
+});
+
+// nsHeader is the one-line summary of the selected namespace shown above
+// the per-namespace views, from the cached overview row when there is one.
+function nsHeader() {
+  const n = (namespaces || []).find(x => x.name === ns);
+  if (!n) return `<span class="font-semibold text-ink">${esc(ns)}</span>`;
+  const bits = [
+    `<span class="font-semibold text-ink">${esc(n.name)}</span>`,
+    n.members_live ? `<span class="text-live"><span class="dot live-dot mr-1.5 bg-live"></span>${n.members_live} live</span>` : '',
+    n.members ? `<span>${n.members_recent || 0} recent of ${n.members} agent${n.members === 1 ? '' : 's'}</span>` : '',
+    n.unread ? `<span class="text-wait">${n.unread} unread</span>` : '',
+    `<span>${fmtNum(n.facts)} facts</span>`,
+    nsLastActivity(n) ? `<span>active ${esc(relAge(nsLastActivity(n)))}</span>` : '',
+  ];
+  return `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-dim">${bits.filter(Boolean).join('')}</div>`;
+}
+
+// ---------------------------------------------------------------------
+// Memory view: what the namespace actually knows. Recent writes come from
+// /recent (session capture hidden by default, it drowns everything else);
+// a query switches the list to /memories/search.
+// ---------------------------------------------------------------------
+
+function mountMemory(el) {
+  el.innerHTML = `
+    <div id="memHeader" class="mb-3"></div>
+    <form id="memSearchForm" class="mb-3 flex flex-wrap items-center gap-2">
+      <input id="memQuery" type="search" placeholder="search this namespace" class="field w-full max-w-md">
+      <button type="submit" class="btn">search</button>
+      <label class="flex items-center gap-2 text-sm text-dim">
+        <input id="memSessions" type="checkbox" class="accent-brand">
+        include captured sessions
+      </label>
+    </form>
+    <div id="memList"></div>`;
+  $('#memSearchForm', el).addEventListener('submit', e => { e.preventDefault(); loadMemory(); });
+  $('#memSessions', el).addEventListener('change', loadMemory);
+}
+
+let memExpanded = new Set();
+
+async function loadMemory() {
+  if (!$('#memList')) return;
+  if (!namespaces) { try { await loadNamespaces(); } catch (e) { /* header falls back to the name */ } }
+  if (!ns) { $('#memHeader').innerHTML = ''; $('#memList').innerHTML = '<div class="empty-state">no namespace selected</div>'; return; }
+  $('#memHeader').innerHTML = nsHeader();
+  const q = $('#memQuery').value.trim();
+  const sessions = $('#memSessions').checked;
+  try {
+    let facts, heading;
+    if (q) {
+      facts = await api('/v1/namespaces/' + encodeURIComponent(ns) + '/memories/search?limit=50&q=' + encodeURIComponent(q));
+      if (!sessions) facts = facts.filter(f => !String(f.key).startsWith('/agent-sessions/'));
+      heading = facts.length + ' match' + (facts.length === 1 ? '' : 'es') + ' for "' + esc(q) + '"';
+    } else {
+      const d = await api('/v1/namespaces/' + encodeURIComponent(ns) + '/recent?limit=60' + (sessions ? '&sessions=1' : ''));
+      facts = d.facts || [];
+      heading = 'Latest writes';
+    }
+    $('#memList').innerHTML = `<div class="mb-2 text-xs text-dim">${heading}</div>` + (facts.length
+      ? `<div class="flex flex-col">${facts.map(f => {
+          const id = f.id || f.key;
+          const open = memExpanded.has(id);
+          const body = String(f.body || '');
+          const long = body.length > 220 || body.includes('\n');
+          return `<div class="border-b border-line py-2.5">
+            <div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+              <span class="min-w-0 break-all font-mono text-sm text-ink">${esc(f.key)}</span>
+              <span class="font-mono text-xs text-dim">${esc(f.author || '')}</span>
+              <span class="ml-auto shrink-0 font-mono text-xs text-dim">${esc(relAge(f.created_at) || '')}</span>
+            </div>
+            <div class="mt-1 whitespace-pre-wrap break-words text-sm ${open ? 'text-ink' : 'text-dim'}">${esc(open || !long ? body : body.slice(0, 220).split('\n')[0] + ' …')}</div>
+            ${long ? `<button type="button" class="mt-1 text-xs text-dim hover:text-brand" data-mem-toggle="${esc(id)}">${open ? 'show less' : 'show more'}</button>` : ''}
+          </div>`;
+        }).join('')}</div>`
+      : `<div class="empty-state">${q ? 'Nothing matches.' : 'No writes yet' + (sessions ? '' : ' (outside captured sessions)') + '.'}</div>`);
+  } catch (e) {
+    $('#memList').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
+  }
+}
+
+$('#view').addEventListener('click', e => {
+  const t = e.target.closest('[data-mem-toggle]');
+  if (!t) return;
+  const id = t.dataset.memToggle;
+  if (memExpanded.has(id)) memExpanded.delete(id); else memExpanded.add(id);
+  loadMemory();
 });
 
 // ---------------------------------------------------------------------
@@ -181,8 +566,8 @@ async function loadBoardTable() {
     const shown = names.slice(0, 10).map(esc).join(', ') + (names.length > 10 ? ' +' + (names.length - 10) + ' more' : '');
 
     $('#boardSummary').innerHTML = `
+      <div class="mb-2">${nsHeader()}</div>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-dim">
-        <span class="font-semibold text-ink">${esc(b.namespace)}</span>
         <span>${c.total || 0} tasks</span>
         <span>done <b class="font-normal text-ink">${c.done || 0}</b></span>
         <span>in progress <b class="font-normal text-ink">${c.in_progress || 0}</b></span>
@@ -213,16 +598,8 @@ async function loadBoardTable() {
 }
 
 // ---------------------------------------------------------------------
-// Approvals view (old Inbox: proposals + parked tasks)
+// Approvals (proposals + parked tasks), rendered inside the Runtime view
 // ---------------------------------------------------------------------
-
-function mountApprovals(el) {
-  el.innerHTML = `
-    <h2 class="mb-2 text-md font-semibold">Proposals awaiting approval</h2>
-    <div id="approvalsProposals"></div>
-    <h2 class="mb-2 mt-6 text-md font-semibold">Parked tasks (input required)</h2>
-    <div id="approvalsParked"></div>`;
-}
 
 async function loadApprovals() {
   try {
@@ -284,14 +661,8 @@ document.addEventListener('click', e => {
 });
 
 // ---------------------------------------------------------------------
-// Tasks view
+// Investigation tasks, rendered inside the Runtime view
 // ---------------------------------------------------------------------
-
-function mountTasks(el) {
-  el.innerHTML = `
-    <div id="tasksList"></div>
-    <div id="tasksTimeline" class="panel mt-4 hidden"></div>`;
-}
 
 async function loadTasks() {
   try {
@@ -320,7 +691,7 @@ $('#view').addEventListener('click', e => {
 });
 
 async function showTask(id) {
-  switchView('tasks');
+  switchView('runtime');
   const d = await api('/v1/tasks/' + encodeURIComponent(id));
   const tl = $('#tasksTimeline');
   tl.classList.remove('hidden');
@@ -338,14 +709,8 @@ async function showTask(id) {
 }
 
 // ---------------------------------------------------------------------
-// Costs view
+// Model spend, rendered inside the Runtime view
 // ---------------------------------------------------------------------
-
-function mountCosts(el) {
-  el.innerHTML = `
-    <div id="costsSummary" class="mb-3"></div>
-    <div id="costsTable"></div>`;
-}
 
 async function loadCosts() {
   try {
@@ -1172,26 +1537,93 @@ async function loadSpecialistAgents() {
 }
 
 // ---------------------------------------------------------------------
+// Runtime view: the domain-agent investigation runtime (ledger tasks,
+// approval proposals, model spend). Coding-agent coordination never
+// writes here, so the view explains its state instead of showing three
+// empty tabs; the tab badge counts what is waiting on a human.
+// ---------------------------------------------------------------------
+
+function mountRuntime(el) {
+  el.innerHTML = `
+    <div id="runtimeIntro" class="panel mb-4 text-sm text-dim"></div>
+    <div id="runtimeSections">
+    <h2 class="mb-2 text-md font-semibold">Waiting on you</h2>
+    <div id="approvalsProposals"></div>
+    <div id="approvalsParked" class="mt-3"></div>
+    <h2 class="mb-2 mt-6 text-md font-semibold">Investigation tasks</h2>
+    <div id="tasksList"></div>
+    <div id="tasksTimeline" class="panel mt-4 hidden"></div>
+    <h2 class="mb-2 mt-6 text-md font-semibold">Model spend</h2>
+    <div id="costsSummary" class="mb-3"></div>
+    <div id="costsTable"></div>
+    </div>`;
+}
+
+// runtimeEmpty: nothing has ever run here, so the three sections would
+// only repeat "none" three times; the intro says it once instead.
+function runtimeEmpty(rt) {
+  return !!rt && !rt.ledger_tasks && !rt.pending_proposals && !rt.parked_tasks && !rt.month_cost_microusd;
+}
+
+function renderRuntimeIntro() {
+  const rt = (overview && overview.runtime) || null;
+  const el = $('#runtimeIntro');
+  if (!el) return;
+  if (!rt) {
+    el.innerHTML = 'The investigation runtime runs domain agents (specs on disk) against tasks submitted through <code class="font-mono text-ink">submit_task</code>, <code class="font-mono text-ink">POST /v1/tasks</code> or webhook intake. Coding-agent tasks live on the Board.';
+    return;
+  }
+  const idle = !rt.ai_enabled || !rt.domain_agents;
+  el.innerHTML = idle
+    ? `<b class="font-normal text-ink">Runtime idle${runtimeEmpty(rt) ? ', nothing has run here yet' : ''}.</b> ${rt.ai_enabled ? 'A model is configured' : 'No model is configured (<code class="font-mono text-ink">ai.enabled: false</code>)'} and ${fmtNum(rt.domain_agents)} domain agent${rt.domain_agents === 1 ? ' is' : 's are'} loaded, so nothing is investigated, proposed or billed here. Coding-agent work shows on the Board, Messages and Agents tabs.`
+    : `<b class="font-normal text-ink">Runtime active.</b> ${fmtNum(rt.domain_agents)} domain agents, ${fmtNum(rt.ledger_tasks)} ledger tasks, ${usd(rt.month_cost_microusd || 0)} model spend this month.`;
+}
+
+function renderRuntimeBadge() {
+  const rt = (overview && overview.runtime) || {};
+  const n = (rt.pending_proposals || 0) + (rt.parked_tasks || 0);
+  const b = $('#runtimeBadge');
+  if (!b) return;
+  b.textContent = n ? String(n) : '';
+  b.classList.toggle('hidden', !n);
+}
+
+async function loadRuntime() {
+  if (!overview && !overviewMissing) { try { await loadOverview(); } catch (e) { /* intro falls back to generic text */ } }
+  renderRuntimeIntro();
+  renderRuntimeBadge();
+  const rt = overview && overview.runtime;
+  const empty = runtimeEmpty(rt);
+  $('#runtimeSections').classList.toggle('hidden', empty);
+  if (empty) return;
+  await Promise.all([loadApprovals(), loadTasks(), loadCosts()]);
+}
+
+// ---------------------------------------------------------------------
 // View registry, tab strip / bottom bar, and the 5s poll
 // ---------------------------------------------------------------------
 
 const VIEWS = {
+  overview: { label: 'Overview', mount: mountOverview, refresh: loadOverviewView },
   board: { label: 'Board', mount: mountBoard, refresh: loadBoard },
+  memory: { label: 'Memory', mount: mountMemory, refresh: loadMemory, poll: () => { if (!$('#memQuery').value.trim()) loadMemory(); } },
   // `fill: true` gives this view's section a bounded, full height flex
   // column (see buildViewShell) instead of the default flow layout, so
   // its own panes - not the outer #view - own their scrolling (see
   // .msg-shell/#msgThreadBody in console.src.css).
   messages: { label: 'Messages', mount: mountMessages, refresh: loadMessages, leave: stopMessageStream, fill: true },
   agents: { label: 'Agents', mount: mountAgents, refresh: loadAgentsView },
-  approvals: { label: 'Approvals', mount: mountApprovals, refresh: loadApprovals },
-  tasks: { label: 'Tasks', mount: mountTasks, refresh: loadTasks },
-  costs: { label: 'Costs', mount: mountCosts, refresh: loadCosts },
+  runtime: { label: 'Runtime', mount: mountRuntime, refresh: loadRuntime },
 };
+
+// Old bookmarks (#approvals, #tasks, #costs) land on the merged Runtime tab.
+const VIEW_ALIASES = { approvals: 'runtime', tasks: 'runtime', costs: 'runtime' };
 
 // The initial view can be named by URL hash (e.g. /ui#agents), so a
 // screenshot or a bookmark can land directly on a tab; localStorage's
 // `amk`/`ns` keys still own the token and namespace as before.
-let current = VIEWS[(location.hash || '').slice(1)] ? location.hash.slice(1) : 'board';
+const hashView = (location.hash || '').slice(1);
+let current = VIEWS[hashView] ? hashView : VIEW_ALIASES[hashView] || 'overview';
 
 function buildViewShell() {
   const root = $('#view');
@@ -1206,6 +1638,7 @@ function buildViewShell() {
 }
 
 function switchView(name) {
+  name = VIEW_ALIASES[name] || name;
   if (!VIEWS[name] || name === current) {
     if (VIEWS[name]) refreshCurrent();
     return;
@@ -1223,7 +1656,20 @@ function switchView(name) {
 $$('#tabs .tab-btn, #bottombar .bottom-btn').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
 
 function refreshCurrent() {
+  if (!authed) return;
   VIEWS[current].refresh();
+}
+
+// The 5s poll: views may define a lighter `poll` (Memory skips the poll
+// while a search is open). The rail and the Runtime badge ride along on
+// the cached overview so every tab stays current, not just Overview.
+async function pollCurrent() {
+  if (!authed || document.hidden) return;
+  const v = VIEWS[current];
+  (v.poll || v.refresh)();
+  if (current !== 'overview' && !overviewMissing) {
+    try { await loadOverview(); renderNamespaces(); renderRuntimeBadge(); } catch (e) { /* pulse shows offline */ }
+  }
 }
 function refreshAll() {
   diagUnsupported = false; // a new token may point at a different server
@@ -1233,8 +1679,8 @@ function refreshAll() {
 $$('#tabs .tab-btn').forEach(b => b.classList.toggle('on', b.dataset.view === current));
 $$('#bottombar .bottom-btn').forEach(b => b.classList.toggle('on', b.dataset.view === current));
 buildViewShell();
-refreshAll();
-setInterval(refreshCurrent, 5000);
+boot();
+setInterval(pollCurrent, 5000);
 
 // Test seam for node --test (internal/api/ui/console.test.mjs), which
 // evaluates this file in a vm sandbox with DOM stubs and a `module`
@@ -1243,7 +1689,7 @@ setInterval(refreshCurrent, 5000);
 if (typeof module === 'object' && module && module.exports) {
   module.exports = {
     esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
-    stateClass,
+    stateClass, probeAuth, nsIsIdle, taskBar,
     getDiagUnsupported: () => diagUnsupported,
     setDiagUnsupported: v => { diagUnsupported = v; },
     setNS: v => { ns = v; },

@@ -4,6 +4,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -41,6 +42,11 @@ type Deps struct {
 	// "profile", "entities", "facts"). Empty means the default:
 	// profile, entities, facts.
 	Inject []string
+
+	// Runtime flags the overview reports; zero values read as off.
+	AIEnabled        bool
+	MessagingEnabled bool
+	AuthzMode        string // config authz.enforcement ("" reads as "off")
 }
 
 // Server owns the HTTP router.
@@ -62,6 +68,14 @@ type Server struct {
 	inject        []string // session-start context components; empty = default
 	version       string   // stamped via MountAgentCard; used in A2A cards
 
+	aiEnabled, messagingEnabled bool
+	authzMode                   string
+
+	// clock stamps and ages the cross-namespace caches; tests replace it.
+	clock    func() time.Time
+	nsSums   *ttlCache[[]memory.NamespaceSummary] // behind /v1/namespaces and the overview
+	overview *ttlCache[*overviewData]             // behind /v1/overview
+
 	// delivery serializes concurrent context deliveries sharing one
 	// delivery identity (see agent_handlers.go's deliveryMutex) so a
 	// repeated event produces exactly one non-empty response and one
@@ -80,8 +94,14 @@ func New(log *slog.Logger, d Deps) *Server {
 		keys: d.Keys, bus: d.Bus, db: d.DB, reg: d.Reg, region: d.Region, expander: d.Expander,
 		defaultBudget: d.DefaultBudget,
 		turnTokens:    d.TurnContextTokens, inject: d.Inject,
-		delivery: newDeliveryMutex(),
+		delivery:  newDeliveryMutex(),
+		aiEnabled: d.AIEnabled, messagingEnabled: d.MessagingEnabled, authzMode: d.AuthzMode,
+		clock: time.Now,
 	}
+	// The caches read s.clock lazily so a test can swap the clock after New.
+	now := func() time.Time { return s.clock() }
+	s.nsSums = newTTLCache[[]memory.NamespaceSummary](overviewTTL, now)
+	s.overview = newTTLCache[*overviewData](overviewTTL, now)
 	s.mux.Use(middleware.RequestID)
 	s.mux.Use(middleware.Recoverer)
 	s.mux.Get("/healthz", s.handleHealthz)
@@ -90,6 +110,7 @@ func New(log *slog.Logger, d Deps) *Server {
 		v1.Use(s.authMiddleware)
 		if s.mem != nil {
 			v1.Get("/namespaces", s.handleNamespaceIndex)
+			v1.Get("/overview", s.handleOverview)
 		}
 		if s.mem != nil || s.region != nil {
 			v1.Route("/namespaces/{ns}", func(r chi.Router) {
@@ -103,6 +124,7 @@ func New(log *slog.Logger, d Deps) *Server {
 					r.Get("/tasks", s.handleTaskBoard)
 					r.Post("/tasks/{id}/status", s.handleTaskStatus)
 					r.Get("/profile", s.handleProfile)
+					r.Get("/recent", s.handleRecent)
 					r.Get("/diagnose", s.handleDiagnose)
 				}
 				if s.region != nil {

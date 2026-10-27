@@ -7,7 +7,29 @@
 <link rel="stylesheet" href="/ui/console.css">
 </head>
 <body class="h-full min-h-screen bg-bg font-sans text-base text-ink antialiased">
-<div id="app" class="flex h-screen flex-col overflow-hidden">
+<section id="login" class="flex min-h-screen items-center justify-center px-4 py-10">
+  <form id="loginForm" class="w-full max-w-sm" autocomplete="off" novalidate>
+    <div class="mb-6 flex items-center gap-3">
+      <span class="inline-flex h-9 w-9 items-center justify-center rounded bg-brand text-sm font-semibold text-bg">PR</span>
+      <div>
+        <h1 class="text-lg font-semibold leading-tight">Punk Records</h1>
+        <p class="text-sm text-dim">Operator console</p>
+      </div>
+    </div>
+    <div class="panel flex flex-col gap-3 p-4">
+      <label for="loginKey" class="text-sm text-dim">API key</label>
+      <input id="loginKey" type="password" autocomplete="current-password" spellcheck="false" placeholder="prk_..." class="field w-full font-mono" aria-describedby="loginHint loginError">
+      <p id="loginError" class="hidden text-sm text-brand" role="alert"></p>
+      <button id="loginSubmit" type="submit" disabled class="cursor-pointer rounded bg-brand px-3 py-2 text-sm font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-60">Checking server…</button>
+      <div id="loginOpen" class="hidden flex-col gap-2 border-t border-line pt-3 text-sm text-dim">
+        <p>This server has no API keys yet, so it accepts requests without one. Anyone who can reach it has full access.</p>
+        <button id="loginContinue" type="button" class="btn self-start">Continue without a key</button>
+      </div>
+    </div>
+    <p id="loginHint" class="mt-3 text-xs text-dim">Create a key on the server with <code class="font-mono text-ink">punk apikey create -name &lt;you&gt;</code>. The key is kept in this browser only.</p>
+  </form>
+</section>
+<div id="app" class="hidden h-screen flex-col overflow-hidden">
   <header id="topbar" class="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-3 py-2 md:px-4">
     <button id="railToggle" type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-line text-dim hover:text-ink lg:hidden" aria-label="Toggle namespaces" aria-expanded="false" aria-controls="rail">
       <span aria-hidden="true">&#9776;</span>
@@ -20,7 +42,8 @@
       <span id="nsLabel" class="hidden truncate text-sm text-dim lg:inline">namespace: <b id="nsLabelName" class="font-mono font-normal text-ink">none</b></span>
       <select id="nsSelect" class="field w-full max-w-xs font-mono lg:hidden" aria-label="Namespace"></select>
     </div>
-    <input id="token" type="password" placeholder="API token" autocomplete="off" class="field w-32 shrink-0 font-mono text-xs sm:w-48">
+    <span id="pulse" class="hidden shrink-0 items-center gap-1.5 font-mono text-xs text-dim sm:inline-flex" title="last refresh"><span id="pulseDot" class="dot bg-dim"></span><span id="pulseText">connecting</span></span>
+    <button id="signOut" type="button" class="btn shrink-0">Sign out</button>
   </header>
 
   <div id="body" class="relative flex min-h-0 flex-1">
@@ -28,32 +51,32 @@
     <aside id="rail" class="fixed inset-y-0 left-0 z-30 flex w-72 -translate-x-full flex-col gap-3 overflow-y-auto border-r border-line bg-surface p-3 transition-transform duration-200 ease-out lg:static lg:z-auto lg:w-64 lg:translate-x-0 lg:border-r lg:transition-none">
       <input id="nsFilter" type="text" placeholder="filter namespaces" class="field w-full">
       <label class="flex items-center gap-2 text-sm text-dim">
-        <input id="nsTasksOnly" type="checkbox" checked class="accent-brand">
-        only with tasks
+        <input id="nsHideIdle" type="checkbox" checked class="accent-brand">
+        hide idle (no activity in 7 days)
       </label>
       <div id="nsList" class="flex flex-1 flex-col gap-0.5 overflow-y-auto"></div>
     </aside>
 
     <main id="main" class="flex min-w-0 flex-1 flex-col overflow-hidden">
       <nav id="tabs" class="hidden shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-surface px-2 md:flex">
-        <button data-view="board" class="tab-btn on">Board</button>
+        <button data-view="overview" class="tab-btn on">Overview</button>
+        <button data-view="board" class="tab-btn">Board</button>
+        <button data-view="memory" class="tab-btn">Memory</button>
         <button data-view="messages" class="tab-btn">Messages</button>
         <button data-view="agents" class="tab-btn">Agents</button>
-        <button data-view="approvals" class="tab-btn">Approvals</button>
-        <button data-view="tasks" class="tab-btn">Tasks</button>
-        <button data-view="costs" class="tab-btn">Costs</button>
+        <button data-view="runtime" class="tab-btn">Runtime <span id="runtimeBadge" class="ml-1 hidden rounded bg-wait px-1.5 font-mono text-xs text-bg"></span></button>
       </nav>
       <div id="view" class="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 md:p-4"></div>
     </main>
   </div>
 
   <nav id="bottombar" class="flex shrink-0 items-stretch border-t border-line bg-surface md:hidden">
-    <button data-view="board" class="bottom-btn on"><span class="bottom-icon" aria-hidden="true">&#9638;</span><span>Board</span></button>
+    <button data-view="overview" class="bottom-btn on"><span class="bottom-icon" aria-hidden="true">&#9673;</span><span>Overview</span></button>
+    <button data-view="board" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#9638;</span><span>Board</span></button>
+    <button data-view="memory" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#9776;</span><span>Memory</span></button>
     <button data-view="messages" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#9993;</span><span>Messages</span></button>
     <button data-view="agents" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#9679;</span><span>Agents</span></button>
-    <button data-view="approvals" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#10003;</span><span>Approvals</span></button>
-    <button data-view="tasks" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#8801;</span><span>Tasks</span></button>
-    <button data-view="costs" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">$</span><span>Costs</span></button>
+    <button data-view="runtime" class="bottom-btn"><span class="bottom-icon" aria-hidden="true">&#9881;</span><span>Runtime</span></button>
   </nav>
 </div>
 <script src="/ui/console.js"></script>

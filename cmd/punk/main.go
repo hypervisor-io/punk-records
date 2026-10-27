@@ -830,6 +830,9 @@ func cmdServe(args []string) error {
 		Expander:          expander,
 		TurnContextTokens: cfg.Memory.TurnContextTokens,
 		Inject:            cfg.Memory.Inject,
+		AIEnabled:         cfg.AI.Enabled,
+		MessagingEnabled:  cfg.Messaging.Enabled,
+		AuthzMode:         cfg.Authz.Enforcement,
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,
 			ToolCalls: cfg.Budgets.ToolCalls,

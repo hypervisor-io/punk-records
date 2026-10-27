@@ -83,6 +83,8 @@ var routePermissionInventory = map[string]string{
 	"GET /brain/vendor/{file}":                   classOpen,
 	"GET /.well-known/agent-card.json":           classOpen,
 	"GET /v1/namespaces":                         classAggregate,
+	"GET /v1/overview":                           classAggregate,
+	"GET /v1/namespaces/{ns}/recent":             classNSPath,
 	"POST /v1/namespaces/{ns}/memories":          classNSPath,
 	"GET /v1/namespaces/{ns}/memories":           classNSPath,
 	"DELETE /v1/namespaces/{ns}/memories":        classNSPath,
