@@ -29,6 +29,17 @@ that must be earned by the transport and the file it lands in.
   mailbox - and survives as role metadata instead. The register+bind half
   needs a write grant; the peer listing rides the read grant and degrades
   to `peers_note` without one.
+- **Auto-register (P4-B).** `send_message`, `read_messages`,
+  `await_messages` and `ack_messages` register the calling identity as a
+  **plain member** of the resolved namespace on its first call when it is
+  not one already, so a first contact makes the caller a discoverable peer
+  and its own sends pass the sender-membership check without a separate
+  register round trip. Identity is the tool's explicit `agent`/`sender`
+  argument, else the pinned `X-Punk-Agent`/`X-Punk-Subject` as membership
+  metadata only. It never writes an inbox binding (that stays `join`'s
+  explicit job), never mints an address, skips the anonymous `mcp`
+  fallback, leaves known members untouched, and is fail-open - sending
+  **to** a recipient still requires that recipient to be a member.
 - **MCP prompts and native command files (P2-A/B/C).** The five punk
   commands - `punk-join`, `punk-peers`, `punk-send`, `punk-inbox`,
   `punk-handoff` - ship as skills, as MCP prompts, and as each client's

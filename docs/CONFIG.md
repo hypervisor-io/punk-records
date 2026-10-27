@@ -200,7 +200,9 @@ inbox stream, which is never removed by the sweep. `DELETE
 /v1/namespaces/<ns>/members/<agent>` removes one member on demand and
 refuses (409) a listening one unless the caller passes `?force=1`. A
 session that comes back after expiry re-registers through its hook or
-bridge, so removal is always safe.
+bridge - or, on the caller side, on its first message-tool call
+([auto-register](agent-messaging.md#auto-register-p4-b)) - so removal is
+always safe.
 
 Client delivery is a separate opt-in. `punk connect <subprocess-client>
 --messaging` installs the inbox command. Pi/OpenCode/OpenClaw instead use
