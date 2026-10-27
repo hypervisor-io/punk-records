@@ -324,7 +324,7 @@ func New(d Deps) *mcp.Server {
 		s.AddReceivingMiddleware(newUnreadTrailer(d.Region.CountUnreadMessages, nsr).middleware())
 	}
 	registerWhoami(s, nsr)
-	// P2-B: the five punk command workflows as prompts; the text comes
+	// P2-B: the punk command workflows as prompts; the text comes
 	// from the shared hookcli source, identical for every toolset.
 	registerCommandPrompts(s)
 
@@ -518,6 +518,7 @@ func New(d Deps) *mcp.Server {
 	registerMemoryV2Tools(s, d, nsr)
 	registerSkillTools(s, d, nsr)
 	registerTaskTools(s, d, nsr)
+	registerConsolidateTool(s, d, nsr)
 
 	// Task S01 startup lifecycle: publish the spec snapshot's authored
 	// skills into the skill index namespace so search_skills sees what

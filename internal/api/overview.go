@@ -190,6 +190,10 @@ type overviewNamespace struct {
 	LastMessageAt string                 `json:"last_message_at,omitempty"`
 	LastSeenAt    string                 `json:"last_seen_at,omitempty"`
 	LastActivity  string                 `json:"last_activity,omitempty"`
+	// ConsolidatedAt is when /punk-consolidate last archived this
+	// namespace; Archive marks a namespace that is such an archive.
+	ConsolidatedAt string `json:"consolidated_at,omitempty"`
+	Archive        bool   `json:"archive,omitempty"`
 
 	lastActivity time.Time // sort key; the string above is its rendering
 }
@@ -242,6 +246,10 @@ func (s *Server) computeOverview(ctx context.Context) (*overviewData, error) {
 	if err != nil {
 		return nil, err
 	}
+	marks, err := s.mem.NamespaceMarks(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var act map[string]*region.NamespaceActivity
 	if s.region != nil {
 		if act, err = s.region.Activity(ctx, overviewRecentWindow); err != nil {
@@ -278,6 +286,9 @@ func (s *Server) computeOverview(ctx context.Context) (*overviewData, error) {
 			n.lastActivity = laterOf(n.lastActivity, a.LastMessageAt, a.LastSeenAt)
 		}
 		n.LastActivity = rfc3339(n.lastActivity)
+		if m, ok := marks[n.Name]; ok {
+			n.ConsolidatedAt, n.Archive = rfc3339(m.ConsolidatedAt), m.Archive
+		}
 	}
 	sort.SliceStable(d.namespaces, func(i, j int) bool {
 		a, b := d.namespaces[i], d.namespaces[j]

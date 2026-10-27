@@ -10,7 +10,7 @@ var agentToolset = []string{
 	"whoami", "recall", "search", "unified_search", "list_keys",
 	"remember", "remember_many", "remember_document", "feedback",
 	"claim_work", "release_work", "list_claims", "register", "join", "set_task_status",
-	"list_tasks", "await_tasks", "search_skills", "load_skill",
+	"list_tasks", "await_tasks", "search_skills", "load_skill", "consolidate",
 }
 
 // Only opt-in sessions pay the schema cost of messaging and lean discovery.

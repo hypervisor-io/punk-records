@@ -84,6 +84,7 @@ Usage:
   punk      login     store the server URL (and optional API key) in ~/.punk/credentials.json
   punk      logout    remove the stored credentials
   punk      consolidate  run a consolidation pass now, bypassing the dream triggers (--ns, empty = all)
+  punk      archive-restore  move a /punk-consolidate archive back into its namespace (-archive NAME)
   punk      card      manage the user's cross-project profile card (add "fact" | list | remove --key)
   punk      replay    re-run a completed task against its frozen snapshots (--task, --k, --mode)
   punk      topo      import a Backstage catalog (import --file catalog.yaml)
@@ -158,6 +159,8 @@ func run(args []string) error {
 		return cmdLogout(args[1:])
 	case "consolidate":
 		return cmdConsolidate(args[1:])
+	case "archive-restore":
+		return cmdArchiveRestore(args[1:])
 	case "card":
 		return cmdCard(args[1:])
 	case "replay":
@@ -2042,6 +2045,44 @@ func cmdCard(args []string) error {
 // force=true for one namespace (--ns) or every namespace. With
 // consolidate_days unset the horizon is 0: every superseded revision
 // folds, which is what a manual "consolidate now" means.
+// cmdArchiveRestore undoes a /punk-consolidate apply: every fact revision,
+// link and message in the archive moves back into the namespace its
+// /archive/source fact names. The summary and status facts stay in the
+// namespace (they are ordinary history now); the archive marker is
+// tombstoned so the archive no longer lists as one.
+func cmdArchiveRestore(args []string) error {
+	fs := flag.NewFlagSet("archive-restore", flag.ContinueOnError)
+	cfgPath := fs.String("config", "config.yaml", "path to config file")
+	archive := fs.String("archive", "", "archive namespace to restore, e.g. myproj-archive-20261028")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *archive == "" {
+		return fmt.Errorf("archive-restore: -archive is required")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.DB.Driver, cfg.DB.DSN)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	mem := memory.New(db, nil)
+	ns, moved, err := mem.RestoreArchive(ctx, *archive, "punk archive-restore")
+	if err != nil {
+		return err
+	}
+	msgs, err := region.New(db, nil).RestoreArchivedMessages(ctx, *archive, ns)
+	if err != nil {
+		return fmt.Errorf("archive-restore: %d fact revisions restored to %s, but restoring messages failed: %w", moved, ns, err)
+	}
+	fmt.Printf("restored %d fact revisions and %d messages from %s into %s\n", moved, msgs, *archive, ns)
+	return nil
+}
+
 func cmdConsolidate(args []string) error {
 	fs := flag.NewFlagSet("consolidate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to config file")

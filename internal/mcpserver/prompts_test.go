@@ -41,7 +41,7 @@ func TestCommandPromptsListed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prompts/list: %v", err)
 	}
-	want := []string{"join", "peers", "send", "inbox", "handoff"}
+	want := []string{"join", "peers", "send", "inbox", "handoff", "consolidate"}
 	var got []string
 	for _, p := range res.Prompts {
 		got = append(got, p.Name)
@@ -86,6 +86,10 @@ func TestCommandPromptsListed(t *testing.T) {
 	}
 	if !equalArgMap(required["handoff"], sendArgs) {
 		t.Errorf("handoff arguments = %v, want %v", required["handoff"], sendArgs)
+	}
+	// consolidate never runs on an inferred namespace.
+	if want := map[string]string{"namespace": "required"}; !equalArgMap(required["consolidate"], want) {
+		t.Errorf("consolidate arguments = %v, want %v", required["consolidate"], want)
 	}
 }
 
@@ -200,14 +204,14 @@ func TestCommandPromptMissingRequiredArgument(t *testing.T) {
 
 // TestCommandPromptsOnAgentToolset: prompts are Deps-independent and
 // registered before applyToolset, so the lean agent toolset serves the
-// same five.
+// same six.
 func TestCommandPromptsOnAgentToolset(t *testing.T) {
 	cs := sessionOpts(t, nil, func(d *Deps) { d.Toolset = "agent" })
 	res, err := cs.ListPrompts(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("prompts/list (agent toolset): %v", err)
 	}
-	if len(res.Prompts) != 5 {
-		t.Fatalf("agent toolset prompts = %d, want 5", len(res.Prompts))
+	if len(res.Prompts) != 6 {
+		t.Fatalf("agent toolset prompts = %d, want 6", len(res.Prompts))
 	}
 }

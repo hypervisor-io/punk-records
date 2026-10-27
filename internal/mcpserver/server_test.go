@@ -153,8 +153,8 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 35 {
-		t.Fatalf("tools = %d, want 35 with messaging disabled", len(tools.Tools))
+	if len(tools.Tools) != 36 {
+		t.Fatalf("tools = %d, want 36 with messaging disabled", len(tools.Tools))
 	}
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "submit_task", Arguments: map[string]any{
@@ -507,8 +507,8 @@ func TestReflectToolOnlyWiredWithLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 35 {
-		t.Fatalf("tools = %d, want 35 (reflect and messaging off)", len(tools.Tools))
+	if len(tools.Tools) != 36 {
+		t.Fatalf("tools = %d, want 36 (reflect and messaging off)", len(tools.Tools))
 	}
 
 	db, err := store.Open("sqlite", filepath.Join(t.TempDir(), "reflectmcp.db"))

@@ -15,12 +15,12 @@ import (
 // .clinerules/skills/ and .claude/skills/ also work but are not punk's to
 // choose). The frontmatter name must match the directory name, and any
 // enabled skill is invocable from chat as /<name> - exactly the
-// slash-command behavior the five punk commands need. Skills are the
+// slash-command behavior the punk commands need. Skills are the
 // right choice over workflows here: one file per command, no separate
 // workflow format to track, and the same SKILL.md wrapper every other
 // client gets.
 //
-// The five commands therefore install as ordinary Cline skills carrying
+// The commands therefore install as ordinary Cline skills carrying
 // the shared P2-A bodies: CommandSkillTargets renders them with the
 // same SKILL.md wrapper every other client gets, just rooted at Cline's
 // own skill tree. punk's hooks and MCP settings for Cline are wired by
@@ -38,7 +38,7 @@ func ClineSkillRoot(project bool, home string) string {
 	return filepath.Join(home, ".cline", "skills")
 }
 
-// ClineCommandSkillTargets lists the five punk commands as Cline skills:
+// ClineCommandSkillTargets lists the punk commands as Cline skills:
 // <skill root>/punk-<command>/SKILL.md, slash-invocable as
 // /punk-<command>.
 func ClineCommandSkillTargets(project bool, home string) ([]SkillTarget, error) {

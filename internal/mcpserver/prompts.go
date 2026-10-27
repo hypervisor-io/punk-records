@@ -10,7 +10,7 @@ import (
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
 )
 
-// P2-B: the five punk command workflows served as MCP prompts. The
+// P2-B: the punk command workflows served as MCP prompts. The
 // prompt text is the shared command body (hookcli.CommandBody) - the
 // same single source the installed skill files render from - so the
 // MCP surface cannot drift from them. The Description fields here are
@@ -63,6 +63,11 @@ var (
 		Description: "exact punk address of the peer to message or hand off to (find it with the peers prompt)",
 		Required:    true,
 	}
+	promptArgConsolidateNS = &mcp.PromptArgument{
+		Name:        "namespace",
+		Description: "punk namespace to consolidate; required, never inferred",
+		Required:    true,
+	}
 	promptArgText = &mcp.PromptArgument{
 		Name:        "text",
 		Description: "the message body or work description, handed over verbatim",
@@ -80,12 +85,14 @@ var commandPrompts = []commandPrompt{
 	{name: "inbox", command: hookcli.CommandInbox},
 	{name: "handoff", command: hookcli.CommandHandoff,
 		args: []*mcp.PromptArgument{promptArgNamespace, promptArgRecipient, promptArgText}},
+	{name: "consolidate", command: hookcli.CommandConsolidate,
+		args: []*mcp.PromptArgument{promptArgConsolidateNS}},
 }
 
-// registerCommandPrompts adds the five punk command prompts to the
+// registerCommandPrompts adds the punk command prompts to the
 // server (prompts/list, prompts/get). Labels and bodies both come from
 // hookcli's command table, and the bodies are client- and
-// Deps-independent, so every toolset serves the same five.
+// Deps-independent, so every toolset serves the same set.
 func registerCommandPrompts(s *mcp.Server) {
 	for _, cp := range commandPrompts {
 		s.AddPrompt(&mcp.Prompt{

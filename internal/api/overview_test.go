@@ -333,6 +333,34 @@ func TestTTLCacheSingleFlight(t *testing.T) {
 	}
 }
 
+// TestOverviewConsolidationMarks: a consolidated namespace reports
+// consolidated_at and its archive reports archive.
+func TestOverviewConsolidationMarks(t *testing.T) {
+	c := newClockedServer(t)
+	ctx := context.Background()
+	c.write(t, 0, "proj", "/decisions/x", "v")
+	c.write(t, 0, "plain", "/k", "v")
+	if _, err := c.mem.ArchiveNamespace(ctx, "proj", "proj-archive-20261028", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.mem.RecordConsolidation(ctx, "proj", memory.ConsolidationStatus{At: c.cur, By: "me", Archive: "proj-archive-20261028"}); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]overviewNamespace{}
+	for _, n := range getOverview(t, c.Server).Namespaces {
+		byName[n.Name] = n
+	}
+	if n := byName["proj"]; n.ConsolidatedAt == "" || n.Archive {
+		t.Fatalf("proj = %+v, want consolidated", n)
+	}
+	if n := byName["proj-archive-20261028"]; !n.Archive || n.ConsolidatedAt != "" {
+		t.Fatalf("archive = %+v, want archive", n)
+	}
+	if n := byName["plain"]; n.Archive || n.ConsolidatedAt != "" {
+		t.Fatalf("plain = %+v, want unmarked", n)
+	}
+}
+
 // TestTTLCacheStaleWhileRevalidate: past the TTL get returns the old
 // value without waiting, one background load replaces it, and a failed
 // refresh keeps the last good value.

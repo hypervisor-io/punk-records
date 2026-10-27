@@ -15,7 +15,7 @@ import (
 // (.agents/skills/<name>/SKILL.md workspace, ~/.gemini/config/skills/
 // <name>/SKILL.md global), which keep the same /<name> invocation and
 // take precedence over same-named workflows. punk therefore installs
-// the five punk commands as Antigravity SKILLS - already the behavior
+// the punk commands as Antigravity SKILLS - already the behavior
 // P2-A ships via CommandSkillTargets("antigravity", ...), walked by
 // punk connect - and deliberately writes no workflow files: they would
 // be dead on arrival. See TestAntigravityCommandSkillsCurrentNativeLocations

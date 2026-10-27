@@ -16,7 +16,7 @@ import (
 // description (shown in the TUI's command list) and the body is the
 // prompt template.
 //
-// punk renders the five command bodies from the shared P2-A source
+// punk renders the command bodies from the shared P2-A source
 // (CommandBody) with OpenCode's own tool prefix (punk_). The invocation
 // syntax is client-neutral (see commandRef): the bare name, the slash
 // form and the Codex dollar form all appear in every render, so a command
@@ -50,7 +50,7 @@ func OpenCodeCommandsDir(project bool, xdgConfigHome, home string) string {
 	return filepath.Join(base, "opencode", "commands")
 }
 
-// OpenCodeCommandTargets lists the five punk commands as OpenCode
+// OpenCodeCommandTargets lists the punk commands as OpenCode
 // command files: <commands dir>/punk-<command>.md, invoked as
 // /punk-<command>.
 func OpenCodeCommandTargets(project bool, home string, env func(string) string) ([]SkillTarget, error) {

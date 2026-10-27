@@ -86,6 +86,34 @@ that must be earned by the transport and the file it lands in.
   literal key as a static `Authorization` header (config.toml is mode
   0600), so a GUI launch authenticates without inheriting a shell
   environment.
+- **`/punk-consolidate <namespace>`.** A sixth command skill (and MCP
+  prompt `consolidate`) that folds a namespace into one summary. The
+  agent pages the namespace through the new `consolidate` tool
+  (`action: digest`, sections overview, tasks, facts by prefix and
+  messages, with message bodies flagged as untrusted), writes a
+  structured summary (purpose, timeline, decisions, work done, open
+  items, agents, incidents), shows it to the user, and only then calls
+  `action: apply` with `confirm` equal to the namespace. Apply stores the
+  summary at `/consolidated/summary` and moves every other fact revision,
+  its links and every read message, in one transaction, into
+  `<namespace>-archive-YYYYMMDD` (UTC date), where recall, search and
+  as-of reads still work. Open tasks, unread mail, claims, members and
+  any `keep_prefixes` stay live. `/consolidated/status` records the
+  outcome; the console shows a **consolidated** badge (with a hint when
+  the namespace was written to since), tags archives and hides them with
+  idle namespaces, and puts the summary at the top of the Memory tab.
+  `punk archive-restore -archive NAME` moves an archive back.
+- **Console pagination and faster loads.** The board pages on the server
+  (`limit`/`offset`, `total` in the reply) with an `open` filter as the
+  default; the overview table and namespace rail page in the browser;
+  the Memory feed loads more on demand. On a 2 GB store sign-in went
+  from 3.9 s to under 1 ms (new store-free `GET /v1/session` probe), the
+  warm overview from 4.1 s to 1 ms (stale-while-revalidate, warmed at
+  startup), and a 560-task board from 0.92 s to 0.03 s per page (the
+  board read seeks the `/tasks/` key range instead of a case-insensitive
+  `LIKE` scan). File-backed SQLite now runs long read-model scans on a
+  separate read-only pool, so they no longer stall hooks, MCP calls and
+  messaging behind the single read-write connection.
 
 ### Changed
 

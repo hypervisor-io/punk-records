@@ -212,6 +212,19 @@ const IDLE_DAYS = 7;
 function nsLastActivity(n) {
   return n.last_activity || n.last_write || '';
 }
+// consBadge is the consolidation pill for a namespace row: archive for a
+// /punk-consolidate archive, consolidated (with age) for a namespace that
+// was consolidated, and a "since" hint when it has been written to after
+// that (the status write itself is within a few seconds of the stamp).
+function consBadge(n) {
+  if (!n) return '';
+  if (n.archive) return '<span class="pill text-dim" title="archive written by /punk-consolidate">archive</span>';
+  if (!n.consolidated_at) return '';
+  const at = Date.parse(n.consolidated_at);
+  const since = Date.parse(n.last_write || '') - at > 60000;
+  return `<span class="pill text-live" title="consolidated ${esc(new Date(at).toLocaleString())}">consolidated ${esc(relAge(n.consolidated_at) || '')}${since ? ' · new writes since' : ''}</span>`;
+}
+
 function nsIsIdle(n) {
   const t = Date.parse(nsLastActivity(n));
   return !t || Date.now() - t > IDLE_DAYS * 86400000;
@@ -276,7 +289,7 @@ function renderNamespaces() {
   const q = $('#nsFilter').value.trim().toLowerCase();
   const hideIdle = $('#nsHideIdle').checked;
   const all = namespaces || [];
-  const list = all.filter(n => (!q || n.name.toLowerCase().includes(q)) && (!hideIdle || q || !nsIsIdle(n) || n.name === ns));
+  const list = all.filter(n => (!q || n.name.toLowerCase().includes(q)) && (!hideIdle || q || (!nsIsIdle(n) && !n.archive) || n.name === ns));
   const hidden = all.length - list.length;
   // Render one page of rows (plus the selected namespace wherever it
   // sorts), so a server with hundreds of namespaces stays a short list.
@@ -299,12 +312,12 @@ function renderNamespaces() {
         ].filter(Boolean).join(' · ');
         return `<button type="button" class="flex w-full cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-bg${n.name === ns ? ' bg-bg text-brand' : ' text-ink'}" data-ns="${esc(n.name)}">
           <span class="mt-1.5 shrink-0">${dot}</span>
-          <span class="min-w-0 flex-1"><span class="block break-all">${esc(n.name)}</span><span class="block font-mono text-xs text-dim">${meta || '&nbsp;'}</span></span>
+          <span class="min-w-0 flex-1"><span class="block break-all">${esc(n.name)}</span>${consBadge(n) ? '<span class="mt-0.5 block">' + consBadge(n) + '</span>' : ''}<span class="block font-mono text-xs text-dim">${meta || '&nbsp;'}</span></span>
         </button>`;
       }).join('')
     : '<div class="empty-state">no namespaces</div>') +
     (more > 0 ? `<button type="button" class="btn mx-2 my-2" data-rail-more>show ${Math.min(more, RAIL_PAGE)} more of ${more}</button>` : '') +
-    (hidden && !q ? `<div class="px-2 py-2 text-xs text-dim">${hidden} idle namespace${hidden === 1 ? '' : 's'} hidden</div>` : '');
+    (hidden && !q ? `<div class="px-2 py-2 text-xs text-dim">${hidden} idle or archived namespace${hidden === 1 ? '' : 's'} hidden</div>` : '');
 
   const sel = $('#nsSelect');
   sel.innerHTML = (namespaces || []).map(n => `<option value="${esc(n.name)}"${n.name === ns ? ' selected' : ''}>${esc(n.name)}</option>`).join('')
@@ -433,7 +446,7 @@ function renderOverview() {
     flag(rt.ai_enabled, 'model', 'on', 'off'),
   ].join('');
 
-  const nsActive = (overview.namespaces || []).filter(n => !nsIsIdle(n)).length;
+  const nsActive = (overview.namespaces || []).filter(n => !nsIsIdle(n) && !n.archive).length;
   $('#ovTiles').innerHTML = [
     statTile('Agents live', fmtNum(t.members_live), fmtNum(t.members_recent) + ' recent of ' + fmtNum(t.members), t.members_live ? 'text-live' : ''),
     statTile('Open tasks', fmtNum(t.tasks_open), fmtNum(t.tasks) + ' total', t.tasks_open ? 'text-ink' : 'text-dim'),
@@ -445,7 +458,7 @@ function renderOverview() {
 
   const q = ($('#ovFilter').value || '').trim().toLowerCase();
   const activeOnly = $('#ovActiveOnly').checked;
-  const rows = (overview.namespaces || []).filter(n => (!q || n.name.toLowerCase().includes(q)) && (!activeOnly || q || !nsIsIdle(n)));
+  const rows = (overview.namespaces || []).filter(n => (!q || n.name.toLowerCase().includes(q)) && (!activeOnly || q || (!nsIsIdle(n) && !n.archive)));
   $('#ovCount').textContent = rows.length + ' of ' + (overview.namespaces || []).length;
   ovRows = rows.length;
   if (pageOffset.overview >= rows.length) pageOffset.overview = 0;
@@ -461,7 +474,7 @@ function renderOverview() {
             ? `<span class="${live ? 'text-live' : recent ? 'text-ink' : 'text-dim'}">${live ? '<span class="dot live-dot mr-1.5 bg-live"></span>' + live + ' live' : recent ? recent + ' recent' : 'idle'}</span> <span class="text-dim">/ ${n.members}</span>`
             : '<span class="text-dim">none</span>';
           return `<tr class="cursor-pointer" data-open-ns="${esc(n.name)}">
-            <td data-label="Namespace"><button type="button" class="break-all text-left font-semibold text-ink hover:text-brand hover:underline" data-open-ns="${esc(n.name)}">${esc(n.name)}</button></td>
+            <td data-label="Namespace"><button type="button" class="break-all text-left font-semibold text-ink hover:text-brand hover:underline" data-open-ns="${esc(n.name)}">${esc(n.name)}</button>${consBadge(n) ? '<div class="mt-1">' + consBadge(n) + '</div>' : ''}</td>
             <td class="mono" data-label="Last activity">${esc(relAge(nsLastActivity(n)) || '-')}</td>
             <td data-label="Agents">${agents}</td>
             <td data-label="Tasks">${taskBar(n.task_counts, n.tasks || 0)}</td>
@@ -498,6 +511,7 @@ function nsHeader() {
   if (!n) return `<span class="font-semibold text-ink">${esc(ns)}</span>`;
   const bits = [
     `<span class="font-semibold text-ink">${esc(n.name)}</span>`,
+    consBadge(n),
     n.members_live ? `<span class="text-live"><span class="dot live-dot mr-1.5 bg-live"></span>${n.members_live} live</span>` : '',
     n.members ? `<span>${n.members_recent || 0} recent of ${n.members} agent${n.members === 1 ? '' : 's'}</span>` : '',
     n.unread ? `<span class="text-wait">${n.unread} unread</span>` : '',
@@ -516,6 +530,7 @@ function nsHeader() {
 function mountMemory(el) {
   el.innerHTML = `
     <div id="memHeader" class="mb-3"></div>
+    <div id="memSummary"></div>
     <form id="memSearchForm" class="mb-3 flex flex-wrap items-center gap-2">
       <input id="memQuery" type="search" placeholder="search this namespace" class="field w-full max-w-md">
       <button type="submit" class="btn">search</button>
@@ -530,6 +545,40 @@ function mountMemory(el) {
 }
 
 let memExpanded = new Set();
+
+// loadConsolidatedSummary shows a consolidated namespace's
+// /consolidated/summary above the feed, collapsed to its first lines
+// until expanded. The text is agent-written: rendered escaped, as data.
+let memSummaryOpen = false;
+async function loadConsolidatedSummary() {
+  const el = $('#memSummary');
+  if (!el) return;
+  const n = (namespaces || []).find(x => x.name === ns);
+  if (!n || !n.consolidated_at) { el.innerHTML = ''; return; }
+  const reqNS = ns;
+  try {
+    const d = await api('/v1/namespaces/' + encodeURIComponent(reqNS) + '/memories?limit=1&prefix=' + encodeURIComponent('/consolidated/summary'));
+    if (reqNS !== ns) return;
+    const facts = Array.isArray(d) ? d : (d.facts || []);
+    const f = facts.find(x => x.key === '/consolidated/summary');
+    if (!f) { el.innerHTML = ''; return; }
+    const body = String(f.body || '');
+    const long = body.split('\n').length > 12;
+    const shown = memSummaryOpen || !long ? body : body.split('\n').slice(0, 12).join('\n') + '\n…';
+    const archive = f.attributes && f.attributes.archive;
+    el.innerHTML = `<div class="panel mb-4">
+      <div class="mb-2 flex flex-wrap items-center gap-2 text-xs text-dim">
+        <span class="font-semibold text-ink">Consolidated summary</span>
+        <span>${esc(relAge(n.consolidated_at) || '')}</span>
+        ${archive ? `<span>history in <button type="button" class="font-mono text-ink hover:text-brand hover:underline" data-open-ns="${esc(archive)}">${esc(archive)}</button></span>` : ''}
+      </div>
+      <div class="whitespace-pre-wrap break-words text-sm text-ink">${esc(shown)}</div>
+      ${long ? `<button type="button" class="mt-2 text-xs text-dim hover:text-brand" data-mem-summary>${memSummaryOpen ? 'show less' : 'show all'}</button>` : ''}
+    </div>`;
+  } catch (e) {
+    el.innerHTML = '';
+  }
+}
 
 // The recent feed loads MEM_PAGE rows at a time; "load more" raises
 // memWanted and the 5s poll re-reads the same depth, a page per request
@@ -556,6 +605,7 @@ async function loadMemory() {
   if (!namespaces) { try { await loadNamespaces(); } catch (e) { /* header falls back to the name */ } }
   if (!ns) { $('#memHeader').innerHTML = ''; $('#memList').innerHTML = '<div class="empty-state">no namespace selected</div>'; return; }
   $('#memHeader').innerHTML = nsHeader();
+  await loadConsolidatedSummary();
   const q = $('#memQuery').value.trim();
   const sessions = $('#memSessions').checked;
   try {
@@ -593,6 +643,7 @@ async function loadMemory() {
 
 $('#view').addEventListener('click', e => {
   if (e.target.closest('[data-mem-more]')) { memWanted += MEM_PAGE; loadMemory(); return; }
+  if (e.target.closest('[data-mem-summary]')) { memSummaryOpen = !memSummaryOpen; loadConsolidatedSummary(); return; }
   const t = e.target.closest('[data-mem-toggle]');
   if (!t) return;
   const id = t.dataset.memToggle;
@@ -1778,7 +1829,7 @@ setInterval(pollCurrent, 5000);
 if (typeof module === 'object' && module && module.exports) {
   module.exports = {
     esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
-    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL,
+    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL, consBadge,
     pageOffset, PAGE_SIZE,
     getDiagUnsupported: () => diagUnsupported,
     setDiagUnsupported: v => { diagUnsupported = v; },

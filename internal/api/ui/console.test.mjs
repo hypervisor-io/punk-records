@@ -299,3 +299,14 @@ test('taskBar counts open tasks and escapes nothing remote', () => {
   assert.ok(html.includes('done 2'));
   assert.equal(c.taskBar({}, 0).includes('-'), true, 'no tasks renders a dash');
 });
+
+test('consBadge marks archives and consolidated namespaces, escaping nothing remote', () => {
+  assert.equal(c.consBadge({ name: 'plain' }), '');
+  assert.match(c.consBadge({ name: 'x-archive-20261028', archive: true }), />archive</);
+  const at = new Date(Date.now() - 3600000).toISOString();
+  const fresh = c.consBadge({ name: 'p', consolidated_at: at, last_write: at });
+  assert.match(fresh, /consolidated/);
+  assert.doesNotMatch(fresh, /new writes since/);
+  const later = new Date(Date.now() - 60000).toISOString();
+  assert.match(c.consBadge({ name: 'p', consolidated_at: at, last_write: later }), /new writes since/);
+});

@@ -151,11 +151,12 @@ func TestCommandFrontmatterValid(t *testing.T) {
 // documents.
 func TestCommandBodiesCallMCPTools(t *testing.T) {
 	tools := map[string][]string{
-		CommandJoin:    {"join"},
-		CommandPeers:   {"list_region_members", "send_message"},
-		CommandSend:    {"send_message"},
-		CommandInbox:   {"read_messages", "ack_messages", "await_messages"},
-		CommandHandoff: {"remember", "send_message", "claim_work", "set_task_status", "release_work"},
+		CommandJoin:        {"join"},
+		CommandPeers:       {"list_region_members", "send_message"},
+		CommandSend:        {"send_message"},
+		CommandInbox:       {"read_messages", "ack_messages", "await_messages"},
+		CommandHandoff:     {"remember", "send_message", "claim_work", "set_task_status", "release_work"},
+		CommandConsolidate: {"consolidate"},
 	}
 	for _, agent := range []string{"claude-code", "codex", "opencode", "cursor", "copilot", "antigravity", "hermes", "openclaw"} {
 		opts := SkillOpts{Agent: agent}

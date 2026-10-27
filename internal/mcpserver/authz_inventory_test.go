@@ -94,6 +94,7 @@ var toolPermissionInventory = map[string]authz.Op{
 	"claim_work":        authz.OpWrite,
 	"release_work":      authz.OpWrite,
 	"register":          authz.OpWrite,
+	"consolidate":       authz.OpWrite, // apply moves facts (write); digest is read-gated in consolidate.go
 	"join":              authz.OpWrite, // register+bind gate; the peer listing additionally rides the read grant (join.go)
 	"send_message":      authz.OpWrite,
 	"ack_messages":      authz.OpWrite,
