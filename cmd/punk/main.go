@@ -820,12 +820,13 @@ func cmdServe(args []string) error {
 	agentDeps.Toolset = "agent"
 	agentSrv := mcpserver.New(agentDeps)
 
+	keys := newKeys(cfg, db, log)
 	srv := api.New(log, api.Deps{
 		Memory:            mem,
 		Ledger:            ledger,
 		Router:            router,
 		Proposals:         props,
-		Keys:              newKeys(cfg, db, log),
+		Keys:              keys,
 		Bus:               eventBus,
 		DB:                db,
 		Reg:               reg,
@@ -858,6 +859,17 @@ func cmdServe(args []string) error {
 		Addr:              cfg.HTTP.Addr,
 		Handler:           srv.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// P3-F: an open HTTP boundary gets one loud warning before the
+	// listener starts. A non-loopback bind with zero API keys means
+	// bootstrap pass-through for anyone who can reach the host.
+	// Warning only - never a refusal, and authz stays exactly as
+	// configured (off unless the user enables enforcement).
+	if n, err := keys.ActiveCount(context.Background()); err != nil {
+		log.Warn("open-bind warning skipped: api key count failed", "err", err)
+	} else {
+		warnOpenBind(log, cfg.HTTP.Addr, n)
 	}
 
 	errCh := make(chan error, 1)
