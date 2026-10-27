@@ -4221,6 +4221,16 @@ func cmdConnectCopilot(args []string) error {
 // {"context": "..."} reply on stdout that Hermes appends to the user
 // message - so, like claude-code/antigravity/copilot and unlike cursor,
 // context injection is native here with no rules-file workaround.
+//
+// Shell hooks are not the whole story. Hermes registers them only at CLI and
+// gateway startup; the Desktop "hermes serve" backend never does (P4-D spike,
+// verified against hermes-agent's source). Plugin hooks, by contrast, are
+// discovered in every mode, so this command also writes a Hermes plugin
+// (hookcli.WriteHermesPlugin) and enables it in plugins.enabled
+// (hookcli.ConnectHermesPluginEnable). The plugin shells out to the same punk
+// binary with the same argv the shell hooks use and stands down per event
+// wherever a punk shell hook is registered, so a CLI/Gateway turn neither
+// injects nor captures twice while the Desktop backend is covered.
 func cmdConnectHermes(args []string) error {
 	fs := flag.NewFlagSet("connect hermes", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Hermes config.yaml to merge into (default ~/.hermes/config.yaml)")
@@ -4253,6 +4263,44 @@ func cmdConnectHermes(args []string) error {
 
 	_, statErr := os.Stat(path)
 	existedBefore := statErr == nil
+
+	// The shell hooks below cover the Hermes CLI and Gateway only: Hermes
+	// registers them at CLI startup (hermes_cli/main.py) and gateway startup
+	// (gateway/run.py), and the Desktop "hermes serve" backend never does
+	// (P4-D spike, verified against hermes-agent's source). Plugin hooks, by
+	// contrast, are discovered in every mode - discover_plugins() runs as a
+	// module side effect of model_tools.py and again in tui_gateway/server.py
+	// - so punk also installs a Hermes plugin (see hookcli.WriteHermesPlugin)
+	// and enables it in plugins.enabled (ConnectHermesPluginEnable). The
+	// plugin shells out to the same punk binary with the same argv the shell
+	// hooks use, and stands down per event wherever a punk shell hook is
+	// registered, so a CLI turn never injects or captures twice.
+	//
+	// The plugin is written first because it is the one step that can REFUSE
+	// (a hand-authored file at punk's plugin path): doing it before the
+	// config.yaml merge means a refusal aborts without having mutated the
+	// user's config. The plugin directory is derived from the config file's
+	// own directory so --config keeps the whole install under one root; for a
+	// HERMES_HOME-scoped install pass --config "$HERMES_HOME/config.yaml".
+	pluginDir := filepath.Join(filepath.Dir(path), "plugins", hookcli.HermesPluginID)
+	pluginChanged, pluginErr := hookcli.WriteHermesPlugin(pluginDir, serverURL, punkPath, *messaging)
+	if pluginErr != nil {
+		return fmt.Errorf("connect hermes plugin: %w", pluginErr)
+	}
+	if pluginChanged {
+		fmt.Printf("punk: wrote the Hermes plugin to %s\n", pluginDir)
+	} else {
+		fmt.Printf("punk: %s already has punk's Hermes plugin up to date\n", pluginDir)
+	}
+	pluginEnabled, enableErr := hookcli.ConnectHermesPluginEnable(path)
+	if enableErr != nil {
+		return fmt.Errorf("connect hermes plugin enable: %w", enableErr)
+	}
+	if pluginEnabled {
+		fmt.Printf("punk: enabled plugin %q in plugins.enabled of %s\n", hookcli.HermesPluginID, path)
+	} else {
+		fmt.Printf("punk: %s already enables punk's plugin\n", path)
+	}
 
 	var changed bool
 	if *messaging {
@@ -4288,11 +4336,8 @@ func cmdConnectHermes(args []string) error {
 	} else {
 		fmt.Printf("punk: pre-approved punk's hook entries in %s (%s)\n", allowlistPath, changedWord(allowlistChanged))
 	}
-	// Verified against hermes-agent's source (P4-D spike): shell hooks run
-	// in the Hermes CLI and Gateway only - the Desktop backend never
-	// registers them, and the output must never promise otherwise.
-	fmt.Println("punk: note - shell hooks run in Hermes CLI and Gateway sessions only; the Hermes Desktop backend does not register them")
-	fmt.Println("punk: note - restart Hermes (hooks are registered at CLI and gateway startup) to pick up these entries")
+	fmt.Println("punk: note - shell hooks run in Hermes CLI and Gateway sessions only; the plugin above covers the Hermes Desktop backend, which never registers them")
+	fmt.Println("punk: note - restart Hermes (hooks and plugins are registered at startup) to pick these up")
 	if !*noMCP {
 		mcpChanged, err := hookcli.ConnectHermesMCP(path,
 			hookcli.MCPEntryOpts{ServerURL: serverURL, APIKey: apiKey, APIKeyEnv: *apiKeyEnv, Agent: *agentName}, *force)
