@@ -342,20 +342,6 @@ func (s *Server) handleReleaseMessages(w http.ResponseWriter, r *http.Request) {
 // credential and grant, and reconciles against durable storage on a bounded timer
 // because the bus is lossy.
 func (s *Server) handleMessageEvents(w http.ResponseWriter, r *http.Request) {
-	// Concurrent stream cap: one subject+IP may hold at most
-	// limits.StreamLimit inbox streams at once. Acquired before any work
-	// (and before the SSE headers are written, so an over-cap caller gets
-	// a plain 429 JSON response rather than a half-open stream) and
-	// released by the deferred call the moment this handler returns -
-	// which is exactly when the client disconnects (r.Context().Done()
-	// below) or a mid-stream revocation ends the loop. No slot can leak.
-	stream := streamKey(r)
-	if !s.streams.acquire(stream) {
-		writeRateLimited(w, "too many concurrent streams")
-		return
-	}
-	defer s.streams.release(stream)
-
 	agent, opts, err := messageReadOptions(r)
 	if err != nil {
 		writeMessageErr(w, err)
@@ -365,6 +351,23 @@ func (s *Server) handleMessageEvents(w http.ResponseWriter, r *http.Request) {
 		writeMessageErr(w, fmt.Errorf("%w: events only supports an unleased inbox", region.ErrMessageInvalid))
 		return
 	}
+	ns := chi.URLParam(r, "ns")
+	// Concurrent stream caps (P3-A rework): the per-inbox cap
+	// (subject+namespace+agent, limits.StreamLimit, default 4) plus the
+	// per-IP backstop (limits.StreamIPLimit, default 256). Acquired
+	// before any work - and before the SSE headers are written, so an
+	// over-cap caller gets a plain 429 JSON response rather than a
+	// half-open stream - and released by the deferred call the moment
+	// this handler returns: on client disconnect
+	// (r.Context().Done() below) or a mid-stream revocation. No slot
+	// can leak.
+	slots, ok := s.acquireStream(r, ns, agent)
+	if !ok {
+		writeRateLimited(w, "too many concurrent streams")
+		return
+	}
+	defer s.releaseStream(slots)
+
 	if s.bus == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not wired"})
 		return
@@ -374,7 +377,6 @@ func (s *Server) handleMessageEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 		return
 	}
-	ns := chi.URLParam(r, "ns")
 	events, cancel := s.bus.Subscribe()
 	defer cancel()
 	// An open stream is the liveness signal member discovery reports as

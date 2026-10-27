@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/hypervisor-io/punk-records/internal/api"
 	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
 	"github.com/hypervisor-io/punk-records/internal/region"
@@ -88,14 +89,17 @@ func untrustedEnvelope(ns, agent string, msgs []region.Message, sentBox bool) st
 	return hookcli.RenderUntrustedEnvelope(ns, agent, inboxMessagesFor(msgs))
 }
 
-// defaultAwaitLimit is the generous default for concurrent await_messages
-// calls per caller (Deps.AwaitLimit <= 0). More than any single agent
-// session opens; few enough that one client cannot park the server.
-const defaultAwaitLimit = 8
+// defaultAwaitLimit is the default for concurrent await_messages calls per
+// INBOX (Deps.AwaitLimit <= 0) - the same per-inbox semantics and
+// default as the HTTP streams' StreamLimit (api/limits.go): enough for
+// reconnect overlap, few enough that one inbox cannot park the server.
+const defaultAwaitLimit = 4
 
-// awaitLimiter caps concurrent await_messages calls per caller key. Unlike
-// the HTTP streams (api/limits.go) there is no peer IP at the tool layer,
-// so the key is the resolved subject alone.
+// awaitLimiter caps concurrent await_messages calls per inbox key. The
+// key is api.InboxStreamKey(subject, namespace, agent) - the same
+// per-inbox key the HTTP stream caps use (mcpserver imports api; api
+// never imports mcpserver, so there is no cycle). There is no peer IP at
+// the tool layer, so the per-IP backstop does not apply here.
 type awaitLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -134,12 +138,13 @@ func (l *awaitLimiter) release(key string) {
 // messages; namespace grants, not caller-supplied agent names, authorize access.
 func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 	// await_messages blocks, holding a goroutine and a bus subscription.
-	// Cap concurrent awaits per caller so one client cannot park an
-	// unbounded number of them. The tool handler has no peer IP (the MCP
-	// SDK does not surface the transport address), so the cap keys on the
-	// resolved subject - the same identity the messaging tools already
-	// authorize on. Slots are released by defer, so a cancelled or timed
-	// out wait frees its slot immediately.
+	// Cap concurrent awaits per inbox (P3-A rework: subject+namespace+
+	// agent, the same key the HTTP streams use - see api.InboxStreamKey)
+	// so distinct agent inboxes never share a pool. The tool handler has
+	// no peer IP (the MCP SDK does not surface the transport address),
+	// so only the per-inbox cap applies here - the per-IP backstop lives
+	// in the HTTP layer. Slots are released by defer, so a cancelled or
+	// timed out wait frees its slot immediately.
 	awaits := newAwaitLimiter(d.AwaitLimit)
 
 	mcp.AddTool(s, &mcp.Tool{Name: "send_message", OutputSchema: openOutputSchema[region.Message](),
@@ -244,10 +249,12 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
-			// Concurrent-await cap: refuse rather than block when this
-			// caller already holds the limit's worth of waits. Released by
-			// defer the moment WaitMessages returns or ctx is cancelled.
-			awaitKey := nsr.identity(req)
+			// Concurrent-await cap (P3-A rework): refuse rather than
+			// block when this inbox already holds the limit's worth of
+			// waits. The key is the per-inbox subject+namespace+agent -
+			// the same key the HTTP streams use - released by defer the
+			// moment WaitMessages returns or ctx is cancelled.
+			awaitKey := api.InboxStreamKey(nsr.identity(req), ns, in.Agent)
 			if !awaits.acquire(awaitKey) {
 				return nil, messagesOut{}, fmt.Errorf("too many concurrent await_messages for %q; retry after an outstanding wait completes", awaitKey)
 			}

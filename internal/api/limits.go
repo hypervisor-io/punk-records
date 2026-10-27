@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -33,10 +34,27 @@ type Limits struct {
 	// defaultRateLimitRPS / defaultRateLimitBurst.
 	RateLimitRPS   float64
 	RateLimitBurst int
-	// StreamLimit caps concurrent message streams (SSE) and awaits
-	// (MCP await_messages) held by one subject+IP. Default
-	// defaultStreamLimit.
+	// StreamLimit caps concurrent message streams (SSE) and awaits (MCP
+	// await_messages) one INBOX may hold. An inbox is the verified
+	// subject plus namespace plus agent address (InboxStreamKey), so
+	// distinct agent addresses never share a pool - the P3-A rework:
+	// the earlier subject+IP key gave every local agent (zero-key
+	// bootstrap: empty subject, 127.0.0.1) and every agent behind one
+	// central proxy (shared proxy IP) a single shared pool. Default
+	// defaultStreamLimit - enough for reconnect overlap, few enough that
+	// one address cannot park the server.
 	StreamLimit int
+	// StreamIPLimit is the separate per-IP backstop on the same
+	// long-lived operations: one peer address may hold at most this many
+	// streams/awaits across ALL inboxes. Much higher than StreamLimit on
+	// purpose - it exists to stop a runaway or hostile host, not to shape
+	// normal coordination traffic. Default defaultStreamIPLimit.
+	StreamIPLimit int
+	// TrustedProxies lists CIDRs whose peers may speak for the real
+	// client with X-Forwarded-For (used for the per-IP backstop key
+	// only, via Server.effectiveClientIP). Empty - the default - means
+	// X-Forwarded-For is never trusted.
+	TrustedProxies []string
 }
 
 // The defaults are deliberately generous: they exist to stop a runaway or
@@ -54,10 +72,16 @@ const (
 	// never sees a 429.
 	defaultRateLimitRPS   = 50
 	defaultRateLimitBurst = 100
-	// defaultStreamLimit is 8 concurrent streams/awaits per subject+IP -
-	// more than a single agent session ever needs, few enough that one
-	// client cannot hold the bus or the server's goroutines hostage.
-	defaultStreamLimit = 8
+	// defaultStreamLimit is 4 concurrent streams/awaits per INBOX
+	// (subject+namespace+agent address): enough that a reconnect can
+	// overlap its own previous stream during a restart, few enough that
+	// one address cannot hold the bus or the server's goroutines hostage.
+	defaultStreamLimit = 4
+	// defaultStreamIPLimit is the per-IP backstop: one peer address may
+	// hold this many streams/awaits across all inboxes. Deliberately
+	// much higher than the per-inbox cap - it stops runaway hosts, not
+	// coordination traffic (many agents legitimately share one proxy IP).
+	defaultStreamIPLimit = 256
 )
 
 // withDefaults fills every unset field with its generous default.
@@ -73,6 +97,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.StreamLimit <= 0 {
 		l.StreamLimit = defaultStreamLimit
+	}
+	if l.StreamIPLimit <= 0 {
+		l.StreamIPLimit = defaultStreamIPLimit
 	}
 	return l
 }
@@ -170,13 +197,115 @@ func (c *concurrencyLimiter) inUse(key string) int {
 	return c.active[key]
 }
 
-// streamKey identifies a stream/await holder: the verified subject plus the
-// peer IP. Subject alone would let one credential open the cap's worth of
-// streams from many hosts; IP alone would let one host starve every subject
-// behind it. An unauthenticated caller (the zero-key bootstrap, unit tests)
-// has an empty subject, so the key degrades to IP-only.
-func streamKey(r *http.Request) string {
-	return verifiedSubject(r) + "\x00" + clientIP(r.RemoteAddr)
+// InboxStreamKey identifies one inbox: the verified subject, the
+// namespace, and the agent address the stream or await reads (the SSE
+// ?agent= parameter, the await_messages agent argument). Keying per
+// inbox - not per caller - is the P3-A rework: subject+IP gave the
+// zero-key bootstrap (empty subject, 127.0.0.1) and every agent behind
+// one central proxy one shared pool. The namespace-wide stream has no
+// agent, so its key degrades to subject+namespace. mcpserver's await
+// cap reuses this same key (it imports api; api never imports
+// mcpserver, so there is no cycle).
+func InboxStreamKey(subject, namespace, agent string) string {
+	return subject + "\x00" + namespace + "\x00" + agent
+}
+
+// streamSlots is one stream's reservation across both caps: the
+// per-inbox slot and the per-IP backstop slot. The zero value releases
+// nothing, so a refused acquire is safe to defer.
+type streamSlots struct {
+	inboxKey, ipKey string
+}
+
+// acquireStream reserves one stream under BOTH caps: the per-inbox cap
+// (subject+namespace+agent) trips first - the meaningful coordination
+// signal - and the per-IP backstop second, releasing the inbox slot if
+// the backstop refuses. ok=false means nothing is held.
+func (s *Server) acquireStream(r *http.Request, namespace, agent string) (streamSlots, bool) {
+	sl := streamSlots{
+		inboxKey: InboxStreamKey(verifiedSubject(r), namespace, agent),
+		ipKey:    s.effectiveClientIP(r),
+	}
+	if !s.streams.acquire(sl.inboxKey) {
+		return streamSlots{}, false
+	}
+	if !s.ipStreams.acquire(sl.ipKey) {
+		s.streams.release(sl.inboxKey)
+		return streamSlots{}, false
+	}
+	return sl, true
+}
+
+// releaseStream frees both of a stream's slots; a no-op on the zero
+// value, so it pairs safely with a refused acquire.
+func (s *Server) releaseStream(sl streamSlots) {
+	if sl.ipKey != "" {
+		s.ipStreams.release(sl.ipKey)
+	}
+	if sl.inboxKey != "" {
+		s.streams.release(sl.inboxKey)
+	}
+}
+
+// parseTrustedProxies resolves the configured CIDR strings once at
+// server construction. Invalid entries were rejected by config
+// validation, so a parse failure here is skipped defensively rather
+// than fatal.
+func parseTrustedProxies(cidrs []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// effectiveClientIP returns the address the per-IP backstop keys on.
+// It is the peer IP unless the peer is a configured trusted proxy; then
+// the client IP comes from X-Forwarded-For using the rightmost-
+// untrusted convention (the standard real-ip rule: scanning the list
+// from the right, the first entry that is not itself a trusted proxy is
+// the originating client - with a single trusted hop, the rightmost
+// entry is the proxy and the one before it the client). Malformed
+// entries are skipped; an absent, empty, all-trusted or all-malformed
+// chain falls back to the peer IP. X-Forwarded-For NEVER affects the
+// per-inbox key or the token-bucket rate limiter.
+func (s *Server) effectiveClientIP(r *http.Request) string {
+	peer := clientIP(r.RemoteAddr)
+	peerIP := net.ParseIP(peer)
+	if peerIP == nil {
+		return peer
+	}
+	trusted := false
+	for _, n := range s.trustedProxies {
+		if n.Contains(peerIP) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return peer
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		ip := net.ParseIP(candidate)
+		if ip == nil {
+			continue // malformed entry: skip, keep scanning leftward
+		}
+		isTrusted := false
+		for _, n := range s.trustedProxies {
+			if n.Contains(ip) {
+				isTrusted = true
+				break
+			}
+		}
+		if !isTrusted {
+			return candidate
+		}
+	}
+	return peer
 }
 
 // clientIP strips the port from a RemoteAddr, tolerating a bare host (some

@@ -59,13 +59,16 @@ func TestRequestLimitDefaults(t *testing.T) {
 	if got.StreamLimit != defaultStreamLimit {
 		t.Fatalf("StreamLimit default = %d, want %d", got.StreamLimit, defaultStreamLimit)
 	}
+	if got.StreamIPLimit != defaultStreamIPLimit {
+		t.Fatalf("StreamIPLimit default = %d, want %d", got.StreamIPLimit, defaultStreamIPLimit)
+	}
 	if got.MaxBodyBytes <= maxAgentHookBody {
 		t.Fatalf("body default %d must exceed maxAgentHookBody %d, or the hook endpoint's 400 becomes a middleware 413",
 			got.MaxBodyBytes, maxAgentHookBody)
 	}
 	// A partially-set struct keeps its explicit values.
-	partial := Limits{MaxBodyBytes: 4096, StreamLimit: 3}.withDefaults()
-	if partial.MaxBodyBytes != 4096 || partial.StreamLimit != 3 {
+	partial := Limits{MaxBodyBytes: 4096, StreamLimit: 3, StreamIPLimit: 17}.withDefaults()
+	if partial.MaxBodyBytes != 4096 || partial.StreamLimit != 3 || partial.StreamIPLimit != 17 {
 		t.Fatalf("explicit values were overwritten: %+v", partial)
 	}
 	if partial.RateLimitRPS != defaultRateLimitRPS {
@@ -213,8 +216,11 @@ func TestStreamCapReleasesOnDisconnect(t *testing.T) {
 	}
 }
 
-// TestStreamCapCoversNamespaceStream proves the operator stream shares the
-// same per-subject+IP cap as the inbox stream.
+// TestStreamCapCoversNamespaceStream proves the operator (namespace-
+// wide) stream is its own inbox under the P3-A rework keying - subject+
+// namespace, no agent - so at a per-inbox cap of 1 it coexists with an
+// agent inbox stream (a different key), while a second namespace stream
+// for the same inbox is refused with 429.
 func TestStreamCapCoversNamespaceStream(t *testing.T) {
 	s, _ := limitsServer(t, Limits{StreamLimit: 1})
 
@@ -222,18 +228,26 @@ func TestStreamCapCoversNamespaceStream(t *testing.T) {
 	if _, ok := h.nextFrame(2 * time.Second); !ok {
 		t.Fatal("inbox stream never opened")
 	}
+	// Distinct inbox (no agent component): the namespace stream is
+	// admitted alongside the agent stream rather than sharing its cap.
+	h2 := openMessagingStream(t, s, "/v1/namespaces/ns/messages/stream", "")
+	if _, ok := h2.nextFrame(2 * time.Second); !ok {
+		t.Fatal("namespace stream never opened beside an agent stream; per-inbox keys must not collide")
+	}
+
 	rec := do(t, s, http.MethodGet, "/v1/namespaces/ns/messages/stream", "")
 	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("namespace stream over the shared cap = %d, want 429: %s", rec.Code, rec.Body)
+		t.Fatalf("second namespace stream over the per-inbox cap = %d, want 429: %s", rec.Code, rec.Body)
 	}
 
 	h.cancel()
 	<-h.done
-	// After release the namespace stream is admitted (it streams, so run it
-	// through the same pipe helper and expect its ready frame).
-	h2 := openMessagingStream(t, s, "/v1/namespaces/ns/messages/stream", "")
-	if _, ok := h2.nextFrame(2 * time.Second); !ok {
-		t.Fatal("namespace stream never opened after the slot was released")
+	h2.cancel()
+	<-h2.done
+	// After both released, a fresh namespace stream is admitted again.
+	h3 := openMessagingStream(t, s, "/v1/namespaces/ns/messages/stream", "")
+	if _, ok := h3.nextFrame(2 * time.Second); !ok {
+		t.Fatal("namespace stream never opened after the slots were released")
 	}
 }
 

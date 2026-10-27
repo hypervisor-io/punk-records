@@ -100,3 +100,38 @@ func TestAwaitMessagesConcurrencyCap(t *testing.T) {
 		t.Fatalf("await after the cap drained was refused: %q", out)
 	}
 }
+
+// TestAwaitCapKeyedPerInbox pins the P3-A rework at the MCP tool: the
+// concurrent-await cap is keyed per INBOX (subject+namespace+agent, the
+// same key the HTTP streams use - see api.InboxStreamKey), so with a cap
+// of 1 two concurrent waits from one caller for DIFFERENT inboxes are
+// both admitted. The same-inbox refusal side is pinned by
+// TestAwaitMessagesConcurrencyCap above.
+func TestAwaitCapKeyedPerInbox(t *testing.T) {
+	cs := messagingSession(t, func(d *Deps) {
+		d.Bus = bus.New()
+		d.AwaitLimit = 1
+	})
+	registerMessageMembers(t, cs, "ns", "one", "two")
+
+	type callResult struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	results := make(chan callResult, 2)
+	for _, agent := range []string{"one", "two"} {
+		go func(agent string) {
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "await_messages",
+				Arguments: map[string]any{"namespace": "ns", "agent": agent, "timeout_seconds": 1},
+			})
+			results <- callResult{res: res, err: err}
+		}(agent)
+	}
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil || (r.res != nil && r.res.IsError) {
+			t.Fatalf("concurrent awaits for distinct inboxes must both be admitted (cap keyed per inbox): err=%v res=%v", r.err, r.res)
+		}
+	}
+}

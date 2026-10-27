@@ -3,6 +3,7 @@ package api
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -93,6 +94,10 @@ type Server struct {
 	limits      Limits
 	sendLimiter *ipLimiter
 	streams     *concurrencyLimiter
+	ipStreams   *concurrencyLimiter
+	// trustedProxies are the parsed http.trusted_proxies CIDRs; nil
+	// (the default) means X-Forwarded-For is never trusted.
+	trustedProxies []*net.IPNet
 
 	// Ready reports readiness (DB reachable, registry loaded). Nil means
 	// "ready" so the skeleton stays honest before P1 wires the store.
@@ -111,10 +116,13 @@ func New(log *slog.Logger, d Deps) *Server {
 		clock: time.Now,
 	}
 	// Request limits: resolve defaults once, then build the shared
-	// per-IP send bucket and the concurrent stream/await cap.
+	// per-IP send bucket, the per-inbox stream cap and the per-IP
+	// stream backstop, and the trusted-proxy CIDRs behind XFF handling.
 	s.limits = d.Limits.withDefaults()
 	s.sendLimiter = newSendLimiter(s.limits)
 	s.streams = newConcurrencyLimiter(s.limits.StreamLimit)
+	s.ipStreams = newConcurrencyLimiter(s.limits.StreamIPLimit)
+	s.trustedProxies = parseTrustedProxies(d.Limits.TrustedProxies)
 	// The caches read s.clock lazily so a test can swap the clock after New.
 	now := func() time.Time { return s.clock() }
 	s.nsSums = newTTLCache[[]memory.NamespaceSummary](overviewTTL, now)

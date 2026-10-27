@@ -843,6 +843,8 @@ func cmdServe(args []string) error {
 			RateLimitRPS:   float64(cfg.HTTP.RateLimitRPS),
 			RateLimitBurst: cfg.HTTP.RateLimitBurst,
 			StreamLimit:    cfg.Messaging.StreamLimit,
+			StreamIPLimit:  cfg.Messaging.StreamIPLimit,
+			TrustedProxies: cfg.HTTP.TrustedProxies,
 		},
 		DefaultBudget: task.Budget{
 			Tokens:    cfg.Budgets.Tokens,

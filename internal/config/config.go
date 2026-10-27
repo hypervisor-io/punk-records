@@ -5,8 +5,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/goccy/go-yaml"
 )
@@ -35,7 +37,8 @@ type Messaging struct {
 	MaxUnreadPerRecipient int              `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
 	RetentionDays         int              `yaml:"retention_days"`           // ACK age; 0 disables deletion
 	MemberExpiryDays      int              `yaml:"member_expiry_days"`       // last_seen_at age; 0 disables; listening members never expire
-	StreamLimit           int              `yaml:"stream_limit"`             // >0; concurrent message streams (SSE) and await_messages waits per subject+IP
+	StreamLimit           int              `yaml:"stream_limit"`             // >0; concurrent message streams (SSE) + await_messages waits per INBOX (subject+namespace+agent); default 4
+	StreamIPLimit         int              `yaml:"stream_ip_limit"`          // >0; per-IP backstop across all inboxes; default 256, deliberately much higher than stream_limit
 	ContentFilter         ContentFilterCfg `yaml:"content_filter"`           // dangerous-intent blocking at send time
 }
 
@@ -60,6 +63,11 @@ type HTTP struct {
 	MaxBodyBytes   int64 `yaml:"max_body_bytes"`
 	RateLimitRPS   int   `yaml:"rate_limit_rps"`
 	RateLimitBurst int   `yaml:"rate_limit_burst"`
+	// TrustedProxies lists CIDRs (for example "10.0.0.0/8") whose peers
+	// may name the real client in X-Forwarded-For. The client IP is then
+	// used for the per-IP stream backstop key only. Empty - the default -
+	// means X-Forwarded-For is never trusted.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type Log struct {
@@ -226,7 +234,7 @@ func Default() *Config {
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
 		Authz:     Authz{Enforcement: "off"},
-		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7, StreamLimit: 8, ContentFilter: ContentFilterCfg{Mode: "block"}},
+		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7, StreamLimit: 4, StreamIPLimit: 256, ContentFilter: ContentFilterCfg{Mode: "block"}},
 	}
 }
 
@@ -293,11 +301,22 @@ func applyEnv(c *Config) error {
 			*dst = n
 		}
 	}
+	csv := func(key string, dst *[]string) {
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			*dst = nil
+			for _, part := range strings.Split(v, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					*dst = append(*dst, p)
+				}
+			}
+		}
+	}
 
 	str("PUNK_HTTP_ADDR", &c.HTTP.Addr)
 	int64v("PUNK_HTTP_MAX_BODY_BYTES", &c.HTTP.MaxBodyBytes)
 	integer("PUNK_HTTP_RATE_LIMIT_RPS", &c.HTTP.RateLimitRPS)
 	integer("PUNK_HTTP_RATE_LIMIT_BURST", &c.HTTP.RateLimitBurst)
+	csv("PUNK_HTTP_TRUSTED_PROXIES", &c.HTTP.TrustedProxies)
 	str("PUNK_LOG_FORMAT", &c.Log.Format)
 	str("PUNK_LOG_LEVEL", &c.Log.Level)
 	str("PUNK_DB_DRIVER", &c.DB.Driver)
@@ -317,6 +336,7 @@ func applyEnv(c *Config) error {
 	integer("PUNK_MESSAGING_RETENTION_DAYS", &c.Messaging.RetentionDays)
 	integer("PUNK_MESSAGING_MEMBER_EXPIRY_DAYS", &c.Messaging.MemberExpiryDays)
 	integer("PUNK_MESSAGING_STREAM_LIMIT", &c.Messaging.StreamLimit)
+	integer("PUNK_MESSAGING_STREAM_IP_LIMIT", &c.Messaging.StreamIPLimit)
 	str("PUNK_MESSAGING_CONTENT_FILTER", &c.Messaging.ContentFilter.Mode)
 
 	return errors.Join(errs...)
@@ -370,6 +390,14 @@ func (c *Config) validate() error {
 	}
 	if c.Messaging.StreamLimit <= 0 {
 		errs = append(errs, errors.New("messaging.stream_limit: must be > 0"))
+	}
+	if c.Messaging.StreamIPLimit <= 0 {
+		errs = append(errs, errors.New("messaging.stream_ip_limit: must be > 0"))
+	}
+	for _, cidr := range c.HTTP.TrustedProxies {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			errs = append(errs, fmt.Errorf("http.trusted_proxies %q: not a CIDR (want e.g. 10.0.0.0/8)", cidr))
+		}
 	}
 	if c.AI.Embeddings.MaxInputTokens < 0 {
 		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))
