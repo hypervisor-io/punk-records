@@ -111,7 +111,7 @@ func TestReconcileCodexSkillTargetsSkipsByteEquivalentShared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 {
+	if len(targets) != 2+len(CommandNames) {
 		t.Fatalf("targets = %+v", targets)
 	}
 

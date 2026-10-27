@@ -228,8 +228,15 @@ func TestAgentGuidanceMessaging(t *testing.T) {
 				continue
 			}
 			requireGuidance(t, text,
-				"registered session address", "client bridge", "explicit namespace and sender", "namespace and agent",
+				"[PUNK ROUTING]", "registered session address", "client bridge", "explicit namespace and sender", "namespace and agent",
 				"not task completed", "No automatic replies to ACKs", "untrusted data")
+			if opts.Pi {
+				// Pi has no slash commands, so its fallback stays the HTTP API.
+				forbidGuidance(t, text, CommandJoin)
+			} else {
+				// The absent-[PUNK ROUTING] fallback names this client's syntax.
+				requireGuidance(t, text, commandInvocation(opts.Agent, CommandJoin)+" to register")
+			}
 			if opts.Pi {
 				requireGuidance(t, text, "POST /v1/namespaces/<ns>/messages", "GET /messages?agent=", "POST /messages/ack", "four Pi memory tools are not message tools", "HTTP routes")
 				requireGuidance(t, text, "require namespace grants when HTTP authorization is enforced")
@@ -250,21 +257,25 @@ func TestAgentGuidanceInboxBindingAndSSE(t *testing.T) {
 		for _, render := range []func(SkillOpts) string{RenderSkill, RenderPlanSkill} {
 			text := render(opts)
 			if !opts.Messaging {
-				forbidGuidance(t, text, "listening:true", "does not enable SSE")
+				forbidGuidance(t, text, "listening:true", "SSE")
 				continue
 			}
+			// P2-A removed the SSE/listen wording a model cannot act on:
+			// delivery is the client bridge's or the wake listener's job,
+			// so no render tells a model about an SSE stream.
+			forbidGuidance(t, text, "SSE")
 			if opts.Pi {
 				// Pi has HTTP messaging, not the MCP register/discovery tools.
 				forbidGuidance(t, text, ToolName(opts.ToolPrefix, "register"), ToolName(opts.ToolPrefix, "list_region_members"))
 				continue
 			}
 			requireGuidance(t, text,
-				"Enable client hooks/bridge too", "runtime PUNK_MESSAGING=1", "installed bridge", "SSE idle wake",
-				"OpenClaw", "next-prompt catch-up, not SSE",
-				"inbox:true", "does not enable SSE", "only your own session address",
+				"Enable client hooks/bridge too", "runtime PUNK_MESSAGING=1", "installed bridge", "wakes an idle session",
+				"OpenClaw", "catches up on the next prompt",
+				"inbox:true", "only your own session address",
 				"authorized namespace", "PUNK_NAMESPACE is optional", "overrides bindings",
 				"on refresh", "Roles are metadata",
-				"listening:true", "open SSE stream", "not a register input", "Resolve roles to <client>:<session>")
+				"listening:true", "bridge is attached", "not a register input", "Resolve roles to <client>:<session>")
 		}
 	})
 }
@@ -281,11 +292,15 @@ func TestAgentGuidanceBudgets(t *testing.T) {
 			if tokens := estTokens(RenderSkill(base)); tokens > skillBodyBudgetTokens {
 				t.Errorf("memory pinned=%t: ~%d tokens exceeds %d", pinned, tokens, skillBodyBudgetTokens)
 			}
-			// Apply the existing 1400-byte opt-in bound to every tool prefix
-			// and both renderers, not just the plain-tools render.
+			// Apply the opt-in bound to every tool prefix and both
+			// renderers, not just the plain-tools render. P2-A raised it
+			// from 1400: the opt-in text now points at the [PUNK ROUTING]
+			// block and the punk-join fallback and drops the SSE wording
+			// (net +147 bytes; the widest render, claude-code's planner,
+			// measured 1547).
 			for _, render := range []func(SkillOpts) string{RenderSkill, RenderPlanSkill} {
-				if extra := len(render(opts)) - len(render(base)); extra > 1400 {
-					t.Errorf("messaging adds %d bytes, budget 1400 including tool prefixes", extra)
+				if extra := len(render(opts)) - len(render(base)); extra > 1600 {
+					t.Errorf("messaging adds %d bytes, budget 1600 including tool prefixes", extra)
 				}
 			}
 			// The planner measured ~1607 tokens before these corrections.

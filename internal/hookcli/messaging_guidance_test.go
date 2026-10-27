@@ -17,7 +17,7 @@ func TestMessagingGuidanceOptIn(t *testing.T) {
 				t.Fatalf("missing %q", term)
 			}
 		}
-		if len(on)-len(base) > 1400 {
+		if len(on)-len(base) > 1600 {
 			t.Fatalf("opt-in guidance grew %d bytes", len(on)-len(base))
 		}
 	}
