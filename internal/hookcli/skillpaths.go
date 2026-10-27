@@ -33,8 +33,37 @@ func PlanSkillTargets(agent string, project bool, home string, env func(string) 
 	return out, nil
 }
 
-// AllSkillTargets is every skill punk installs for an agent: punk-memory
-// then punk-plan. punk connect and punk skill install walk this list.
+// CommandSkillTargets mirrors SkillTargets for the five punk slash-command
+// skills (CommandNames): the same per-agent skill directory, a sibling
+// folder named for each command. punk connect and punk skill install walk
+// AllSkillTargets, so the commands land wherever punk-memory does.
+//
+// pi is skipped: its four HTTP-backed tools expose no registration,
+// messaging or member tools, so the command bodies (which call the MCP
+// tools) would be false for it.
+func CommandSkillTargets(agent string, project bool, home string, env func(string) string) ([]SkillTarget, error) {
+	if agent == "pi" {
+		return nil, nil
+	}
+	base, err := SkillTargets(agent, project, home, env)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SkillTarget, 0, len(base)*len(CommandNames))
+	for _, tg := range base {
+		dir := filepath.Dir(filepath.Dir(tg.Path))
+		for _, name := range CommandNames {
+			o := tg.Opts
+			o.Command = name
+			out = append(out, SkillTarget{Name: name, Path: filepath.Join(dir, name, "SKILL.md"), Opts: o})
+		}
+	}
+	return out, nil
+}
+
+// AllSkillTargets is every skill punk installs for an agent: punk-memory,
+// punk-plan, then the punk slash commands. punk connect and punk skill
+// install walk this list.
 func AllSkillTargets(agent string, project bool, home string, env func(string) string) ([]SkillTarget, error) {
 	mem, err := SkillTargets(agent, project, home, env)
 	if err != nil {
@@ -44,7 +73,11 @@ func AllSkillTargets(agent string, project bool, home string, env func(string) s
 	if err != nil {
 		return nil, err
 	}
-	return append(mem, plan...), nil
+	cmds, err := CommandSkillTargets(agent, project, home, env)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(mem, plan...), cmds...), nil
 }
 
 // SkillTargets lists where an agent loads skills from, global or project,

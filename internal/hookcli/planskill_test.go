@@ -76,7 +76,13 @@ func TestPlanSkillTargetsSitBesideMemory(t *testing.T) {
 				}
 			}
 			all, err := AllSkillTargets(agent, project, "/home/u", env)
-			if err != nil || len(all) != 2*len(mem) || all[0].Name != SkillName || all[len(mem)].Name != PlanSkillName {
+			// punk-memory + punk-plan, then the five slash commands; pi
+			// has no command targets (its HTTP tools cannot run them).
+			commands := len(CommandNames)
+			if agent == "pi" {
+				commands = 0
+			}
+			if err != nil || len(all) != (2+commands)*len(mem) || all[0].Name != SkillName || all[len(mem)].Name != PlanSkillName {
 				t.Fatalf("%s: all targets %+v %v", agent, all, err)
 			}
 			for _, tg := range all {
