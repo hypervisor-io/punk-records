@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// P2-C note - client-native command files: Antigravity's legacy
+// "workflows" format (.agents/workflows/<name>.md workspace,
+// ~/.gemini/config/workflows/<name>.md global, invoked as /<name>)
+// stopped working on October 19, 2026: antigravity.google/docs/ide/workflows
+// (fetched 2026-10-27) states legacy workflow directories are "no
+// longer indexed or executable using slash commands", and the
+// Workflows-to-Skills migration guide moves them to Agent Skills
+// (.agents/skills/<name>/SKILL.md workspace, ~/.gemini/config/skills/
+// <name>/SKILL.md global), which keep the same /<name> invocation and
+// take precedence over same-named workflows. punk therefore installs
+// the five punk commands as Antigravity SKILLS - already the behavior
+// P2-A ships via CommandSkillTargets("antigravity", ...), walked by
+// punk connect - and deliberately writes no workflow files: they would
+// be dead on arrival. See TestAntigravityCommandSkillsCurrentNativeLocations
+// for the pinned locations.
+//
 // antigravityHookName is the top-level hooks.json key ConnectAntigravity
 // owns outright. Unlike Claude Code's settings.json or Cursor's hooks.json
 // (where every hook source shares the SAME per-event array and punk must
