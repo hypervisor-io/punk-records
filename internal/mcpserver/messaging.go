@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/hypervisor-io/punk-records/internal/authz"
 	"github.com/hypervisor-io/punk-records/internal/hookcli"
@@ -87,9 +88,60 @@ func untrustedEnvelope(ns, agent string, msgs []region.Message, sentBox bool) st
 	return hookcli.RenderUntrustedEnvelope(ns, agent, inboxMessagesFor(msgs))
 }
 
+// defaultAwaitLimit is the generous default for concurrent await_messages
+// calls per caller (Deps.AwaitLimit <= 0). More than any single agent
+// session opens; few enough that one client cannot park the server.
+const defaultAwaitLimit = 8
+
+// awaitLimiter caps concurrent await_messages calls per caller key. Unlike
+// the HTTP streams (api/limits.go) there is no peer IP at the tool layer,
+// so the key is the resolved subject alone.
+type awaitLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	active map[string]int
+}
+
+func newAwaitLimiter(limit int) *awaitLimiter {
+	if limit <= 0 {
+		limit = defaultAwaitLimit
+	}
+	return &awaitLimiter{limit: limit, active: map[string]int{}}
+}
+
+func (l *awaitLimiter) acquire(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[key] >= l.limit {
+		return false
+	}
+	l.active[key]++
+	return true
+}
+
+func (l *awaitLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch n := l.active[key]; {
+	case n > 1:
+		l.active[key] = n - 1
+	default:
+		delete(l.active, key)
+	}
+}
+
 // Messaging shares region persistence with HTTP. Agent addresses only route
 // messages; namespace grants, not caller-supplied agent names, authorize access.
 func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
+	// await_messages blocks, holding a goroutine and a bus subscription.
+	// Cap concurrent awaits per caller so one client cannot park an
+	// unbounded number of them. The tool handler has no peer IP (the MCP
+	// SDK does not surface the transport address), so the cap keys on the
+	// resolved subject - the same identity the messaging tools already
+	// authorize on. Slots are released by defer, so a cancelled or timed
+	// out wait frees its slot immediately.
+	awaits := newAwaitLimiter(d.AwaitLimit)
+
 	mcp.AddTool(s, &mcp.Tool{Name: "send_message", OutputSchema: openOutputSchema[region.Message](),
 		Description: "Send a durable message to a registered agent. Register both addresses first; use idempotency_key for retries."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in sendMessageIn) (*mcp.CallToolResult, *region.Message, error) {
@@ -192,6 +244,14 @@ func registerMessagingTools(s *mcp.Server, d Deps, nsr *nsResolver) {
 			if in.Agent == "" {
 				in.Agent = nsr.identity(req)
 			}
+			// Concurrent-await cap: refuse rather than block when this
+			// caller already holds the limit's worth of waits. Released by
+			// defer the moment WaitMessages returns or ctx is cancelled.
+			awaitKey := nsr.identity(req)
+			if !awaits.acquire(awaitKey) {
+				return nil, messagesOut{}, fmt.Errorf("too many concurrent await_messages for %q; retry after an outstanding wait completes", awaitKey)
+			}
+			defer awaits.release(awaitKey)
 			_ = d.Region.Touch(ctx, ns, in.Agent)
 			messages, waitErr := d.Region.WaitMessages(ctx, d.Bus, ns, in.Agent, in.Limit, awaitTimeout(in.TimeoutSeconds))
 			// Both credential and grant can be revoked while blocked. Denial

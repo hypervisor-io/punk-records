@@ -35,6 +35,7 @@ type Messaging struct {
 	MaxUnreadPerRecipient int              `yaml:"max_unread_per_recipient"` // >0; new sends blocked at cap
 	RetentionDays         int              `yaml:"retention_days"`           // ACK age; 0 disables deletion
 	MemberExpiryDays      int              `yaml:"member_expiry_days"`       // last_seen_at age; 0 disables; listening members never expire
+	StreamLimit           int              `yaml:"stream_limit"`             // >0; concurrent message streams (SSE) and await_messages waits per subject+IP
 	ContentFilter         ContentFilterCfg `yaml:"content_filter"`           // dangerous-intent blocking at send time
 }
 
@@ -50,6 +51,15 @@ type ContentFilterCfg struct {
 
 type HTTP struct {
 	Addr string `yaml:"addr"`
+	// Request limits (task P3-A). Defaults are generous: they stop a
+	// runaway or hostile client, not normal traffic.
+	//
+	// MaxBodyBytes caps the body of every JSON POST/PUT/PATCH request
+	// (8 MiB default). RateLimitRPS/RateLimitBurst are the per-IP token
+	// bucket on the message-send and member-register endpoints.
+	MaxBodyBytes   int64 `yaml:"max_body_bytes"`
+	RateLimitRPS   int   `yaml:"rate_limit_rps"`
+	RateLimitBurst int   `yaml:"rate_limit_burst"`
 }
 
 type Log struct {
@@ -205,7 +215,7 @@ type A2ARemote struct {
 // Default returns the configuration used when no file and no env are present.
 func Default() *Config {
 	return &Config{
-		HTTP:      HTTP{Addr: ":9090"},
+		HTTP:      HTTP{Addr: ":9090", MaxBodyBytes: 8 << 20, RateLimitRPS: 50, RateLimitBurst: 100},
 		Log:       Log{Format: "text", Level: "info"},
 		DB:        DB{Driver: "sqlite", DSN: "punk.db"},
 		AI:        AI{Enabled: false},
@@ -216,7 +226,7 @@ func Default() *Config {
 		Route:     Route{Epsilon: 0.05},
 		Proposals: Proposals{ExpireAfterHours: 72},
 		Authz:     Authz{Enforcement: "off"},
-		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7, ContentFilter: ContentFilterCfg{Mode: "block"}},
+		Messaging: Messaging{MaxUnreadPerRecipient: 200, RetentionDays: 30, MemberExpiryDays: 7, StreamLimit: 8, ContentFilter: ContentFilterCfg{Mode: "block"}},
 	}
 }
 
@@ -285,6 +295,9 @@ func applyEnv(c *Config) error {
 	}
 
 	str("PUNK_HTTP_ADDR", &c.HTTP.Addr)
+	int64v("PUNK_HTTP_MAX_BODY_BYTES", &c.HTTP.MaxBodyBytes)
+	integer("PUNK_HTTP_RATE_LIMIT_RPS", &c.HTTP.RateLimitRPS)
+	integer("PUNK_HTTP_RATE_LIMIT_BURST", &c.HTTP.RateLimitBurst)
 	str("PUNK_LOG_FORMAT", &c.Log.Format)
 	str("PUNK_LOG_LEVEL", &c.Log.Level)
 	str("PUNK_DB_DRIVER", &c.DB.Driver)
@@ -303,6 +316,7 @@ func applyEnv(c *Config) error {
 	boolean("PUNK_MESSAGING", &c.Messaging.Enabled)
 	integer("PUNK_MESSAGING_RETENTION_DAYS", &c.Messaging.RetentionDays)
 	integer("PUNK_MESSAGING_MEMBER_EXPIRY_DAYS", &c.Messaging.MemberExpiryDays)
+	integer("PUNK_MESSAGING_STREAM_LIMIT", &c.Messaging.StreamLimit)
 	str("PUNK_MESSAGING_CONTENT_FILTER", &c.Messaging.ContentFilter.Mode)
 
 	return errors.Join(errs...)
@@ -333,6 +347,12 @@ func (c *Config) validate() error {
 	if c.HTTP.Addr == "" {
 		errs = append(errs, errors.New("http.addr: empty"))
 	}
+	if c.HTTP.MaxBodyBytes < 1024 {
+		errs = append(errs, errors.New("http.max_body_bytes: must be >= 1024"))
+	}
+	if c.HTTP.RateLimitRPS <= 0 || c.HTTP.RateLimitBurst <= 0 {
+		errs = append(errs, errors.New("http.rate_limit_rps, http.rate_limit_burst: must be > 0"))
+	}
 	if c.Budgets.Tokens <= 0 || c.Budgets.ToolCalls <= 0 || c.Budgets.WallMS <= 0 || c.Budgets.Subagents < 0 {
 		errs = append(errs, errors.New("budgets: tokens, tool_calls, wall_ms must be > 0 and subagents >= 0"))
 	}
@@ -347,6 +367,9 @@ func (c *Config) validate() error {
 	}
 	if c.Messaging.MemberExpiryDays < 0 || c.Messaging.MemberExpiryDays > 106751 {
 		errs = append(errs, errors.New("messaging.member_expiry_days: must be 0 to 106751"))
+	}
+	if c.Messaging.StreamLimit <= 0 {
+		errs = append(errs, errors.New("messaging.stream_limit: must be > 0"))
 	}
 	if c.AI.Embeddings.MaxInputTokens < 0 {
 		errs = append(errs, errors.New("ai.embeddings.max_input_tokens: must be >= 0"))

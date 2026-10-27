@@ -76,6 +76,10 @@ type registerMemberIn struct {
 // handleRegisterMember joins an agent to the namespace's region
 // (idempotent upsert, matching region.Register).
 func (s *Server) handleRegisterMember(w http.ResponseWriter, r *http.Request) {
+	if !s.sendLimiter.allow(r.RemoteAddr) {
+		writeRateLimited(w, "rate limited")
+		return
+	}
 	var in registerMemberIn
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -148,6 +152,10 @@ func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 // publishes the lossy wake hint ("send surfaces publish"): the hint
 // names the recipient, never the body.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	if !s.sendLimiter.allow(r.RemoteAddr) {
+		writeRateLimited(w, "rate limited")
+		return
+	}
 	var in region.MessageInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -334,6 +342,20 @@ func (s *Server) handleReleaseMessages(w http.ResponseWriter, r *http.Request) {
 // credential and grant, and reconciles against durable storage on a bounded timer
 // because the bus is lossy.
 func (s *Server) handleMessageEvents(w http.ResponseWriter, r *http.Request) {
+	// Concurrent stream cap: one subject+IP may hold at most
+	// limits.StreamLimit inbox streams at once. Acquired before any work
+	// (and before the SSE headers are written, so an over-cap caller gets
+	// a plain 429 JSON response rather than a half-open stream) and
+	// released by the deferred call the moment this handler returns -
+	// which is exactly when the client disconnects (r.Context().Done()
+	// below) or a mid-stream revocation ends the loop. No slot can leak.
+	stream := streamKey(r)
+	if !s.streams.acquire(stream) {
+		writeRateLimited(w, "too many concurrent streams")
+		return
+	}
+	defer s.streams.release(stream)
+
 	agent, opts, err := messageReadOptions(r)
 	if err != nil {
 		writeMessageErr(w, err)

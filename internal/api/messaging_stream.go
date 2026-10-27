@@ -26,6 +26,17 @@ import (
 // first frame, before every delivery and on every keepalive tick, so a
 // mid-stream revocation ends the stream instead of continuing to notify.
 func (s *Server) handleMessageStream(w http.ResponseWriter, r *http.Request) {
+	// Same concurrent stream cap as handleMessageEvents: one subject+IP
+	// holds at most limits.StreamLimit namespace streams. Acquired before
+	// the SSE headers so an over-cap caller gets 429, released by defer
+	// when this handler returns on disconnect or revocation.
+	stream := streamKey(r)
+	if !s.streams.acquire(stream) {
+		writeRateLimited(w, "too many concurrent streams")
+		return
+	}
+	defer s.streams.release(stream)
+
 	if s.bus == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not wired"})
 		return
