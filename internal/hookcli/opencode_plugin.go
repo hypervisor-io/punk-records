@@ -1418,6 +1418,17 @@ export const PunkMemoryPlugin = async ({ directory, client }) => {
 // is ctx.session.hook("context") editing event.system (SystemPart
 // { type: "text", text }), and a prompt is
 // ctx.session.prompt({ sessionID, text, ... }).
+//
+// Busy/idle on 2.x: the server marks a run with the DURABLE
+// session.execution.started / .succeeded / .failed / .interrupted events
+// (@opencode/schema@2.2.0 session-event.ts). session.status and
+// session.idle survive only as deprecated ephemeral definitions
+// (session-status-event.ts) that the 2.2.0 server never publishes - a
+// live "opencode serve" emits session.execution.succeeded at the end of a
+// turn and nothing else. Listening only for session.idle/session.status
+// left every session that ever ran a human turn "busy" forever, so the
+// messaging bridge deferred all later mail ("waiting_for_idle") and the
+// idle wake never fired.
 // ======================================================================
 
 function punkV2Text(content) {
@@ -1556,18 +1567,33 @@ async function punkSetupV2(ctx) {
         case "session.created":
           core.sessionCreated(d.sessionID)
           break
-        case "session.idle":
+        // A run's lifecycle on 2.x is the durable session.execution.*
+        // family: started marks busy, succeeded is the end of the turn
+        // (the Stop capture plus the idle transition that drains deferred
+        // inbox messages), failed/interrupted only mark idle.
+        case "session.execution.started":
+          core.sessionStatus({ sessionID: d.sessionID, status: { type: "busy" } })
+          break
+        case "session.execution.succeeded":
           core.sessionIdle(d.sessionID)
-          break
-        case "session.deleted":
-          core.sessionDeleted(d.sessionID)
-          break
-        case "session.status":
-          core.sessionStatus({ sessionID: d.sessionID, status: d.status })
           break
         case "session.execution.failed":
         case "session.execution.interrupted":
           core.sessionError(d.sessionID)
+          break
+        // Deprecated ephemeral events (@opencode/schema@2.2.0
+        // session-status-event.ts) that the 2.2.0 server never publishes.
+        // Still honoured should a host emit them, but idle-only: the Stop
+        // capture rides session.execution.succeeded, so a host that sends
+        // both does not record the turn twice.
+        case "session.idle":
+          core.sessionError(d.sessionID)
+          break
+        case "session.status":
+          core.sessionStatus({ sessionID: d.sessionID, status: d.status })
+          break
+        case "session.deleted":
+          core.sessionDeleted(d.sessionID)
           break
       }
     } catch (err) {
@@ -1593,11 +1619,13 @@ async function punkSetupV2(ctx) {
   }
   const eventTypes = [
     "session.created",
-    "session.idle",
     "session.deleted",
-    "session.status",
+    "session.execution.started",
+    "session.execution.succeeded",
     "session.execution.failed",
     "session.execution.interrupted",
+    "session.idle",
+    "session.status",
   ]
   if (ctx && ctx.event && typeof ctx.event.subscribe === "function") {
     ;(async () => {

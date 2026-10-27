@@ -49,7 +49,12 @@ function makeFakeCtx(opts) {
             async next() {
               for (;;) {
                 if (signal && signal.aborted) return { done: true, value: undefined }
-                if (queue.length) return { done: false, value: queue.shift() }
+                if (queue.length) {
+                  // Like the real host, only the subscribed types arrive.
+                  const ev = queue.shift()
+                  if (o && Array.isArray(o.types) && o.types.indexOf(ev && ev.type) < 0) continue
+                  return { done: false, value: ev }
+                }
                 await new Promise((resolve) => {
                   wake = resolve
                   if (signal) signal.addEventListener("abort", resolve, { once: true })
@@ -179,12 +184,21 @@ func TestOpenCodeV2SetupHooksAndCleanup(t *testing.T) {
   must(ctx.subscribeCalls[0].signal instanceof AbortSignal, "subscription is abortable")
 
   // events -> hook POSTs
+  // 2.2.0 ends a turn with the durable session.execution.succeeded; the
+  // deprecated session.idle (never published by 2.2.0) is idle-only, so a
+  // host emitting both does not record the turn twice.
   ctx.emit({ type: "session.created", data: { sessionID: "s1" } })
+  ctx.emit({ type: "session.execution.started", data: { sessionID: "s1" } })
+  ctx.emit({ type: "session.execution.succeeded", data: { sessionID: "s1" } })
   ctx.emit({ type: "session.idle", data: { sessionID: "s1" } })
   await until(() => hookPosts.length === 2, "two event hook posts")
+  await sleep(50)
+  must(hookPosts.length === 2, "session.idle adds no second Stop, posts=" + hookPosts.length)
   must(hookPosts[0].body.hook_event_name === "SessionStart" && hookPosts[0].body.session_id === "s1", "SessionStart from session.created")
   must(hookPosts[0].body.cwd === "/tmp/punk-v2-proj" && hookPosts[0].body.source === "opencode", "SessionStart cwd/source")
-  must(hookPosts[1].body.hook_event_name === "Stop" && hookPosts[1].body.last_assistant_message === "status=idle", "Stop from session.idle")
+  must(hookPosts[1].body.hook_event_name === "Stop" && hookPosts[1].body.last_assistant_message === "status=idle", "Stop from session.execution.succeeded")
+  const types = ctx.subscribeCalls[0].types || []
+  must(["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].every((t) => types.indexOf(t) >= 0), "subscribes to the execution lifecycle: " + types.join(","))
   must(hookPosts[0].signal === true, "hook POST carries the 2s abort signal")
 
   // tool.execute.after
@@ -215,7 +229,7 @@ func TestOpenCodeV2SetupHooksAndCleanup(t *testing.T) {
   must(ctx.disposed.indexOf("tool:execute.after") >= 0 && ctx.disposed.indexOf("session:prompt") >= 0 && ctx.disposed.indexOf("session:context") >= 0, "cleanup disposes every registration: " + ctx.disposed.join(","))
   must(Object.keys(ctx.hooks.tool).length === 0 && Object.keys(ctx.hooks.session).length === 0, "no hooks left registered")
   const before = hookPosts.length
-  ctx.emit({ type: "session.idle", data: { sessionID: "s1" } })
+  ctx.emit({ type: "session.execution.succeeded", data: { sessionID: "s1" } })
   await sleep(100)
   must(hookPosts.length === before, "events after cleanup are ignored")
 
@@ -289,9 +303,26 @@ func TestOpenCodeV2MessagingIdleWake(t *testing.T) {
   emitHint("opencode:s1")
   await sleep(200)
   must(ctx.promptSpy.length === 1, "busy session defers delivery")
-  ctx.emit({ type: "session.idle", data: { sessionID: "s1" } })
-  await until(() => ctx.promptSpy.length === 2, "delivered after session.idle")
+  // The real 2.2.0 server sequence for that turn: execution.started then
+  // execution.succeeded - never session.idle or session.status.
+  ctx.emit({ type: "session.execution.started", data: { sessionID: "s1" } })
+  await sleep(50)
+  must(ctx.promptSpy.length === 1, "still deferred while the run executes")
+  ctx.emit({ type: "session.execution.succeeded", data: { sessionID: "s1" } })
+  await until(() => ctx.promptSpy.length === 2, "delivered after session.execution.succeeded")
   await until(() => punkTestServer.ackedIds.indexOf("m2") >= 0, "m2 acked")
+
+  // The wake turn the bridge just started is itself a run: a message that
+  // arrives while it executes waits for that run to succeed (or fail).
+  ctx.emit({ type: "session.execution.started", data: { sessionID: "s1" } })
+  await sleep(30)
+  putMessage("opencode:s1", "m3", "third")
+  emitHint("opencode:s1")
+  await sleep(200)
+  must(ctx.promptSpy.length === 2, "message deferred during the wake turn")
+  ctx.emit({ type: "session.execution.failed", data: { sessionID: "s1", error: { type: "x", message: "boom" } } })
+  await until(() => ctx.promptSpy.length === 3, "delivered after session.execution.failed")
+  await until(() => punkTestServer.ackedIds.indexOf("m3") >= 0, "m3 acked")
 
   await cleanup()
   await until(() => punkTestServer.sseAborted.length > 0, "cleanup aborts the SSE stream")
