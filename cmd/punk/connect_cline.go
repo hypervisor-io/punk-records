@@ -23,6 +23,7 @@ func cmdConnectCline(args []string) error {
 	force := fs.Bool("force", false, "replace a foreign MCP punk entry; never overwrites user hook files")
 	keyEnv := fs.String("api-key-env", "", "MCP Authorization env name, written as ${env:NAME}")
 	agent := fs.String("agent", defaultAgentName(), "MCP identity; inbox address remains cline:<taskId>")
+	noSkill := fs.Bool("no-skill", false, "do not install the punk command skills")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -68,7 +69,40 @@ func cmdConnectCline(args []string) error {
 			fmt.Printf("punk: API key stored in %s; keep file private\n", path)
 		}
 	}
+	if !*noSkill {
+		// P2-C: the five punk commands as native Cline skills, slash-
+		// invocable as /punk-<name>. Cline has no separate workflows
+		// format; its skills are the command surface (see
+		// hookcli.ClineCommandSkillTargets).
+		installClineCommandSkills(*project)
+	}
 	fmt.Println("punk: Cline >=4.1.20 required for contextModification; enable hooks in Cline settings. Existing Unix execute permissions preserved.")
 	fmt.Println("punk: inbox catch-up only on TaskStart and UserPromptSubmit; no continuation or idle wake. Avoid installing both global and project hooks for the same workspace.")
 	return nil
+}
+
+// installClineCommandSkills writes the five punk commands as native
+// Cline skills (P2-C): ~/.cline/skills global or .cline/skills
+// project - the same WriteSkill marker/idempotency contract every other
+// client's skill install uses, so a reconnect is byte-identical and a
+// foreign file is refused.
+func installClineCommandSkills(project bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("punk: warning - Cline command skills not installed: %v\n", err)
+		return
+	}
+	targets, err := hookcli.ClineCommandSkillTargets(project, home)
+	if err != nil {
+		fmt.Printf("punk: warning - Cline command skills not installed: %v\n", err)
+		return
+	}
+	for _, tg := range targets {
+		changed, err := hookcli.WriteSkill(tg.Path, hookcli.Render(tg))
+		if err != nil {
+			fmt.Printf("punk: warning - %v\n", err)
+			continue
+		}
+		fmt.Printf("punk: Cline command skill %s in %s (%s)\n", tg.Name, tg.Path, changedWord(changed))
+	}
 }

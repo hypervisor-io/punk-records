@@ -3805,7 +3805,7 @@ func cmdConnectOpenCode(args []string) error {
 	noMCP := fs.Bool("no-mcp", false, "only install the plugin; do not register the MCP server")
 	force := fs.Bool("force", false, "replace an mcp.punk entry punk did not write")
 	verify := fs.Bool("verify", false, "after writing config, open an MCP session to the server and call whoami")
-	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills")
+	noSkill := fs.Bool("no-skill", false, "do not install the generated punk-memory and punk-plan skills, or the punk command files")
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer {env:NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	if err := fs.Parse(args); err != nil {
@@ -3850,9 +3850,38 @@ func cmdConnectOpenCode(args []string) error {
 	fmt.Printf("punk: note - the plugin reads PUNK_URL and PUNK_API_KEY from its own process environment at runtime (falling back to %s when PUNK_URL is unset); restart OpenCode or reload plugins to pick up this file\n", serverURL)
 	if !*noSkill {
 		installSkillFor("opencode", *project, serverURL, "")
+		// P2-C: the five punk commands as native OpenCode command files,
+		// slash-invocable as /punk-<name>, beside the skills.
+		installOpenCodeCommands(*project)
 	}
 	fmt.Printf("punk: make sure 'punk serve' is reachable at %s\n", serverURL)
 	return nil
+}
+
+// installOpenCodeCommands writes the five punk commands as native
+// OpenCode command files (P2-C): ~/.config/opencode/commands global
+// (XDG_CONFIG_HOME honored) or .opencode/commands project - the same
+// WriteSkill marker/idempotency contract the skill installer uses, so a
+// reconnect is byte-identical and a foreign file is refused.
+func installOpenCodeCommands(project bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("punk: warning - OpenCode commands not installed: %v\n", err)
+		return
+	}
+	targets, err := hookcli.OpenCodeCommandTargets(project, home, os.Getenv)
+	if err != nil {
+		fmt.Printf("punk: warning - OpenCode commands not installed: %v\n", err)
+		return
+	}
+	for _, tg := range targets {
+		changed, err := hookcli.WriteSkill(tg.Path, hookcli.RenderOpenCodeCommand(tg.Opts))
+		if err != nil {
+			fmt.Printf("punk: warning - %v\n", err)
+			continue
+		}
+		fmt.Printf("punk: OpenCode command %s in %s (%s)\n", tg.Name, tg.Path, changedWord(changed))
+	}
 }
 
 // cmdConnectPi wires punk into the pi coding agent
