@@ -1,8 +1,11 @@
 package hookcli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -422,8 +425,14 @@ function punkCore(directory, host) {
   //     memory hooks around it must keep working no matter what the
   //     messaging side does.
   // ------------------------------------------------------------------
+  // On/off: PUNK_MESSAGING=1 turns it on and any other non-empty value
+  // turns it off; unset or empty falls back to the install default that
+  // "punk connect opencode --messaging" bakes in, so a service or desktop
+  // launch that never reads a shell rc file still gets messaging.
+  const punkMessagingDefault = %s
+  const punkMessagingEnv = typeof process !== "undefined" && process.env ? process.env.PUNK_MESSAGING : undefined
   const messagingEnabled =
-    punkConnection.enabled && typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1"
+    punkConnection.enabled && (punkMessagingEnv ? punkMessagingEnv === "1" : punkMessagingDefault)
 
   // punkSessions maps sessionID -> bridge state for every bound session.
   // punkDeletedSessions records session ids that must never bind again.
@@ -1698,7 +1707,34 @@ export default {
 // openCodePluginContent renders the full plugin source with serverURL
 // baked in as the PUNK_URL fallback default - still overridable at
 // runtime via the PUNK_URL environment variable, see the rendered
-// plugin's own header comment and punkServerURL().
+// plugin's own header comment and punkServerURL(). Messaging defaults
+// off; see openCodePluginContentWith.
 func openCodePluginContent(serverURL string) string {
-	return fmt.Sprintf(openCodePluginTemplate, credentialsJS, jsStringLiteral(serverURL), inboxBridgeJS(), openCodeBridgeExtrasJS)
+	return openCodePluginContentWith(serverURL, OpenCodePluginOptions{})
+}
+
+// OpenCodePluginOptions are the install-time defaults baked into the
+// generated plugin. Messaging is the agent-messaging default used when
+// PUNK_MESSAGING is unset or empty in OpenCode's environment.
+type OpenCodePluginOptions struct {
+	Messaging bool
+}
+
+// openCodeMessagingOnLine is the exact rendered line for a plugin
+// installed with messaging on; InstalledOpenCodeMessaging looks for it.
+const openCodeMessagingOnLine = "const punkMessagingDefault = true\n"
+
+func openCodePluginContentWith(serverURL string, opts OpenCodePluginOptions) string {
+	return fmt.Sprintf(openCodePluginTemplate, credentialsJS, jsStringLiteral(serverURL), strconv.FormatBool(opts.Messaging), inboxBridgeJS(), openCodeBridgeExtrasJS)
+}
+
+// InstalledOpenCodeMessaging reports the messaging default of the punk
+// plugin already at pluginPath: false when the file is missing, not
+// punk's, or was installed without messaging.
+func InstalledOpenCodeMessaging(pluginPath string) bool {
+	b, err := os.ReadFile(pluginPath)
+	if err != nil || !bytes.HasPrefix(b, []byte(openCodePluginMarker)) {
+		return false
+	}
+	return bytes.Contains(b, []byte(openCodeMessagingOnLine))
 }

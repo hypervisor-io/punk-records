@@ -370,8 +370,14 @@ function punkCore(directory, host) {
   //     memory hooks around it must keep working no matter what the
   //     messaging side does.
   // ------------------------------------------------------------------
+  // On/off: PUNK_MESSAGING=1 turns it on and any other non-empty value
+  // turns it off; unset or empty falls back to the install default that
+  // "punk connect opencode --messaging" bakes in, so a service or desktop
+  // launch that never reads a shell rc file still gets messaging.
+  const punkMessagingDefault = false
+  const punkMessagingEnv = typeof process !== "undefined" && process.env ? process.env.PUNK_MESSAGING : undefined
   const messagingEnabled =
-    punkConnection.enabled && typeof process !== "undefined" && process.env && process.env.PUNK_MESSAGING === "1"
+    punkConnection.enabled && (punkMessagingEnv ? punkMessagingEnv === "1" : punkMessagingDefault)
 
   // punkSessions maps sessionID -> bridge state for every bound session.
   // punkDeletedSessions records session ids that must never bind again.

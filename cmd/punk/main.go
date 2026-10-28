@@ -3890,9 +3890,12 @@ func cmdConnectOpenCode(args []string) error {
 	apiKeyEnv := fs.String("api-key-env", "", "write Authorization as Bearer {env:NAME} instead of the literal key")
 	agentName := fs.String("agent", defaultAgentName(), "identity written into the MCP entry (X-Punk-Agent)")
 	keepIdleUnload := fs.Bool("keep-idle-unload", false, "do not set experimental.location_idle_timeout=false (OpenCode then unloads the plugin, and its inbox wake, after 60 idle minutes)")
+	messaging := fs.Bool("messaging", false, "turn agent messaging and the inbox wake on in the plugin without PUNK_MESSAGING=1 in OpenCode's environment (--messaging=false turns it back off; omitted keeps the installed plugin's setting; PUNK_MESSAGING still overrides)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	messagingSet := false
+	fs.Visit(func(f *flag.Flag) { messagingSet = messagingSet || f.Name == "messaging" })
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -3913,7 +3916,14 @@ func cmdConnectOpenCode(args []string) error {
 		return err
 	}
 
-	changed, err := hookcli.ConnectOpenCode(pluginPath, serverURL)
+	// A re-run without --messaging keeps what the installed plugin has, so
+	// reconnecting (a new URL, a refreshed plugin) never silently turns
+	// messaging off.
+	msgOn := *messaging
+	if !messagingSet {
+		msgOn = hookcli.InstalledOpenCodeMessaging(pluginPath)
+	}
+	changed, err := hookcli.ConnectOpenCodeWith(pluginPath, serverURL, hookcli.OpenCodePluginOptions{Messaging: msgOn})
 	if err != nil {
 		return fmt.Errorf("connect opencode: %w", err)
 	}
@@ -3921,6 +3931,11 @@ func cmdConnectOpenCode(args []string) error {
 		fmt.Printf("punk: wrote OpenCode plugin to %s\n", pluginPath)
 	} else {
 		fmt.Printf("punk: %s already up to date\n", pluginPath)
+	}
+	if msgOn {
+		fmt.Println("punk: agent messaging is on in the plugin (PUNK_MESSAGING=1 is not needed; PUNK_MESSAGING=0 turns it off); the server needs messaging enabled too")
+	} else {
+		fmt.Println("punk: agent messaging is off unless OpenCode runs with PUNK_MESSAGING=1; --messaging turns it on in the plugin")
 	}
 	if !*noMCP {
 		mcpPath := configPath

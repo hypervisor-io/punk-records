@@ -173,6 +173,13 @@ that must be earned by the transport and the file it lands in.
   a value the user already chose is left alone; `--keep-idle-unload`
   skips it). After a restart the plugin still starts only when a client
   first touches the project directory.
+- **`punk connect opencode --messaging`.** OpenCode's messaging bridge
+  was on only when `PUNK_MESSAGING=1` reached the OpenCode process, which
+  a systemd `opencode serve` or the desktop app never gets from a shell rc
+  file. The flag bakes messaging on into the plugin; a non-empty
+  `PUNK_MESSAGING` still overrides it (`1` on, anything else off), a
+  re-run without the flag keeps the installed setting, and
+  `--messaging=false` turns it off.
 
 - **Client-neutral command text.** The shared command render carried a
   per-client invocation token, so the Codex copy under `$CODEX_HOME` and

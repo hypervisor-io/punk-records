@@ -172,3 +172,28 @@ func TestConnectOpenCodeKeepsPluginLoadedWhenIdle(t *testing.T) {
 		})
 	}
 }
+
+// TestConnectOpenCodeMessagingFlag: --messaging bakes messaging on into
+// the plugin, a later run without the flag keeps it, and
+// --messaging=false turns it back off.
+func TestConnectOpenCodeMessagingFlag(t *testing.T) {
+	withWorkingDir(t, t.TempDir())
+	plugin := filepath.Join(".opencode", "plugins", "punk-memory.js")
+	base := []string{"--project", "--no-skill", "--no-mcp", "--url", "http://127.0.0.1:19090"}
+	for _, step := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"--messaging"}, true},
+		{nil, true},
+		{[]string{"--messaging=false"}, false},
+	} {
+		if err := cmdConnectOpenCode(append(append([]string{}, base...), step.args...)); err != nil {
+			t.Fatal(err)
+		}
+		if got := hookcli.InstalledOpenCodeMessaging(plugin); got != step.want {
+			t.Fatalf("after %v: messaging=%v, want %v", step.args, got, step.want)
+		}
+	}
+}

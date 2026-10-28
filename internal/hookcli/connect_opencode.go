@@ -33,7 +33,13 @@ import (
 //     WriteCursorRules, see connect.go's doc comment for the exact
 //     guarantees.
 func ConnectOpenCode(pluginPath, serverURL string) (changed bool, err error) {
-	content := openCodePluginContent(serverURL)
+	return ConnectOpenCodeWith(pluginPath, serverURL, OpenCodePluginOptions{})
+}
+
+// ConnectOpenCodeWith is ConnectOpenCode with install-time defaults
+// baked into the plugin (see OpenCodePluginOptions).
+func ConnectOpenCodeWith(pluginPath, serverURL string, opts OpenCodePluginOptions) (changed bool, err error) {
+	content := openCodePluginContentWith(serverURL, opts)
 
 	existing, readErr := os.ReadFile(pluginPath)
 	switch {

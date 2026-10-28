@@ -44,10 +44,16 @@ to change the advertised tool set.
   Codex rejects `--wake` combined with `--no-hooks`. Without `--wake` the
   generated files stay byte-identical to a plain or `--messaging`
   connect.
-- Pi, OpenCode and OpenClaw use **runtime environment only**, not a connect
-  `--messaging` flag: run ordinary `punk connect pi|opencode|openclaw` for
-  the selected target, then launch that client with `PUNK_MESSAGING=1`.
-  Their generated bridges require the exact string `1`.
+- Pi and OpenClaw use **runtime environment only**, not a connect
+  `--messaging` flag: run ordinary `punk connect pi|openclaw` for the
+  selected target, then launch that client with `PUNK_MESSAGING=1`. Their
+  generated bridges require the exact string `1`.
+- OpenCode takes either: `punk connect opencode --messaging` bakes
+  messaging on into the plugin, so it works however OpenCode is started
+  (a systemd `opencode serve`, the desktop app, a shell), or launch it
+  with `PUNK_MESSAGING=1`. A non-empty `PUNK_MESSAGING` always wins (`1`
+  on, anything else off); a re-run of connect without the flag keeps the
+  installed setting, and `--messaging=false` turns it off.
 - Generated `punk-memory` / `punk-plan` guidance adds the compact session
   message workflow only when opted in through `connect --messaging`,
   `PUNK_MESSAGING=1` while connecting, or `punk skill install|print
@@ -613,9 +619,10 @@ messaging or start a listener. `listening:true` is an observed server
 response, not a value you pass to `join`.
 
 1. **Enable the client bridge.** Install the plugin with `punk connect
-   opencode`, configure its Punk server URL and authentication, then start
-   or restart OpenCode with `PUNK_MESSAGING=1` in the OpenCode process's
-   environment. Enabling only the server's MCP message tools is not enough.
+   opencode --messaging` (or plain `punk connect opencode` and
+   `PUNK_MESSAGING=1` in the OpenCode process's environment), configure
+   its Punk server URL and authentication, then start or restart
+   OpenCode. Enabling only the server's MCP message tools is not enough.
    Keep OpenCode running; an exited process cannot be woken. Leave
    `PUNK_NAMESPACE` unset for dynamic switching. If set, that local pin
    overrides the server's inbox binding.
@@ -1194,7 +1201,7 @@ Environment (read by the plugin at runtime, inside the OpenCode process):
 
 | Variable | Meaning |
 |---|---|
-| `PUNK_MESSAGING=1` | enables the bridge (default off) |
+| `PUNK_MESSAGING` | `1` enables the bridge, any other non-empty value disables it; unset or empty uses the install default (off, or on after `punk connect opencode --messaging`) |
 | `PUNK_URL`, `PUNK_API_KEY` | server address and bearer token (as for the memory hooks) |
 | `PUNK_NAMESPACE` | overrides namespace resolution; set this for a coordination namespace (`punk-<project>`). Unset: the server derives the namespace from the project directory (`GET /v1/agent/namespace?cwd=...`), same resolution as the rest of the connection |
 | `PUNK_MESSAGING_BACKOFF_MS` | retry/reconnect base delay (default 500 ms, doubling to a 30 s cap). Exists mainly so tests can exercise retries quickly |
