@@ -306,10 +306,49 @@ test('kanban shows done only on the all tab and offers more cards per column', (
     { st: 'pending', label: 'Pending', dot: 'bg-line', b: { total: 25, tasks: [{ id: 't<1>', title: 'x', ready: true }] } },
     { st: 'review', label: 'Review', dot: 'bg-wait', b: { total: 0, tasks: [] } },
   ]);
-  assert.match(html, /data-kanban-card="t&lt;1&gt;"/, 'task ids are escaped');
+  assert.match(html, /data-task-open="t&lt;1&gt;"/, 'task ids are escaped');
   assert.match(html, /data-kanban-more="pending">show 20 more of 24/);
   assert.doesNotMatch(html, /data-kanban-more="review"/);
   assert.match(html, />none</);
+});
+
+test('task modal shows the full task, status, question and answer, escaped', () => {
+  assert.equal(c.exactFact([{ key: '/tasks/S10', body: 'x' }, { key: '/tasks/S1', body: 'y' }], '/tasks/S1').body, 'y', 'prefix recall siblings are skipped');
+  assert.equal(c.exactFact([{ key: '/tasks/S10' }], '/tasks/S1'), null);
+  const row = { id: 'S1', title: 'Do <it>', state: 'blocked', holder: 'codex:a', depends_on: ['S0'], updated_at: new Date().toISOString(), by: 'codex:a' };
+  const facts = {
+    task: { key: '/tasks/S1', body: 'Do <it>\nfull plan text', author: 'planner', created_at: new Date().toISOString() },
+    status: { key: '/tasks/S1/status', body: 'blocked: waiting on keys', created_at: new Date().toISOString() },
+    question: { key: '/questions/S1', body: 'which key?', created_at: new Date().toISOString() },
+    answer: null,
+  };
+  const html = c.taskModalHTML('S1', row, facts, ['S2']);
+  assert.match(html, /Do &lt;it&gt;/);
+  assert.doesNotMatch(html, /<it>/, 'task text is escaped');
+  assert.match(html, /full plan text/);
+  assert.match(html, /blocked: waiting on keys/);
+  assert.match(html, /which key\?/);
+  assert.doesNotMatch(html, />Answer</, 'no answer section without an answer');
+  assert.match(html, /data-task-open="S0"/, 'dependencies open their own task');
+  assert.match(html, /data-task-open="S2"/, 'dependents too');
+  // A task not on the loaded board pages still gets its state from the status fact.
+  assert.match(c.taskModalHTML('S9', null, { status: { body: 'In progress: phase 2', created_at: '' } }, []), /class="pill [^"]*">in_progress</);
+});
+
+test('member chips sort by last seen, shorten addresses and cap the list', () => {
+  const now = Date.parse('2026-10-28T10:00:00Z');
+  const members = [
+    { agent: 'old', last_seen_at: '2026-10-20T10:00:00Z' },
+    { agent: 'claude-code:9cf63b43-ab86-4d39-80e9-18c68bf32f00', role: 'planner', last_seen_at: '2026-10-28T09:58:00Z' },
+  ];
+  const html = c.memberChipsHTML(members, now);
+  assert.ok(html.indexOf('claude-code:') < html.indexOf('>old<'), 'most recently seen first');
+  assert.match(html, />claude-code:9cf63b43-ab86-…</);
+  assert.match(html, /bg-wait/, 'seen within 10 minutes');
+  assert.match(html, /title="claude-code:9cf63b43-ab86-4d39-80e9-18c68bf32f00\nplanner/);
+  const many = Array.from({ length: 11 }, (_, i) => ({ agent: 'a' + i }));
+  assert.match(c.memberChipsHTML(many, now), /\+3 more/);
+  assert.equal(c.memberChipsHTML([], now), '');
 });
 
 test('nsIsIdle treats missing and old activity as idle', () => {

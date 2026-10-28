@@ -192,7 +192,7 @@ function setNS(name) {
   localStorage.setItem('ns', name);
   pageOffset.board = 0;
   kanbanShown = {};
-  kanbanOpen = new Set();
+  boardTasks = new Map();
   memWanted = MEM_PAGE;
   diagUnsupported = false; // probe the diagnostics route once for the newly selected namespace
   renderNamespaces();
@@ -506,21 +506,48 @@ $('#view').addEventListener('click', e => {
   switchView('board');
 });
 
-// nsHeader is the one-line summary of the selected namespace shown above
-// the per-namespace views, from the cached overview row when there is one.
+// nsHeader is the summary of the selected namespace shown above the
+// per-namespace views: the name and consolidation badge, then one stat
+// chip per figure, from the cached overview row when there is one.
+const statChip = (label, value, tone) =>
+  `<div class="stat-chip"><span class="text-dim">${esc(label)}</span><b class="font-mono font-normal ${tone || 'text-ink'}">${value}</b></div>`;
+
 function nsHeader() {
   const n = (namespaces || []).find(x => x.name === ns);
-  if (!n) return `<span class="font-semibold text-ink">${esc(ns)}</span>`;
-  const bits = [
-    `<span class="font-semibold text-ink">${esc(n.name)}</span>`,
-    consBadge(n),
-    n.members_live ? `<span class="text-live"><span class="dot live-dot mr-1.5 bg-live"></span>${n.members_live} live</span>` : '',
-    n.members ? `<span>${n.members_recent || 0} recent of ${n.members} agent${n.members === 1 ? '' : 's'}</span>` : '',
-    n.unread ? `<span class="text-wait">${n.unread} unread</span>` : '',
-    `<span>${fmtNum(n.facts)} facts</span>`,
-    nsLastActivity(n) ? `<span>active ${esc(relAge(nsLastActivity(n)))}</span>` : '',
+  const title = `<div class="flex flex-wrap items-center gap-x-3 gap-y-1"><h2 class="text-lg font-semibold text-ink">${esc(n ? n.name : ns)}</h2>${n ? consBadge(n) : ''}</div>`;
+  if (!n) return title;
+  const last = nsLastActivity(n);
+  const chips = [
+    n.members ? statChip('agents', n.members_live
+      ? `<span class="dot live-dot mr-1 bg-live"></span>${n.members_live} live / ${n.members}`
+      : `${n.members_recent || 0} recent / ${n.members}`, n.members_live ? 'text-live' : '') : '',
+    n.unread ? statChip('unread', fmtNum(n.unread), 'text-wait') : '',
+    statChip('facts', fmtNum(n.facts)),
+    last ? statChip('active', esc(relAge(last))) : '',
   ];
-  return `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-dim">${bits.filter(Boolean).join('')}</div>`;
+  return title + `<div class="mt-2 flex flex-wrap gap-2 text-xs">${chips.filter(Boolean).join('')}</div>`;
+}
+
+// memberChipsHTML lists the namespace's members as chips: a dot for how
+// recently each was seen (10 minutes, the overview's "recent" window),
+// the address shortened, and the full address, role and age on hover.
+const MEMBER_CHIPS = 8;
+function memberChipsHTML(members, now) {
+  const rows = (members || []).filter(m => m && (m.agent || m.name));
+  if (!rows.length) return '';
+  const t = now || Date.now();
+  const seen = m => Date.parse(m.last_seen_at || '') || 0;
+  rows.sort((a, b) => seen(b) - seen(a));
+  const chip = m => {
+    const name = m.agent || m.name;
+    const age = t - seen(m);
+    const tone = m.listening ? 'bg-live' : age < 10 * 60000 ? 'bg-wait' : 'bg-line';
+    const short = name.length > 28 ? name.slice(0, 26) + '…' : name;
+    const tip = [name, m.role, m.last_seen_at ? 'seen ' + (relAge(m.last_seen_at) || '') : ''].filter(Boolean).join('\n');
+    return `<span class="member-chip" title="${esc(tip)}"><span class="dot ${tone}"></span>${esc(short)}</span>`;
+  };
+  const extra = rows.length - MEMBER_CHIPS;
+  return rows.slice(0, MEMBER_CHIPS).map(chip).join('') + (extra > 0 ? `<span class="member-chip text-dim">+${extra} more</span>` : '');
 }
 
 // ---------------------------------------------------------------------
@@ -674,7 +701,7 @@ const KANBAN_PAGE = 20;
 
 let boardState = 'open';
 let kanbanShown = {};          // state -> cards requested for that column
-let kanbanOpen = new Set();    // task ids whose card is expanded
+let boardTasks = new Map();    // id -> board row, from the pages last shown
 
 const isKanban = st => st === 'open' || st === '';
 const kanbanStates = st => KANBAN_COLS.map(c => c[0]).filter(s => st === '' || s !== 'done');
@@ -717,12 +744,8 @@ $('#view').addEventListener('click', e => {
     loadBoardTable();
     return;
   }
-  const card = e.target.closest('[data-kanban-card]');
-  if (card) {
-    const id = card.dataset.kanbanCard;
-    if (kanbanOpen.has(id)) kanbanOpen.delete(id); else kanbanOpen.add(id);
-    loadBoardTable();
-  }
+  const open = e.target.closest('[data-task-open]');
+  if (open) openTaskModal(open.dataset.taskOpen);
 });
 
 async function loadBoard() {
@@ -741,32 +764,27 @@ function boardURL(name, st, offset, limit) {
 }
 
 function boardSummaryHTML(b) {
-  const names = (b.members || []).map(m => m.agent || m.name || '').filter(Boolean);
-  const shown = names.slice(0, 10).map(esc).join(', ') + (names.length > 10 ? ' +' + (names.length - 10) + ' more' : '');
+  const members = memberChipsHTML(b.members);
   return `
-    <div class="mb-1">${nsHeader()}</div>
-    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-dim">
-      ${b.next ? `<span>next <b class="font-mono font-normal text-ink">${esc(b.next)}</b></span>` : ''}
-      ${names.length ? `<span>members: ${shown}</span>` : ''}
-    </div>`;
+    ${nsHeader()}
+    ${b.next || members ? `<div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+      ${b.next ? `<button type="button" class="next-chip" data-task-open="${esc(b.next)}"><span class="text-dim">next</span> <b class="font-mono font-normal">${esc(b.next)}</b></button>` : ''}
+      ${members ? `<div class="flex min-w-0 max-w-full items-center gap-2 overflow-x-auto md:flex-wrap"><span class="shrink-0 text-dim">members</span>${members}</div>` : ''}
+    </div>` : ''}`;
 }
 
-// kanbanCardHTML is one task card. Collapsed it shows id, title, holder
-// and age; expanded it adds the full status line and dependencies.
+// kanbanCardHTML is one task card: id, title, the status line for cards
+// waiting on someone (blocked, review), holder and age. A click opens
+// the task modal.
 function kanbanCardHTML(t) {
-  const open = kanbanOpen.has(t.id);
   const age = relAge(t.updated_at);
-  const deps = (t.depends_on || []).join(', ');
-  return `<li><button type="button" data-kanban-card="${esc(t.id)}" aria-expanded="${open}" class="kanban-card${open ? ' open' : ''}">
+  return `<li><button type="button" data-task-open="${esc(t.id)}" class="kanban-card">
     <div class="flex items-start justify-between gap-2">
-      <span class="break-all text-sm font-semibold">${esc(t.id)}</span>
+      <span class="break-words text-sm font-semibold">${esc(t.id)}</span>
       ${t.ready ? '<span class="pill shrink-0 text-live">ready</span>' : ''}
     </div>
     ${t.title ? `<div class="kanban-clamp mt-1 text-xs text-dim">${esc(t.title)}</div>` : ''}
-    ${!open && t.status && (t.state === 'blocked' || t.state === 'review') ? `<div class="kanban-clamp mt-1.5 font-mono text-xs ${stateClass(t.state)}">${esc(t.status)}</div>` : ''}
-    ${open ? `
-      ${t.status ? `<div class="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-ink">${esc(t.status)}</div>` : ''}
-      ${deps ? `<div class="mt-1 font-mono text-xs text-dim">depends on ${esc(deps)}</div>` : ''}` : ''}
+    ${t.status && (t.state === 'blocked' || t.state === 'review') ? `<div class="kanban-clamp mt-1.5 font-mono text-xs ${stateClass(t.state)}">${esc(t.status)}</div>` : ''}
     <div class="mt-2 flex items-center justify-between gap-2 font-mono text-xs text-dim">
       <span class="truncate">${esc(t.holder || t.by || '')}</span>
       <span class="shrink-0" title="${esc(t.updated_at || '')}">${esc(age || '')}</span>
@@ -796,8 +814,8 @@ function boardListHTML(b, st, c) {
     ? `<div class="table-wrap"><table class="data-table">
         <colgroup><col style="width:26%"><col style="width:11%"><col style="width:11%"><col style="width:10%"><col style="width:28%"><col style="width:14%"></colgroup>
         <thead><tr><th>Task</th><th>State</th><th>Holder</th><th>Depends on</th><th>Status</th><th>Updated</th></tr></thead>
-        <tbody>${b.tasks.map(t => `<tr>
-          <td data-label="Task"><span class="font-semibold">${esc(t.id)}</span><div class="mt-0.5 font-mono text-xs text-dim">${esc(t.title || '')}</div></td>
+        <tbody>${b.tasks.map(t => `<tr class="cursor-pointer" data-task-open="${esc(t.id)}">
+          <td data-label="Task"><button type="button" class="font-semibold text-ink hover:text-brand">${esc(t.id)}</button><div class="mt-0.5 font-mono text-xs text-dim">${esc(t.title || '')}</div></td>
           <td data-label="State">${pill(t.state)}${t.ready ? ' <span class="pill text-live">ready</span>' : ''}</td>
           <td class="mono" data-label="Holder">${esc(t.holder || '-')}</td>
           <td class="mono" data-label="Depends on">${esc((t.depends_on || []).join(', ') || '-')}</td>
@@ -824,6 +842,7 @@ async function loadBoardTable() {
       const pages = await Promise.all(states.map(s => api(boardURL(reqNS, s, 0, kanbanShown[s] || KANBAN_PAGE))));
       if (reqNS !== ns || st !== boardState) return; // switched mid-flight
       head = pages[0];
+      boardTasks = new Map(pages.flatMap(p => (p.tasks || []).map(t => [t.id, t])));
       c = head.counts || {};
       const cols = states.map((s, i) => {
         const [, label, dot] = KANBAN_COLS.find(k => k[0] === s);
@@ -840,6 +859,7 @@ async function loadBoardTable() {
       }
       if (reqNS !== ns || st !== boardState) return;
       head = b;
+      boardTasks = new Map((b.tasks || []).map(t => [t.id, t]));
       c = b.counts || {};
       boardRows = b.total !== undefined ? b.total : (b.tasks || []).length;
       body = boardListHTML(b, st, c);
@@ -850,6 +870,90 @@ async function loadBoardTable() {
   } catch (e) {
     $('#boardTable').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
   }
+}
+
+// ---------------------------------------------------------------------
+// Task modal: everything known about one board task. The board row gives
+// state, holder and lease; the facts give the full task text, the status
+// line and any /questions or /answers for it.
+// ---------------------------------------------------------------------
+
+// exactFact picks key's own fact from a prefix recall, which also returns
+// longer keys (/tasks/S1 matches /tasks/S10).
+const exactFact = (facts, key) => (facts || []).find(f => f.key === key) || null;
+
+function taskModalHTML(id, row, facts, dependents) {
+  const f = facts || {};
+  const t = row || {};
+  const state = t.state || ((f.status && f.status.body.match(/^\s*(pending|in[ _-]progress|review|blocked|done)\b/i) || [])[1] || '').toLowerCase().replace(/[ -]/, '_');
+  const body = f.task ? f.task.body : '';
+  // The board clips titles at 120 characters; the fact has the whole line.
+  const title = (body.split('\n')[0] || '').trim() || t.title || '';
+  const depLinks = ids => ids.map(d => `<button type="button" class="pill hover:border-brand hover:text-brand" data-task-open="${esc(d)}">${esc(d)}</button>`).join(' ');
+  const meta = [
+    ['Holder', t.holder ? esc(t.holder) + (t.lease_expires_at ? ` <span class="text-dim">until ${esc(new Date(t.lease_expires_at).toLocaleString())}</span>` : '') : '<span class="text-dim">unclaimed</span>'],
+    ['Updated', t.updated_at ? `${esc(relAge(t.updated_at) || '')} <span class="text-dim">${esc(t.by || '')}</span>` : (f.status ? esc(relAge(f.status.created_at) || '') : '-')],
+    ['Depends on', (t.depends_on || []).length ? depLinks(t.depends_on) : '<span class="text-dim">none</span>'],
+    ['Blocks', (dependents || []).length ? depLinks(dependents) : '<span class="text-dim">none</span>'],
+  ];
+  const section = (label, inner) => `<section class="mt-4"><h4 class="mb-1 text-xs font-semibold uppercase tracking-wide text-dim">${label}</h4>${inner}</section>`;
+  const pre = (text, tone, prose) => `<div class="whitespace-pre-wrap break-words rounded border border-line bg-bg p-2.5 ${prose ? 'text-sm leading-relaxed' : 'font-mono text-xs'} ${tone || 'text-ink'}">${esc(text)}</div>`;
+  const factMeta = x => `<div class="mt-1 font-mono text-xs text-dim">${esc(x.author || x.writer || '')} · ${esc(relAge(x.created_at) || '')}</div>`;
+  return `
+    <header class="flex items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <span id="taskModalTitle" class="break-all font-mono text-base font-semibold text-ink">${esc(id)}</span>
+          ${state ? pill(state) : ''}${t.ready ? '<span class="pill text-live">ready</span>' : ''}
+        </div>
+        ${title ? `<div class="kanban-clamp mt-1 text-sm text-ink">${esc(title)}</div>` : ''}
+      </div>
+      <button type="button" class="btn shrink-0" data-modal-close aria-label="Close">close</button>
+    </header>
+    <dl class="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+      ${meta.map(([k, v]) => `<dt class="text-dim">${k}</dt><dd class="min-w-0 break-words font-mono text-xs leading-6">${v}</dd>`).join('')}
+    </dl>
+    ${f.status || t.status ? section('Status', pre((f.status && f.status.body) || t.status, stateClass(state)) + (f.status ? factMeta(f.status) : '')) : ''}
+    ${f.question ? section('Question', pre(f.question.body, 'text-wait') + factMeta(f.question)) : ''}
+    ${f.answer ? section('Answer', pre(f.answer.body) + factMeta(f.answer)) : ''}
+    ${section('Task', body ? pre(body, '', true) + factMeta(f.task) : '<div class="text-sm text-dim">no task text found</div>')}`;
+}
+
+let modalSeq = 0; // guards a slow fetch from painting over a newer modal
+
+function taskModal() {
+  let d = $('#taskModal');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'taskModal';
+  d.className = 'task-modal';
+  d.setAttribute('aria-labelledby', 'taskModalTitle');
+  d.innerHTML = '<div id="taskModalBody"></div>';
+  // A click on the backdrop lands on the dialog itself, not its content.
+  d.addEventListener('click', e => {
+    if (e.target === d || e.target.closest('[data-modal-close]')) { d.close(); return; }
+    const dep = e.target.closest('[data-task-open]');
+    if (dep) openTaskModal(dep.dataset.taskOpen);
+  });
+  document.body.appendChild(d);
+  return d;
+}
+
+async function openTaskModal(id) {
+  if (!id || !ns) return;
+  const d = taskModal();
+  const seq = ++modalSeq;
+  const row = boardTasks.get(id) || null;
+  const dependents = [...boardTasks.values()].filter(t => (t.depends_on || []).includes(id)).map(t => t.id);
+  $('#taskModalBody').innerHTML = taskModalHTML(id, row, null, dependents) + '<div class="mt-4 text-xs text-dim">loading…</div>';
+  if (!d.open) d.showModal();
+  const recall = key => api('/v1/namespaces/' + encodeURIComponent(ns) + '/memories?limit=5&prefix=' + encodeURIComponent(key))
+    .then(r => exactFact(Array.isArray(r) ? r : (r.facts || r.memories || []), key)).catch(() => null);
+  const [task, status, question, answer] = await Promise.all([
+    recall('/tasks/' + id), recall('/tasks/' + id + '/status'), recall('/questions/' + id), recall('/answers/' + id),
+  ]);
+  if (seq !== modalSeq) return;
+  $('#taskModalBody').innerHTML = taskModalHTML(id, row, { task, status, question, answer }, dependents);
 }
 
 // ---------------------------------------------------------------------
@@ -1944,7 +2048,7 @@ setInterval(pollCurrent, 5000);
 if (typeof module === 'object' && module && module.exports) {
   module.exports = {
     esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
-    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL, consBadge, boardTabsHTML, tabCount, kanbanStates, kanbanHTML,
+    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL, consBadge, boardTabsHTML, tabCount, kanbanStates, kanbanHTML, taskModalHTML, exactFact, memberChipsHTML, nsHeader,
     pageOffset, PAGE_SIZE,
     getDiagUnsupported: () => diagUnsupported,
     setDiagUnsupported: v => { diagUnsupported = v; },

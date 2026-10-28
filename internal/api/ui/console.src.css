@@ -152,6 +152,28 @@ table.data-table tbody tr:hover td {
 .kanban-card.open {
   @apply border-dim;
 }
+/* Namespace header chips: a figure with its label, and one chip per
+   member. Same hairline weight as .pill, roomier for reading. */
+.stat-chip {
+  @apply inline-flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1;
+}
+.member-chip {
+  @apply inline-flex max-w-full shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line px-2 py-0.5 font-mono text-xs text-ink;
+}
+.next-chip {
+  @apply inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-live/40 bg-live/10 px-2.5 py-1 text-ink hover:border-live;
+}
+
+/* Task detail modal: a native <dialog>, so Escape and focus handling come
+   from the browser. Full width minus the gutter on phones. */
+.task-modal {
+  @apply m-auto max-h-[85vh] w-[min(760px,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-line bg-surface p-4 text-ink shadow-2xl;
+}
+.task-modal::backdrop {
+  background: color-mix(in srgb, var(--color-bg) 70%, transparent);
+  backdrop-filter: blur(2px);
+}
+
 .kanban-clamp {
   display: -webkit-box;
   -webkit-line-clamp: 2;

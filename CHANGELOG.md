@@ -117,9 +117,13 @@ that must be earned by the transport and the file it lands in.
 - **Kanban task board.** The board's state filter is a row of tabs
   (Open, All and each state) with per-state counts. Open and All show a
   kanban with one column per state, each loading 20 cards at a time;
-  blocked and review cards show their status line, and a click expands
-  a card to the full status and dependencies. A single state shows the
-  paged table. `GET /v1/namespaces/{ns}/tasks?sort=recent` orders rows
+  blocked and review cards show their status line. Clicking a card, a
+  table row or the "next" chip opens a task modal with the full task
+  text, status, holder and lease, dependencies and the tasks it blocks
+  (each clickable), and any `/questions` or `/answers` for it. A single
+  state shows the paged table. The namespace header shows its figures as
+  stat chips, and members as chips sorted by last seen, with the full
+  address and role on hover. `GET /v1/namespaces/{ns}/tasks?sort=recent` orders rows
   newest update first, which the Done column and tab use.
 
 ### Changed
