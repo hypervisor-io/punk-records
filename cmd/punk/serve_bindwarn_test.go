@@ -163,12 +163,13 @@ func TestServeWarnsOnNonLoopbackBindWithoutKeys(t *testing.T) {
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 	select {
-	case <-waitCh: // listen refused on the unroutable address: expected
+	case err := <-waitCh: // listen refused on the unroutable address: expected
+		t.Logf("serve exited: %v", err)
 	case <-time.After(20 * time.Second):
 		// The address was somehow routable and the server is alive;
 		// the warning fired before the listener either way.
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		<-waitCh
+		t.Logf("serve stopped: %v", <-waitCh)
 	}
 	out := errBuf.String()
 	if !strings.Contains(out, openBindWarningHead(addr)) {
@@ -207,7 +208,7 @@ func TestServeNoOpenBindWarningOnLoopback(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	_ = cmd.Process.Signal(syscall.SIGTERM)
-	<-waitCh
+	t.Logf("serve stopped: %v", <-waitCh)
 	if out := errBuf.String(); strings.Contains(out, "OPEN HTTP BIND") {
 		t.Fatalf("loopback bind must not warn in the real serve path; stderr:\n%s", out)
 	}
@@ -225,10 +226,11 @@ func TestServeNoOpenBindWarningWithKey(t *testing.T) {
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 	select {
-	case <-waitCh:
+	case err := <-waitCh:
+		t.Logf("serve exited: %v", err)
 	case <-time.After(20 * time.Second):
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		<-waitCh
+		t.Logf("serve stopped: %v", <-waitCh)
 	}
 	if out := errBuf.String(); strings.Contains(out, "OPEN HTTP BIND") {
 		t.Fatalf("non-loopback bind with a key must not warn; stderr:\n%s", out)

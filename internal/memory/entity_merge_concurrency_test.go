@@ -89,7 +89,9 @@ func TestConcurrentEntityMergesCannotLoseLineage(t *testing.T) {
 	close(e.release[0])
 	if err := <-done1; err != nil {
 		close(e.release[1])
-		<-done2
+		if err2 := <-done2; err2 != nil {
+			t.Log(err2)
+		}
 		t.Fatal(err)
 	}
 	close(e.release[1])
@@ -165,7 +167,9 @@ func TestRevertApplyOverlapRejectsStalePlan(t *testing.T) {
 	close(e.release[0])
 	if err := <-done1; err != nil {
 		close(e.release[1])
-		<-done2
+		if err2 := <-done2; err2 != nil {
+			t.Log(err2)
+		}
 		t.Fatalf("revert: %v", err)
 	}
 	close(e.release[1])

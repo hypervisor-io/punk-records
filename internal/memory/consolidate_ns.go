@@ -364,37 +364,47 @@ func (s *Store) LiveFactsPage(ctx context.Context, ns, prefix, cursor string, li
 	if !ok {
 		return []Fact{}, "", nil
 	}
-	sessionsEnd, _ := prefixUpper(sessionKeyPrefix)
-	out := []Fact{}
-	batch := limit + 1 // one extra row tells whether a next page exists
-query:
-	for {
-		rows, err := s.db.QueryContext(ctx, s.db.Rebind(latestLivePageSQL),
-			nsID, likePrefix(prefix), store.TimeToDB(s.now()), cursor, batch)
-		if err != nil {
-			return nil, "", fmt.Errorf("facts page: %w", err)
-		}
-		facts, err := s.scanFacts(ctx, ns, nsID, rows)
-		rows.Close()
-		if err != nil {
-			return nil, "", err
-		}
-		for _, f := range facts {
-			if !includeSessions && strings.HasPrefix(f.Key, sessionKeyPrefix) {
-				cursor = sessionsEnd // skip the whole session block in one hop
-				continue query
-			}
-			if len(out) == limit {
-				return out, out[limit-1].Key, nil
-			}
-			out = append(out, f)
-			cursor = f.Key
-		}
-		if len(facts) < batch {
-			return out, "", nil
-		}
+	// Session capture is filtered in SQL, not skipped by moving the
+	// cursor past it: a byte-wise upper bound is not an upper bound under
+	// a Postgres locale collation, where the jump could land before the
+	// session keys again and loop forever.
+	skip := likePrefix(sessionKeyPrefix)
+	if includeSessions {
+		skip = ""
 	}
+	rows, err := s.db.QueryContext(ctx, s.db.Rebind(liveFactsPageSQL),
+		nsID, likePrefix(prefix), store.TimeToDB(s.now()), cursor, limit+1, skip)
+	if err != nil {
+		return nil, "", fmt.Errorf("facts page: %w", err)
+	}
+	facts, err := s.scanFacts(ctx, ns, nsID, rows)
+	rows.Close()
+	if err != nil {
+		return nil, "", err
+	}
+	if len(facts) > limit { // the extra row says a next page exists
+		return facts[:limit], facts[limit-1].Key, nil
+	}
+	return facts, "", nil
 }
+
+// liveFactsPageSQL is latestLivePageSQL with an optional key exclusion:
+// $6 is a LIKE pattern to leave out, or an empty string to keep
+// everything.
+const liveFactsPageSQL = `
+SELECT ` + factCols + `
+FROM memories m
+JOIN (
+    SELECT key, MAX(created_at) AS mc
+    FROM memories
+    WHERE namespace_id = $1 AND key LIKE $2 ESCAPE '\' AND key > $4
+      AND ($6 = '' OR key NOT LIKE $6 ESCAPE '\')
+    GROUP BY key
+) latest ON m.key = latest.key AND m.created_at = latest.mc
+WHERE m.namespace_id = $1 AND m.action <> 'tombstone'
+  AND (m.expiration_date IS NULL OR m.expiration_date > $3)
+ORDER BY m.key
+LIMIT $5`
 
 // ConsolidationStatus is the recorded outcome of an apply.
 type ConsolidationStatus struct {

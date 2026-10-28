@@ -238,8 +238,9 @@ func TestUnreadTrailerCache(t *testing.T) {
 				`{"namespace":"ns-a","agent":%q}`, agent))}}
 		return tr.line(context.Background(), req)
 	}
-	if want := "2 unread for two in ns-a: call read_messages"; line("two") != want || line("two") != want {
-		t.Fatalf("trailer = %q, want %q", line("two"), want)
+	// Two calls: the second must come from the cache, with the same text.
+	if want, first, second := "2 unread for two in ns-a: call read_messages", line("two"), line("two"); first != want || second != want {
+		t.Fatalf("trailer = %q then %q, want %q", first, second, want)
 	}
 	if counts["ns-a/two"] != 1 {
 		t.Fatalf("cache hit within TTL recounted: counts = %v", counts)

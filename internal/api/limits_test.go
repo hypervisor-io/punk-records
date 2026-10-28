@@ -256,7 +256,7 @@ func TestStreamCapCoversNamespaceStream(t *testing.T) {
 // an over-release that must not corrupt the count.
 func TestConcurrencyLimiterCapsAndReleases(t *testing.T) {
 	l := newConcurrencyLimiter(2)
-	if !l.acquire("a") || !l.acquire("a") {
+	if first, second := l.acquire("a"), l.acquire("a"); !first || !second {
 		t.Fatal("the first two acquires must succeed")
 	}
 	if l.acquire("a") {
@@ -280,7 +280,7 @@ func TestConcurrencyLimiterCapsAndReleases(t *testing.T) {
 	if n := l.inUse("a"); n != 0 {
 		t.Fatalf("inUse(a) after over-release = %d, want 0", n)
 	}
-	if !l.acquire("a") || !l.acquire("a") {
+	if first, second := l.acquire("a"), l.acquire("a"); !first || !second {
 		t.Fatal("cap must be intact after an over-release")
 	}
 	if l.acquire("a") {

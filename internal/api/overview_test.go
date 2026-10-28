@@ -253,7 +253,7 @@ func TestOverviewCache(t *testing.T) {
 	if n := getOverview(t, c.Server).Totals.Facts; n != 1 {
 		t.Fatalf("past TTL facts = %d, want the stale 1 served while refreshing", n)
 	}
-	c.Server.overview.settle()
+	c.overview.settle()
 	if n := getOverview(t, c.Server).Totals.Facts; n != 2 {
 		t.Fatalf("after refresh facts = %d, want recomputed 2", n)
 	}
@@ -283,7 +283,7 @@ func TestNamespaceIndexCached(t *testing.T) {
 	if n := count(); n != 1 {
 		t.Fatalf("past TTL namespaces = %d, want the stale 1 served while refreshing", n)
 	}
-	c.Server.nsSums.settle()
+	c.nsSums.settle()
 	if n := count(); n != 2 {
 		t.Fatalf("after refresh namespaces = %d, want recomputed 2", n)
 	}
@@ -398,8 +398,8 @@ func TestTTLCacheStaleWhileRevalidate(t *testing.T) {
 func TestWarmCachesFillsOverview(t *testing.T) {
 	c := newClockedServer(t)
 	c.write(t, 0, "one", "/k", "v")
-	c.Server.WarmCaches(context.Background())
-	c.Server.overview.settle()
+	c.WarmCaches(context.Background())
+	c.overview.settle()
 	c.write(t, 0, "one", "/k2", "v") // after the warm-up: not visible yet
 	if n := getOverview(t, c.Server).Totals.Facts; n != 1 {
 		t.Fatalf("facts = %d, want the warmed 1", n)

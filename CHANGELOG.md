@@ -126,6 +126,23 @@ that must be earned by the transport and the file it lands in.
   address and role on hover. `GET /v1/namespaces/{ns}/tasks?sort=recent` orders rows
   newest update first, which the Done column and tab use.
 
+- **Connect and login export the server to new shells.** `punk connect
+  <client>` and `punk login` write the resolved `PUNK_URL` and, when
+  there is one, `PUNK_API_KEY` to `~/.punk/env` (owner-only, rewritten on
+  every run) and add a marked block to `~/.bashrc` (and `~/.zshrc` when
+  it exists) that sources it, so CLI hooks and terminal-launched clients
+  use the same server and key. The key itself never goes into the rc
+  file. `--no-shell-env` skips it. Services and desktop apps do not read
+  shell rc files; they still take the key from the MCP entry connect
+  writes and from the credentials file.
+- **`punk connect opencode --messaging`.** OpenCode's messaging bridge
+  was on only when `PUNK_MESSAGING=1` reached the OpenCode process, which
+  a systemd `opencode serve` or the desktop app never gets from a shell rc
+  file. The flag bakes messaging on into the plugin; a non-empty
+  `PUNK_MESSAGING` still overrides it (`1` on, anything else off), a
+  re-run without the flag keeps the installed setting, and
+  `--messaging=false` turns it off.
+
 ### Changed
 
 - **Exact-match sender allowlist (P3-C).** `PUNK_MESSAGING_FROM` entries
@@ -173,23 +190,6 @@ that must be earned by the transport and the file it lands in.
   a value the user already chose is left alone; `--keep-idle-unload`
   skips it). After a restart the plugin still starts only when a client
   first touches the project directory.
-- **Connect and login export the server to new shells.** `punk connect
-  <client>` and `punk login` write the resolved `PUNK_URL` and, when
-  there is one, `PUNK_API_KEY` to `~/.punk/env` (owner-only, rewritten on
-  every run) and add a marked block to `~/.bashrc` (and `~/.zshrc` when
-  it exists) that sources it, so CLI hooks and terminal-launched clients
-  use the same server and key. The key itself never goes into the rc
-  file. `--no-shell-env` skips it. Services and desktop apps do not read
-  shell rc files; they still take the key from the MCP entry connect
-  writes and from the credentials file.
-- **`punk connect opencode --messaging`.** OpenCode's messaging bridge
-  was on only when `PUNK_MESSAGING=1` reached the OpenCode process, which
-  a systemd `opencode serve` or the desktop app never gets from a shell rc
-  file. The flag bakes messaging on into the plugin; a non-empty
-  `PUNK_MESSAGING` still overrides it (`1` on, anything else off), a
-  re-run without the flag keeps the installed setting, and
-  `--messaging=false` turns it off.
-
 - **Client-neutral command text.** The shared command render carried a
   per-client invocation token, so the Codex copy under `$CODEX_HOME` and
   the copy at the shared `~/.agents/skills` root differed and Codex listed

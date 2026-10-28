@@ -14,7 +14,7 @@ import (
 // that must not widen the cap.
 func TestAwaitLimiterCapsAndReleases(t *testing.T) {
 	l := newAwaitLimiter(2)
-	if !l.acquire("alice") || !l.acquire("alice") {
+	if first, second := l.acquire("alice"), l.acquire("alice"); !first || !second {
 		t.Fatal("the first two acquires must succeed")
 	}
 	if l.acquire("alice") {
@@ -30,7 +30,7 @@ func TestAwaitLimiterCapsAndReleases(t *testing.T) {
 	l.release("alice")
 	l.release("alice")
 	l.release("alice") // over-release: must be a no-op
-	if !l.acquire("alice") || !l.acquire("alice") {
+	if first, second := l.acquire("alice"), l.acquire("alice"); !first || !second {
 		t.Fatal("cap must be intact after an over-release")
 	}
 	if l.acquire("alice") {

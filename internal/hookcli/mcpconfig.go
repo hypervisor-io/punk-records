@@ -438,7 +438,7 @@ func connectOpenCodeMCPJSONC(configPath string, o MCPEntryOpts, entry map[string
 	if err != nil {
 		return false, fmt.Errorf("merge OpenCode JSONC: %w", err)
 	}
-	out := original
+	var out []byte
 	punk := gjson.GetBytes(normalized, "mcp.punk")
 	if punk.Exists() {
 		start, end := punk.Index, punk.Index+len(punk.Raw)

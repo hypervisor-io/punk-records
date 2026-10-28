@@ -97,10 +97,11 @@ specs:
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-waitCh:
+		case err := <-waitCh:
+			t.Logf("serve helper exited: %v", err)
 		case <-time.After(15 * time.Second):
 			_ = cmd.Process.Kill()
-			<-waitCh
+			t.Logf("serve helper killed: %v", <-waitCh)
 		}
 	})
 

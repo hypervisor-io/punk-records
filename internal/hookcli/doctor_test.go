@@ -40,15 +40,15 @@ func doctorFakeServer(t *testing.T, diagnosticsBody string) *httptest.Server {
 func doctorFakeServerNS(t *testing.T, ns, diagnosticsBody string, allowLookup bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case r.URL.Path == "/v1/agent/namespace":
+		case "/v1/agent/namespace":
 			if !allowLookup {
 				t.Errorf("namespace lookup must not run when the hook command pins --ns")
 			}
 			_, _ = w.Write([]byte(`{"namespace":"` + ns + `"}`))
-		case r.URL.Path == "/v1/namespaces/"+ns+"/messages/diagnostics":
+		case "/v1/namespaces/" + ns + "/messages/diagnostics":
 			_, _ = w.Write([]byte(diagnosticsBody))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
