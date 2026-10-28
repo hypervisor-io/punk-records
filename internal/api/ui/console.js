@@ -191,6 +191,8 @@ function setNS(name) {
   ns = name;
   localStorage.setItem('ns', name);
   pageOffset.board = 0;
+  kanbanShown = {};
+  kanbanOpen = new Set();
   memWanted = MEM_PAGE;
   diagUnsupported = false; // probe the diagnostics route once for the newly selected namespace
   renderNamespaces();
@@ -655,23 +657,73 @@ $('#view').addEventListener('click', e => {
 // Board view
 // ---------------------------------------------------------------------
 
+// The board's state tabs. 'open' and '' (all) render as a kanban with
+// one column per state; a single state renders the paged table. Counts
+// come from the server's per-namespace totals, not the visible page.
+const BOARD_TABS = [
+  ['open', 'Open'], ['', 'All'], ['pending', 'Pending'], ['in_progress', 'In progress'],
+  ['review', 'Review'], ['blocked', 'Blocked'], ['done', 'Done'],
+];
+// Kanban column order and the dot colour per state (same palette as the
+// overview's taskBar).
+const KANBAN_COLS = [
+  ['pending', 'Pending', 'bg-dim'], ['in_progress', 'In progress', 'bg-ink'],
+  ['review', 'Review', 'bg-wait'], ['blocked', 'Blocked', 'bg-brand'], ['done', 'Done', 'bg-live'],
+];
+const KANBAN_PAGE = 20;
+
+let boardState = 'open';
+let kanbanShown = {};          // state -> cards requested for that column
+let kanbanOpen = new Set();    // task ids whose card is expanded
+
+const isKanban = st => st === 'open' || st === '';
+const kanbanStates = st => KANBAN_COLS.map(c => c[0]).filter(s => st === '' || s !== 'done');
+
+// tabCount is a tab's badge: 'open' is everything not done.
+function tabCount(st, c) {
+  if (!c) return null;
+  if (st === '') return c.total || 0;
+  if (st === 'open') return (c.total || 0) - (c.done || 0);
+  return c[st] || 0;
+}
+
+function boardTabsHTML(active, counts) {
+  return BOARD_TABS.map(([st, label]) => {
+    const n = tabCount(st, counts);
+    return `<button type="button" role="tab" aria-selected="${st === active}" data-board-state="${esc(st)}" class="tab-btn${st === active ? ' on' : ''}">${esc(label)}${n === null ? '' : ` <span class="ml-1 font-mono text-xs text-dim">${n}</span>`}</button>`;
+  }).join('');
+}
+
 function mountBoard(el) {
   el.innerHTML = `
-    <div class="mb-3 flex flex-wrap items-center gap-2">
-      <select id="boardState" class="field font-mono text-xs">
-        <option value="open">open (not done)</option>
-        <option value="">all states</option>
-        <option value="pending">pending</option>
-        <option value="in_progress">in progress</option>
-        <option value="review">review</option>
-        <option value="blocked">blocked</option>
-        <option value="done">done</option>
-      </select>
-    </div>
     <div id="boardSummary" class="mb-3"></div>
+    <nav id="boardTabs" role="tablist" aria-label="Task state" class="mb-3 flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line">${boardTabsHTML(boardState, null)}</nav>
     <div id="boardTable"></div>`;
-  $('#boardState', el).addEventListener('change', () => { pageOffset.board = 0; loadBoard(); });
 }
+
+$('#view').addEventListener('click', e => {
+  const tab = e.target.closest('[data-board-state]');
+  if (tab) {
+    boardState = tab.dataset.boardState;
+    pageOffset.board = 0;
+    kanbanShown = {};
+    loadBoardTable();
+    return;
+  }
+  const more = e.target.closest('[data-kanban-more]');
+  if (more) {
+    const st = more.dataset.kanbanMore;
+    kanbanShown[st] = (kanbanShown[st] || KANBAN_PAGE) + KANBAN_PAGE;
+    loadBoardTable();
+    return;
+  }
+  const card = e.target.closest('[data-kanban-card]');
+  if (card) {
+    const id = card.dataset.kanbanCard;
+    if (kanbanOpen.has(id)) kanbanOpen.delete(id); else kanbanOpen.add(id);
+    loadBoardTable();
+  }
+});
 
 async function loadBoard() {
   try {
@@ -682,56 +734,119 @@ async function loadBoard() {
   }
 }
 
-// boardURL is one page of the board, filtered by state ('' = all).
-function boardURL(name, st, offset) {
-  return '/v1/namespaces/' + encodeURIComponent(name) + '/tasks?limit=' + PAGE_SIZE + '&offset=' + offset + (st ? '&state=' + encodeURIComponent(st) : '');
+// boardURL is one page of the board, filtered by state ('' = all). Done
+// tasks come newest first; every other state keeps id (plan) order.
+function boardURL(name, st, offset, limit) {
+  return '/v1/namespaces/' + encodeURIComponent(name) + '/tasks?limit=' + (limit || PAGE_SIZE) + '&offset=' + offset + (st ? '&state=' + encodeURIComponent(st) : '') + (st === 'done' ? '&sort=recent' : '');
+}
+
+function boardSummaryHTML(b) {
+  const names = (b.members || []).map(m => m.agent || m.name || '').filter(Boolean);
+  const shown = names.slice(0, 10).map(esc).join(', ') + (names.length > 10 ? ' +' + (names.length - 10) + ' more' : '');
+  return `
+    <div class="mb-1">${nsHeader()}</div>
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-dim">
+      ${b.next ? `<span>next <b class="font-mono font-normal text-ink">${esc(b.next)}</b></span>` : ''}
+      ${names.length ? `<span>members: ${shown}</span>` : ''}
+    </div>`;
+}
+
+// kanbanCardHTML is one task card. Collapsed it shows id, title, holder
+// and age; expanded it adds the full status line and dependencies.
+function kanbanCardHTML(t) {
+  const open = kanbanOpen.has(t.id);
+  const age = relAge(t.updated_at);
+  const deps = (t.depends_on || []).join(', ');
+  return `<li><button type="button" data-kanban-card="${esc(t.id)}" aria-expanded="${open}" class="kanban-card${open ? ' open' : ''}">
+    <div class="flex items-start justify-between gap-2">
+      <span class="break-all text-sm font-semibold">${esc(t.id)}</span>
+      ${t.ready ? '<span class="pill shrink-0 text-live">ready</span>' : ''}
+    </div>
+    ${t.title ? `<div class="kanban-clamp mt-1 text-xs text-dim">${esc(t.title)}</div>` : ''}
+    ${!open && t.status && (t.state === 'blocked' || t.state === 'review') ? `<div class="kanban-clamp mt-1.5 font-mono text-xs ${stateClass(t.state)}">${esc(t.status)}</div>` : ''}
+    ${open ? `
+      ${t.status ? `<div class="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-ink">${esc(t.status)}</div>` : ''}
+      ${deps ? `<div class="mt-1 font-mono text-xs text-dim">depends on ${esc(deps)}</div>` : ''}` : ''}
+    <div class="mt-2 flex items-center justify-between gap-2 font-mono text-xs text-dim">
+      <span class="truncate">${esc(t.holder || t.by || '')}</span>
+      <span class="shrink-0" title="${esc(t.updated_at || '')}">${esc(age || '')}</span>
+    </div>
+  </button></li>`;
+}
+
+function kanbanHTML(cols) {
+  return `<div class="kanban">${cols.map(({ st, label, dot, b }) => {
+    const tasks = b.tasks || [];
+    const total = b.total !== undefined ? b.total : tasks.length;
+    return `<section class="kanban-col" aria-label="${esc(label)}">
+      <header class="mb-2 flex items-center gap-2 px-1 text-xs">
+        <span class="dot ${dot}"></span><span class="font-semibold text-ink">${esc(label)}</span>
+        <span class="ml-auto font-mono text-dim">${total}</span>
+      </header>
+      ${tasks.length
+        ? `<ul class="flex flex-col gap-2">${tasks.map(kanbanCardHTML).join('')}</ul>`
+        : '<div class="px-1 py-4 text-center text-xs text-dim">none</div>'}
+      ${total > tasks.length ? `<button type="button" class="btn mt-2 w-full" data-kanban-more="${esc(st)}">show ${Math.min(KANBAN_PAGE, total - tasks.length)} more of ${total - tasks.length}</button>` : ''}
+    </section>`;
+  }).join('')}</div>`;
+}
+
+function boardListHTML(b, st, c) {
+  return (b.tasks || []).length
+    ? `<div class="table-wrap"><table class="data-table">
+        <colgroup><col style="width:26%"><col style="width:11%"><col style="width:11%"><col style="width:10%"><col style="width:28%"><col style="width:14%"></colgroup>
+        <thead><tr><th>Task</th><th>State</th><th>Holder</th><th>Depends on</th><th>Status</th><th>Updated</th></tr></thead>
+        <tbody>${b.tasks.map(t => `<tr>
+          <td data-label="Task"><span class="font-semibold">${esc(t.id)}</span><div class="mt-0.5 font-mono text-xs text-dim">${esc(t.title || '')}</div></td>
+          <td data-label="State">${pill(t.state)}${t.ready ? ' <span class="pill text-live">ready</span>' : ''}</td>
+          <td class="mono" data-label="Holder">${esc(t.holder || '-')}</td>
+          <td class="mono" data-label="Depends on">${esc((t.depends_on || []).join(', ') || '-')}</td>
+          <td class="mono" data-label="Status">${esc(t.status || '')}</td>
+          <td class="mono" data-label="Updated">${esc((t.updated_at || '').slice(0, 16))}<div>${esc(t.by || '')}</div></td>
+        </tr>`).join('')}</tbody>
+      </table></div>` + pagerHTML('board', pageOffset.board, PAGE_SIZE, boardRows)
+    : '<div class="empty-state">' + (c.total ? 'no ' + esc(st.replace('_', ' ')) + ' tasks' : 'no tasks yet') + '</div>';
 }
 
 async function loadBoardTable() {
-  if (!ns) { $('#boardSummary').innerHTML = ''; $('#boardTable').innerHTML = '<div class="empty-state">no namespace selected</div>'; return; }
+  if (!ns) {
+    $('#boardSummary').innerHTML = '';
+    $('#boardTabs').innerHTML = boardTabsHTML(boardState, null);
+    $('#boardTable').innerHTML = '<div class="empty-state">no namespace selected</div>';
+    return;
+  }
   try {
-    const st = $('#boardState').value;
+    const st = boardState;
     const reqNS = ns;
-    let b = await api(boardURL(reqNS, st, pageOffset.board));
-    // The board shrank under the current page (tasks finished or were
-    // filtered away): fall back to the last page that still has rows.
-    if (b.total !== undefined && pageOffset.board > 0 && pageOffset.board >= b.total) {
-      pageOffset.board = Math.max(0, Math.floor(Math.max(0, b.total - 1) / PAGE_SIZE) * PAGE_SIZE);
-      b = await api(boardURL(reqNS, st, pageOffset.board));
+    let c, head, body;
+    if (isKanban(st)) {
+      const states = kanbanStates(st);
+      const pages = await Promise.all(states.map(s => api(boardURL(reqNS, s, 0, kanbanShown[s] || KANBAN_PAGE))));
+      if (reqNS !== ns || st !== boardState) return; // switched mid-flight
+      head = pages[0];
+      c = head.counts || {};
+      const cols = states.map((s, i) => {
+        const [, label, dot] = KANBAN_COLS.find(k => k[0] === s);
+        return { st: s, label, dot, b: pages[i] };
+      });
+      body = c.total ? kanbanHTML(cols) : '<div class="empty-state">no tasks yet</div>';
+    } else {
+      let b = await api(boardURL(reqNS, st, pageOffset.board));
+      // The board shrank under the current page (tasks finished or were
+      // filtered away): fall back to the last page that still has rows.
+      if (b.total !== undefined && pageOffset.board > 0 && pageOffset.board >= b.total) {
+        pageOffset.board = Math.max(0, Math.floor(Math.max(0, b.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+        b = await api(boardURL(reqNS, st, pageOffset.board));
+      }
+      if (reqNS !== ns || st !== boardState) return;
+      head = b;
+      c = b.counts || {};
+      boardRows = b.total !== undefined ? b.total : (b.tasks || []).length;
+      body = boardListHTML(b, st, c);
     }
-    if (reqNS !== ns) return; // a namespace switch landed mid-flight
-    boardRows = b.total !== undefined ? b.total : (b.tasks || []).length;
-    const c = b.counts || {};
-    const names = (b.members || []).map(m => m.agent || m.name || '').filter(Boolean);
-    const shown = names.slice(0, 10).map(esc).join(', ') + (names.length > 10 ? ' +' + (names.length - 10) + ' more' : '');
-
-    $('#boardSummary').innerHTML = `
-      <div class="mb-2">${nsHeader()}</div>
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-dim">
-        <span>${c.total || 0} tasks</span>
-        <span>done <b class="font-normal text-ink">${c.done || 0}</b></span>
-        <span>in progress <b class="font-normal text-ink">${c.in_progress || 0}</b></span>
-        <span>review <b class="font-normal text-ink">${c.review || 0}</b></span>
-        <span>blocked <b class="font-normal text-ink">${c.blocked || 0}</b></span>
-        <span>pending <b class="font-normal text-ink">${c.pending || 0}</b></span>
-        ${b.next ? `<span>next <b class="font-normal text-ink">${esc(b.next)}</b></span>` : ''}
-      </div>
-      ${names.length ? `<div class="mt-1 text-xs text-dim">members: ${shown}</div>` : ''}`;
-
-    $('#boardTable').innerHTML = (b.tasks || []).length
-      ? `<div class="table-wrap"><table class="data-table">
-          <colgroup><col style="width:26%"><col style="width:11%"><col style="width:11%"><col style="width:10%"><col style="width:28%"><col style="width:14%"></colgroup>
-          <thead><tr><th>Task</th><th>State</th><th>Holder</th><th>Depends on</th><th>Status</th><th>Updated</th></tr></thead>
-          <tbody>${b.tasks.map(t => `<tr>
-            <td data-label="Task"><span class="font-semibold">${esc(t.id)}</span><div class="mt-0.5 font-mono text-xs text-dim">${esc(t.title || '')}</div></td>
-            <td data-label="State">${pill(t.state)}${t.ready ? ' <span class="pill text-live">ready</span>' : ''}</td>
-            <td class="mono" data-label="Holder">${esc(t.holder || '-')}</td>
-            <td class="mono" data-label="Depends on">${esc((t.depends_on || []).join(', ') || '-')}</td>
-            <td class="mono" data-label="Status">${esc(t.status || '')}</td>
-            <td class="mono" data-label="Updated">${esc((t.updated_at || '').slice(0, 16))}<div>${esc(t.by || '')}</div></td>
-          </tr>`).join('')}</tbody>
-        </table></div>` + pagerHTML('board', pageOffset.board, PAGE_SIZE, boardRows)
-      : '<div class="empty-state">' + (st === 'open' && c.total ? 'every task is done' : 'no tasks match') + '</div>';
+    $('#boardSummary').innerHTML = boardSummaryHTML(head);
+    $('#boardTabs').innerHTML = boardTabsHTML(st, c);
+    $('#boardTable').innerHTML = body;
   } catch (e) {
     $('#boardTable').innerHTML = '<div class="empty-state">' + esc(e.message) + '</div>';
   }
@@ -1829,7 +1944,7 @@ setInterval(pollCurrent, 5000);
 if (typeof module === 'object' && module && module.exports) {
   module.exports = {
     esc, diagWords, relEta, relAge, diagnosticsHTML, fetchDiagnostics, diagFor,
-    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL, consBadge,
+    stateClass, probeAuth, nsIsIdle, taskBar, pagerHTML, pageStep, boardURL, consBadge, boardTabsHTML, tabCount, kanbanStates, kanbanHTML,
     pageOffset, PAGE_SIZE,
     getDiagUnsupported: () => diagUnsupported,
     setDiagUnsupported: v => { diagUnsupported = v; },

@@ -76,7 +76,7 @@ html, body {
    background and an 8px radius; everything else stays flat with rows
    separated by hairlines, per the design plan's principles. */
 .tab-btn {
-  @apply cursor-pointer border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-ink;
+  @apply cursor-pointer whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-ink;
 }
 .tab-btn.on {
   @apply border-brand text-ink;
@@ -132,6 +132,31 @@ table.data-table tbody tr:hover td {
 }
 .dot {
   @apply inline-block h-1.5 w-1.5 rounded-full;
+}
+
+/* Task board kanban: one column per state, side by side, scrolling
+   sideways only inside the board when the columns outgrow the view. */
+.kanban {
+  @apply grid gap-3 overflow-x-auto pb-2;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(240px, 1fr);
+  scroll-snap-type: x proximity;
+}
+.kanban-col {
+  @apply flex min-w-0 flex-col rounded-lg border border-line bg-bg p-2;
+  scroll-snap-align: start;
+}
+.kanban-card {
+  @apply block w-full cursor-pointer rounded-md border border-line bg-surface p-2.5 text-left text-ink hover:border-dim;
+}
+.kanban-card.open {
+  @apply border-dim;
+}
+.kanban-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Below md (768px, the same breakpoint the tab strip switches to a

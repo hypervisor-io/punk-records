@@ -114,6 +114,13 @@ that must be earned by the transport and the file it lands in.
   `LIKE` scan). File-backed SQLite now runs long read-model scans on a
   separate read-only pool, so they no longer stall hooks, MCP calls and
   messaging behind the single read-write connection.
+- **Kanban task board.** The board's state filter is a row of tabs
+  (Open, All and each state) with per-state counts. Open and All show a
+  kanban with one column per state, each loading 20 cards at a time;
+  blocked and review cards show their status line, and a click expands
+  a card to the full status and dependencies. A single state shows the
+  paged table. `GET /v1/namespaces/{ns}/tasks?sort=recent` orders rows
+  newest update first, which the Done column and tab use.
 
 ### Changed
 

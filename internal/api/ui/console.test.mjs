@@ -284,6 +284,32 @@ test('pageStep clamps to the first and last page', () => {
 test('boardURL pages and encodes the state filter', () => {
   assert.equal(c.boardURL('a b', 'open', 50), '/v1/namespaces/a%20b/tasks?limit=' + c.PAGE_SIZE + '&offset=50&state=open');
   assert.equal(c.boardURL('x', '', 0), '/v1/namespaces/x/tasks?limit=' + c.PAGE_SIZE + '&offset=0');
+  assert.equal(c.boardURL('x', 'done', 0, 20), '/v1/namespaces/x/tasks?limit=20&offset=0&state=done&sort=recent');
+});
+
+test('board state tabs count from server totals and mark the active tab', () => {
+  const counts = { total: 10, done: 4, pending: 3, in_progress: 2, review: 1, blocked: 0 };
+  assert.equal(c.tabCount('open', counts), 6, 'open is everything not done');
+  assert.equal(c.tabCount('', counts), 10);
+  assert.equal(c.tabCount('blocked', counts), 0);
+  assert.equal(c.tabCount('open', null), null, 'no counts before the first load');
+  const html = c.boardTabsHTML('review', counts);
+  assert.match(html, /data-board-state="review"[^>]*class="tab-btn on"/);
+  assert.match(html, /data-board-state="open"[^>]*class="tab-btn"/);
+  assert.doesNotMatch(c.boardTabsHTML('open', null), /font-mono/, 'no count badges without counts');
+});
+
+test('kanban shows done only on the all tab and offers more cards per column', () => {
+  assert.deepEqual([...c.kanbanStates('open')], ['pending', 'in_progress', 'review', 'blocked']);
+  assert.deepEqual([...c.kanbanStates('')], ['pending', 'in_progress', 'review', 'blocked', 'done']);
+  const html = c.kanbanHTML([
+    { st: 'pending', label: 'Pending', dot: 'bg-line', b: { total: 25, tasks: [{ id: 't<1>', title: 'x', ready: true }] } },
+    { st: 'review', label: 'Review', dot: 'bg-wait', b: { total: 0, tasks: [] } },
+  ]);
+  assert.match(html, /data-kanban-card="t&lt;1&gt;"/, 'task ids are escaped');
+  assert.match(html, /data-kanban-more="pending">show 20 more of 24/);
+  assert.doesNotMatch(html, /data-kanban-more="review"/);
+  assert.match(html, />none</);
 });
 
 test('nsIsIdle treats missing and old activity as idle', () => {

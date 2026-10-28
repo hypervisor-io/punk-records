@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,7 @@ func boardPaging(r *http.Request) (limit, offset int, err error) {
 
 // handleTaskBoard is GET /v1/namespaces/{ns}/tasks: the joined task board.
 // ?state= filters rows (a task state, or open for every state but done);
+// ?sort=recent orders them newest update first instead of by id;
 // ?limit and ?offset page them (total reports the
 // filtered count); ?wait=<seconds> long-polls for a change first (capped
 // at boardWaitMax) and adds changed and changes to the reply.
@@ -63,6 +65,11 @@ func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	if state != "" && state != boardStateOpen && !taskStateValid(state) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("state must be one of %s, %s", strings.Join(memory.TaskStates, ", "), boardStateOpen))
+		return
+	}
+	order := r.URL.Query().Get("sort")
+	if order != "" && order != "id" && order != "recent" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("sort must be id or recent"))
 		return
 	}
 	limit, offset, err := boardPaging(r)
@@ -109,6 +116,9 @@ func (s *Server) handleTaskBoard(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		b.Tasks = kept
+	}
+	if order == "recent" {
+		sort.SliceStable(b.Tasks, func(i, j int) bool { return b.Tasks[i].UpdatedAt.After(b.Tasks[j].UpdatedAt) })
 	}
 	// Paging applies after the state filter: total is the filtered row
 	// count, counts stay whole-board, and a page past the end is empty.

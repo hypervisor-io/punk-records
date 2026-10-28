@@ -102,6 +102,15 @@ func TestTaskBoardPaging(t *testing.T) {
 	if p := get("?state=open"); p.Total != 4 || ids(p) != "A,B,C,D" {
 		t.Fatalf("open = %+v", p)
 	}
+	if rr := do(t, s, http.MethodPost, ns+"/tasks/C/status", `{"state":"in_progress","summary":"x"}`); rr.Code != http.StatusCreated {
+		t.Fatalf("status C = %d: %s", rr.Code, rr.Body)
+	}
+	if p := get("?sort=recent&limit=2"); p.Total != 5 || ids(p) != "C,E" {
+		t.Fatalf("recent = %+v", p)
+	}
+	if rr := do(t, s, http.MethodGet, ns+"/tasks?sort=bogus", ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad sort = %d, want 400", rr.Code)
+	}
 	if rr := do(t, s, http.MethodPost, ns+"/tasks/A/status", `{"state":"open","summary":"x"}`); rr.Code != http.StatusBadRequest {
 		t.Fatalf("open as a status = %d, want 400", rr.Code)
 	}
