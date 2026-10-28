@@ -282,7 +282,9 @@ function renderPulse() {
   if (!lastRefreshOK) return;
   const secs = Math.max(0, Math.round((Date.now() - lastRefreshOK) / 1000));
   dot.className = 'dot bg-live' + (secs < 6 ? ' live-dot' : '');
-  text.textContent = secs < 2 ? 'live' : 'updated ' + secs + 's ago';
+  // At most "updated 59s ago": #pulse has a fixed width so the centred
+  // namespace label never shifts as this text changes.
+  text.textContent = secs < 2 ? 'live' : 'updated ' + (secs < 60 ? secs + 's' : Math.min(99, Math.floor(secs / 60)) + 'm') + ' ago';
   $('#pulse').title = 'last refresh ' + new Date(lastRefreshOK).toLocaleTimeString();
 }
 setInterval(renderPulse, 1000);
