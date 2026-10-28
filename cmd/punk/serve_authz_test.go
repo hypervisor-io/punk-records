@@ -29,7 +29,19 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// connect and login write the user's shell env (~/.punk/env and a
+	// ~/.bashrc block); no test may reach the real home directory.
+	home, err := os.MkdirTemp("", "punk-cmd-test-home-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("USERPROFILE", home)
+	_ = os.Unsetenv("PUNK_CREDENTIALS")
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
 }
 
 func freePort(t *testing.T) int {

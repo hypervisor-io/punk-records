@@ -197,3 +197,42 @@ func TestConnectOpenCodeMessagingFlag(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectExportsShellEnv: a connect writes ~/.punk/env (owner-only,
+// with the resolved URL and key) and a ~/.bashrc block that sources it;
+// --no-shell-env skips both and never reaches the target's flag set.
+func TestConnectExportsShellEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  bool
+	}{{"default", nil, true}, {"opt out", []string{"--no-shell-env"}, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("PUNK_URL", "")
+			t.Setenv("PUNK_API_KEY", "prk_test")
+			t.Setenv("PUNK_CREDENTIALS", "")
+			args := append([]string{"opencode", "--no-skill", "--no-mcp", "--url", "http://127.0.0.1:19090"}, tc.extra...)
+			if _, err := captureStdout(t, func() error { return cmdConnect(args) }); err != nil {
+				t.Fatal(err)
+			}
+			env, err := os.ReadFile(filepath.Join(home, ".punk", "env"))
+			if !tc.want {
+				if err == nil {
+					t.Fatal("--no-shell-env still wrote the env file")
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(env), "export PUNK_URL='http://127.0.0.1:19090'") || !strings.Contains(string(env), "export PUNK_API_KEY='prk_test'") {
+				t.Fatalf("env %v:\n%s", err, env)
+			}
+			rc, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+			if !strings.Contains(string(rc), "# >>> punk >>>") || strings.Contains(string(rc), "prk_test") {
+				t.Fatalf("bashrc:\n%s", rc)
+			}
+		})
+	}
+}

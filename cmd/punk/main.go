@@ -3118,32 +3118,101 @@ func cmdHookInbox(args []string) error {
 // rerun the command with --project inside a repo.
 func cmdConnect(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex|cline [--project] [--url URL]")
+		return fmt.Errorf("usage: punk connect claude-code|cursor|opencode|pi|antigravity|copilot|hermes|openclaw|codex|cline [--project] [--url URL] [--no-shell-env]")
 	}
 	target := args[0]
+	if target == "verify" {
+		return cmdConnectVerify(args[1:])
+	}
+	rest, urlFlag, shellEnv := connectShellEnvArgs(args[1:])
+	if err := cmdConnectTarget(target, rest); err != nil {
+		return err
+	}
+	if shellEnv {
+		writeShellEnvForCommand(urlFlag)
+	}
+	return nil
+}
+
+// connectShellEnvArgs takes --no-shell-env out of a connect target's
+// arguments (the dispatcher owns it, not each target's flag set) and
+// reads the target's --url so the shell env exports the same server.
+func connectShellEnvArgs(args []string) (rest []string, urlFlag string, shellEnv bool) {
+	shellEnv = true
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--no-shell-env" || a == "-no-shell-env":
+			shellEnv = false
+			continue
+		case a == "--url" || a == "-url":
+			if i+1 < len(args) {
+				urlFlag = args[i+1]
+			}
+		case strings.HasPrefix(a, "--url=") || strings.HasPrefix(a, "-url="):
+			urlFlag = a[strings.Index(a, "=")+1:]
+		}
+		rest = append(rest, a)
+	}
+	return rest, urlFlag, shellEnv
+}
+
+// writeShellEnvForCommand exports the resolved server URL and API key to
+// new shells (see hookcli.WriteShellEnv). Best effort: a failure is a
+// warning, never a failed connect or login.
+func writeShellEnvForCommand(urlFlag string) {
+	serverURL, apiKey, err := resolveServerForCommand(urlFlag)
+	if err != nil {
+		fmt.Printf("punk: warning - shell env not written: %v\n", err)
+		return
+	}
+	writeShellEnv(serverURL, apiKey)
+}
+
+func writeShellEnv(serverURL, apiKey string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("punk: warning - shell env not written: %v\n", err)
+		return
+	}
+	res, err := hookcli.WriteShellEnv(hookcli.ShellEnvPath(), hookcli.ShellRCFiles(home), serverURL, apiKey)
+	if err != nil {
+		fmt.Printf("punk: warning - shell env not written: %v\n", err)
+		return
+	}
+	what := "PUNK_URL"
+	if apiKey != "" {
+		what = "PUNK_URL and PUNK_API_KEY"
+	}
+	fmt.Printf("punk: %s exported to new shells from %s (%s, owner-only)\n", what, res.EnvPath, changedWord(res.EnvChanged))
+	for _, rc := range res.RCChanged {
+		fmt.Printf("punk: added a block to %s that sources it; open a new shell or run: . %s\n", rc, res.EnvPath)
+	}
+}
+
+// cmdConnectTarget runs one connect target.
+func cmdConnectTarget(target string, args []string) error {
 	switch target {
 	case "claude-code":
-		return cmdConnectClaudeCode(args[1:])
+		return cmdConnectClaudeCode(args)
 	case "cursor":
-		return cmdConnectCursor(args[1:])
+		return cmdConnectCursor(args)
 	case "opencode":
-		return cmdConnectOpenCode(args[1:])
+		return cmdConnectOpenCode(args)
 	case "pi":
-		return cmdConnectPi(args[1:])
+		return cmdConnectPi(args)
 	case "antigravity":
-		return cmdConnectAntigravity(args[1:])
+		return cmdConnectAntigravity(args)
 	case "copilot":
-		return cmdConnectCopilot(args[1:])
+		return cmdConnectCopilot(args)
 	case "hermes":
-		return cmdConnectHermes(args[1:])
+		return cmdConnectHermes(args)
 	case "openclaw":
-		return cmdConnectOpenClaw(args[1:])
+		return cmdConnectOpenClaw(args)
 	case "codex":
-		return cmdConnectCodex(args[1:])
+		return cmdConnectCodex(args)
 	case "cline":
-		return cmdConnectCline(args[1:])
-	case "verify":
-		return cmdConnectVerify(args[1:])
+		return cmdConnectCline(args)
 	default:
 		return fmt.Errorf("unknown connect target %q, only \"claude-code\", \"cursor\", \"opencode\", \"pi\", \"antigravity\", \"copilot\", \"hermes\", \"openclaw\", \"codex\", and \"cline\" are supported", target)
 	}
@@ -4903,6 +4972,7 @@ func cmdLogin(args []string) error {
 	urlFlag := fs.String("url", "", "punk-records server URL (required)")
 	key := fs.String("api-key", "", "bearer token from 'punk apikey create' on the server")
 	keyStdin := fs.Bool("api-key-stdin", false, "read the token from stdin (first line)")
+	noShellEnv := fs.Bool("no-shell-env", false, "do not export PUNK_URL/PUNK_API_KEY to new shells (~/.punk/env, sourced from ~/.bashrc)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4925,6 +4995,9 @@ func cmdLogin(args []string) error {
 		fmt.Printf("punk: saved %s (no API key; fine for an unauthenticated server)\n", path)
 	} else {
 		fmt.Printf("punk: saved %s\n", path)
+	}
+	if !*noShellEnv {
+		writeShellEnv(*urlFlag, token)
 	}
 	return nil
 }
